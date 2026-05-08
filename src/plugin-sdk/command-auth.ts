@@ -5,17 +5,29 @@ import {
 } from "../auto-reply/command-status-builders.js";
 import type { ChannelId } from "../channels/plugins/types.public.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { resolveDmGroupAccessWithLists } from "../security/dm-policy-shared.js";
+import { resolveEffectiveAllowFromLists } from "../security/dm-policy-shared.js";
+import { normalizeStringEntries } from "../shared/string-normalization.js";
 import {
   expandAllowFromWithAccessGroups,
   type AccessGroupMembershipResolver,
 } from "./access-groups.js";
+import {
+  createChannelIngressPluginId,
+  createChannelIngressSubject,
+  decideChannelIngress,
+  findChannelIngressCommandGate,
+  resolveChannelIngressState,
+  type ChannelIngressAdapter,
+} from "./channel-ingress.js";
 export {
   ACCESS_GROUP_ALLOW_FROM_PREFIX,
   expandAllowFromWithAccessGroups,
   parseAccessGroupAllowFromEntry,
   resolveAccessGroupAllowFromMatches,
+  resolveAccessGroupAllowFromState,
   type AccessGroupMembershipResolver,
+  type AccessGroupMembershipLookup,
+  type ResolvedAccessGroupAllowFromState,
 } from "./access-groups.js";
 export { buildCommandsPaginationKeyboard } from "./telegram-command-ui.js";
 export {
@@ -114,7 +126,8 @@ export type ResolveSenderCommandAuthorizationParams = {
   resolveAccessGroupMembership?: AccessGroupMembershipResolver;
   readAllowFromStore: () => Promise<string[]>;
   shouldComputeCommandAuthorized: (rawBody: string, cfg: OpenClawConfig) => boolean;
-  resolveCommandAuthorizedFromAuthorizers: (params: {
+  /** @deprecated Command authorization is resolved by channel ingress. Kept for runtime injection compatibility. */
+  resolveCommandAuthorizedFromAuthorizers?: (params: {
     useAccessGroups: boolean;
     authorizers: Array<{ configured: boolean; allowed: boolean }>;
   }) => boolean;
@@ -151,6 +164,45 @@ export function resolveDirectDmAuthorizationOutcome(params: {
     return "unauthorized";
   }
   return "allowed";
+}
+
+function normalizeCommandAuthDmPolicy(policy: string | null | undefined) {
+  return policy === "pairing" ||
+    policy === "allowlist" ||
+    policy === "open" ||
+    policy === "disabled"
+    ? policy
+    : "allowlist";
+}
+
+function createSenderCommandIngressAdapter(params: {
+  senderId: string;
+  isSenderAllowed: (senderId: string, allowFrom: string[]) => boolean;
+}): ChannelIngressAdapter {
+  return {
+    normalizeEntries({ entries }) {
+      return {
+        matchable: normalizeStringEntries(entries).map((entry, index) => ({
+          opaqueEntryId: `entry-${index + 1}`,
+          kind: "stable-id",
+          value: entry,
+        })),
+        invalid: [],
+        disabled: [],
+      };
+    },
+    matchSubject({ entries }) {
+      const matchedEntryIds = entries
+        .filter(
+          (entry) => entry.value === "*" || params.isSenderAllowed(params.senderId, [entry.value]),
+        )
+        .map((entry) => entry.opaqueEntryId);
+      return {
+        matched: matchedEntryIds.length > 0,
+        matchedEntryIds,
+      };
+    },
+  };
 }
 
 /** Runtime-backed wrapper around sender command authorization for grouped helper surfaces. */
@@ -217,32 +269,53 @@ export async function resolveSenderCommandAuthorization(
       });
     }
   }
-  const access = resolveDmGroupAccessWithLists({
-    isGroup: params.isGroup,
-    dmPolicy: params.dmPolicy,
-    groupPolicy: "allowlist",
+  const { effectiveAllowFrom, effectiveGroupAllowFrom } = resolveEffectiveAllowFromLists({
     allowFrom: configuredAllowFrom,
     groupAllowFrom: configuredGroupAllowFrom,
     storeAllowFrom: dmStoreAllowFrom,
-    isSenderAllowed: (allowFrom) => params.isSenderAllowed(params.senderId, allowFrom),
+    dmPolicy: params.dmPolicy,
   });
-  const effectiveAllowFrom = access.effectiveAllowFrom;
-  const effectiveGroupAllowFrom = access.effectiveGroupAllowFrom;
   const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
   const senderAllowedForCommands = params.isSenderAllowed(
     params.senderId,
     params.isGroup ? effectiveGroupAllowFrom : effectiveAllowFrom,
   );
-  const ownerAllowedForCommands = params.isSenderAllowed(params.senderId, effectiveAllowFrom);
-  const groupAllowedForCommands = params.isSenderAllowed(params.senderId, effectiveGroupAllowFrom);
+  const commandState = await resolveChannelIngressState({
+    channelId: createChannelIngressPluginId(channel ?? "command-auth"),
+    accountId,
+    subject: createChannelIngressSubject({
+      opaqueId: "sender-id",
+      value: params.senderId,
+    }),
+    conversation: {
+      kind: params.isGroup ? "group" : "direct",
+      id: params.senderId,
+    },
+    adapter: createSenderCommandIngressAdapter({
+      senderId: params.senderId,
+      isSenderAllowed: params.isSenderAllowed,
+    }),
+    event: {
+      kind: "message",
+      authMode: "none",
+      mayPair: false,
+    },
+    allowlists: {
+      commandOwner: effectiveAllowFrom,
+      commandGroup: effectiveGroupAllowFrom,
+    },
+  });
+  const commandDecision = decideChannelIngress(commandState, {
+    dmPolicy: normalizeCommandAuthDmPolicy(params.dmPolicy),
+    groupPolicy: "open",
+    command: {
+      useAccessGroups,
+      allowTextCommands: false,
+      hasControlCommand: shouldComputeAuth,
+    },
+  });
   const commandAuthorized = shouldComputeAuth
-    ? params.resolveCommandAuthorizedFromAuthorizers({
-        useAccessGroups,
-        authorizers: [
-          { configured: effectiveAllowFrom.length > 0, allowed: ownerAllowedForCommands },
-          { configured: effectiveGroupAllowFrom.length > 0, allowed: groupAllowedForCommands },
-        ],
-      })
+    ? findChannelIngressCommandGate(commandDecision)?.allowed === true
     : undefined;
 
   return {
