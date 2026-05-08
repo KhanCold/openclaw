@@ -12,6 +12,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   extractCites,
   isDmAllowed,
+  resolveTlonDmAccessWithIngress,
+  resolveTlonCommandAuthorizationWithIngress,
   isGroupInviteAllowed,
   isBotMentioned,
   extractMessageText,
@@ -106,6 +108,52 @@ describe("Security: DM Allowlist", () => {
       const allowlist = [" ~zod ", "~bus"];
       expect(isDmAllowed("~zod", allowlist)).toBe(true);
       expect(isDmAllowed(" ~zod ", allowlist)).toBe(true);
+    });
+
+    it("matches DM allowlist decisions through channel ingress", async () => {
+      await expect(resolveTlonDmAccessWithIngress("~zod", [])).resolves.toMatchObject({
+        allowed: false,
+      });
+      await expect(resolveTlonDmAccessWithIngress("zod", ["~zod"])).resolves.toMatchObject({
+        allowed: true,
+      });
+      await expect(resolveTlonDmAccessWithIngress("~nec", ["~zod"])).resolves.toMatchObject({
+        allowed: false,
+      });
+    });
+
+    it("redacts Tlon ship names and allowlist entries from ingress state/decision", async () => {
+      const access = await resolveTlonDmAccessWithIngress("~raw-sensitive-ship", [
+        "~raw-sensitive-ship",
+      ]);
+
+      const serialized = JSON.stringify({
+        state: access.state,
+        decision: access.decision,
+      });
+      expect(serialized).not.toContain("~raw-sensitive-ship");
+      expect(serialized).not.toContain("raw-sensitive-ship");
+    });
+
+    it("uses the ingress command gate for owner-only command authorization", async () => {
+      await expect(
+        resolveTlonCommandAuthorizationWithIngress({
+          senderShip: "~zod",
+          ownerShip: "zod",
+          useAccessGroups: true,
+        }),
+      ).resolves.toMatchObject({
+        commandAuthorized: true,
+      });
+      await expect(
+        resolveTlonCommandAuthorizationWithIngress({
+          senderShip: "~nec",
+          ownerShip: "~zod",
+          useAccessGroups: true,
+        }),
+      ).resolves.toMatchObject({
+        commandAuthorized: false,
+      });
     });
   });
 });

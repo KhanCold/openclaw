@@ -60,7 +60,7 @@ export async function buildInboundContext(
   const { account, log } = deps;
 
   // ---- 1. Access ----
-  const accessResult = runAccessStage(event, deps);
+  const accessResult = await runAccessStage(event, deps);
   if (accessResult.kind === "block") {
     return accessResult.context;
   }
@@ -107,6 +107,7 @@ export async function buildInboundContext(
       sessionKey: route.sessionKey,
       userContent,
       processedAttachments: processed,
+      access,
     });
 
     if (gateOutcome.kind === "skip") {

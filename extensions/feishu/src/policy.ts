@@ -2,6 +2,18 @@ import {
   normalizeAccountId,
   resolveMergedAccountConfig,
 } from "openclaw/plugin-sdk/account-resolution";
+import {
+  createChannelIngressPluginId,
+  createChannelIngressStringAdapter,
+  createChannelIngressSubject,
+  decideChannelIngress,
+  findChannelIngressCommandGate,
+  type ChannelIngressDecision,
+  type ChannelIngressIdentifierKind,
+  type ChannelIngressState,
+  type ChannelIngressSubject,
+  resolveChannelIngressState,
+} from "openclaw/plugin-sdk/channel-ingress";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { evaluateSenderGroupAccessForPolicy } from "openclaw/plugin-sdk/group-access";
 import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/text-runtime";
@@ -10,8 +22,23 @@ import { detectIdType } from "./targets.js";
 import type { FeishuConfig } from "./types.js";
 
 type FeishuAllowlistMatch = AllowlistMatch<"wildcard" | "id">;
+type FeishuDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
+type FeishuGroupPolicy = "open" | "allowlist" | "disabled" | "allowall";
+type NormalizedFeishuGroupPolicy = Exclude<FeishuGroupPolicy, "allowall">;
+type FeishuIngressResult = {
+  state: ChannelIngressState;
+  decision: ChannelIngressDecision;
+};
 
 const FEISHU_PROVIDER_PREFIX_RE = /^(feishu|lark):/i;
+const FEISHU_CHANNEL_ID = createChannelIngressPluginId("feishu");
+const FEISHU_ID_KIND = "plugin:feishu-id" as const satisfies ChannelIngressIdentifierKind;
+const feishuIngressAdapter = createChannelIngressStringAdapter({
+  kind: FEISHU_ID_KIND,
+  normalizeEntry: normalizeFeishuAllowEntry,
+  normalizeSubject: normalizeFeishuAllowEntry,
+  isWildcardEntry: (entry) => normalizeFeishuAllowEntry(entry) === "*",
+});
 
 function stripRepeatedFeishuProviderPrefixes(raw: string): string {
   let normalized = raw.trim();
@@ -123,6 +150,254 @@ export function resolveFeishuAllowlistMatch(params: {
   }
 
   return { allowed: false };
+}
+
+function normalizeFeishuDmPolicy(policy: string | null | undefined): FeishuDmPolicy {
+  return policy === "open" ||
+    policy === "pairing" ||
+    policy === "allowlist" ||
+    policy === "disabled"
+    ? policy
+    : "pairing";
+}
+
+function normalizeFeishuGroupPolicy(policy: FeishuGroupPolicy): NormalizedFeishuGroupPolicy {
+  return policy === "allowall" ? "open" : policy;
+}
+
+function createFeishuIngressSubject(params: {
+  primaryId?: string | null;
+  alternateIds?: Array<string | null | undefined>;
+  opaquePrefix: string;
+}): ChannelIngressSubject {
+  const ids = [params.primaryId, ...(params.alternateIds ?? [])]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  return createChannelIngressSubject({
+    identifiers: ids.map((value, index) => ({
+      kind: FEISHU_ID_KIND,
+      opaqueId: `${params.opaquePrefix}-${index + 1}`,
+      value,
+    })),
+  });
+}
+
+export async function resolveFeishuDmIngressAccess(params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+  dmPolicy?: string | null;
+  allowFrom?: Array<string | number> | null;
+  storeAllowFrom?: Array<string | number> | null;
+  senderOpenId: string;
+  senderUserId?: string | null;
+  conversationId: string;
+  mayPair: boolean;
+}): Promise<FeishuIngressResult & { effectiveAllowFrom: Array<string | number> }> {
+  const state = await resolveChannelIngressState({
+    channelId: FEISHU_CHANNEL_ID,
+    accountId: normalizeAccountId(params.accountId) ?? "default",
+    subject: createFeishuIngressSubject({
+      primaryId: params.senderOpenId,
+      alternateIds: [params.senderUserId],
+      opaquePrefix: "sender",
+    }),
+    conversation: {
+      kind: "direct",
+      id: params.conversationId,
+    },
+    adapter: feishuIngressAdapter,
+    accessGroups: params.cfg.accessGroups,
+    event: {
+      kind: "message",
+      authMode: "inbound",
+      mayPair: params.mayPair,
+    },
+    allowlists: {
+      dm: params.allowFrom ?? [],
+      pairingStore: params.storeAllowFrom ?? [],
+    },
+  });
+  return {
+    state,
+    decision: decideChannelIngress(state, {
+      dmPolicy: normalizeFeishuDmPolicy(params.dmPolicy),
+      groupPolicy: "disabled",
+    }),
+    effectiveAllowFrom: [...(params.allowFrom ?? []), ...(params.storeAllowFrom ?? [])],
+  };
+}
+
+export async function resolveFeishuGroupConversationIngressAccess(params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+  chatId: string;
+  groupPolicy: FeishuGroupPolicy;
+  groupAllowFrom?: Array<string | number> | null;
+  groupExplicitlyConfigured?: boolean;
+}): Promise<FeishuIngressResult> {
+  const groupPolicy = normalizeFeishuGroupPolicy(params.groupPolicy);
+  const groupAllowFrom =
+    groupPolicy === "allowlist" && params.groupExplicitlyConfigured
+      ? [...(params.groupAllowFrom ?? []), params.chatId]
+      : (params.groupAllowFrom ?? []);
+  const state = await resolveChannelIngressState({
+    channelId: FEISHU_CHANNEL_ID,
+    accountId: normalizeAccountId(params.accountId) ?? "default",
+    subject: createFeishuIngressSubject({
+      primaryId: params.chatId,
+      opaquePrefix: "chat",
+    }),
+    conversation: {
+      kind: "group",
+      id: params.chatId,
+    },
+    adapter: feishuIngressAdapter,
+    event: {
+      kind: "message",
+      authMode: "inbound",
+      mayPair: false,
+    },
+    allowlists: {
+      group: groupAllowFrom,
+    },
+  });
+  return {
+    state,
+    decision: decideChannelIngress(state, {
+      dmPolicy: "disabled",
+      groupPolicy,
+    }),
+  };
+}
+
+export async function resolveFeishuGroupSenderIngressAccess(params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+  chatId: string;
+  allowFrom?: Array<string | number> | null;
+  senderOpenId: string;
+  senderUserId?: string | null;
+}): Promise<FeishuIngressResult> {
+  const state = await resolveChannelIngressState({
+    channelId: FEISHU_CHANNEL_ID,
+    accountId: normalizeAccountId(params.accountId) ?? "default",
+    subject: createFeishuIngressSubject({
+      primaryId: params.senderOpenId,
+      alternateIds: [params.senderUserId],
+      opaquePrefix: "sender",
+    }),
+    conversation: {
+      kind: "group",
+      id: params.chatId,
+    },
+    adapter: feishuIngressAdapter,
+    accessGroups: params.cfg.accessGroups,
+    event: {
+      kind: "message",
+      authMode: "inbound",
+      mayPair: false,
+    },
+    allowlists: {
+      group: params.allowFrom ?? [],
+    },
+  });
+  return {
+    state,
+    decision: decideChannelIngress(state, {
+      dmPolicy: "disabled",
+      groupPolicy: "allowlist",
+    }),
+  };
+}
+
+export async function resolveFeishuMentionActivationIngressAccess(params: {
+  accountId?: string | null;
+  chatId: string;
+  requireMention: boolean;
+  mentionedBot: boolean;
+}): Promise<FeishuIngressResult> {
+  const state = await resolveChannelIngressState({
+    channelId: FEISHU_CHANNEL_ID,
+    accountId: normalizeAccountId(params.accountId) ?? "default",
+    subject: createChannelIngressSubject({ identifiers: [] }),
+    conversation: {
+      kind: "group",
+      id: params.chatId,
+    },
+    adapter: feishuIngressAdapter,
+    event: {
+      kind: "message",
+      authMode: "inbound",
+      mayPair: false,
+    },
+    mentionFacts: {
+      canDetectMention: true,
+      wasMentioned: params.mentionedBot,
+    },
+    allowlists: {},
+  });
+  return {
+    state,
+    decision: decideChannelIngress(state, {
+      dmPolicy: "disabled",
+      groupPolicy: "open",
+      activation: {
+        requireMention: params.requireMention,
+        allowTextCommands: false,
+      },
+    }),
+  };
+}
+
+export async function resolveFeishuCommandIngressAccess(params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+  isGroup: boolean;
+  conversationId: string;
+  allowFrom?: Array<string | number> | null;
+  senderOpenId: string;
+  senderUserId?: string | null;
+  useAccessGroups: boolean;
+  hasControlCommand: boolean;
+}): Promise<FeishuIngressResult & { commandAuthorized: boolean }> {
+  const state = await resolveChannelIngressState({
+    channelId: FEISHU_CHANNEL_ID,
+    accountId: normalizeAccountId(params.accountId) ?? "default",
+    subject: createFeishuIngressSubject({
+      primaryId: params.senderOpenId,
+      alternateIds: [params.senderUserId],
+      opaquePrefix: "sender",
+    }),
+    conversation: {
+      kind: params.isGroup ? "group" : "direct",
+      id: params.conversationId,
+    },
+    adapter: feishuIngressAdapter,
+    accessGroups: params.cfg.accessGroups,
+    event: {
+      kind: "message",
+      authMode: "inbound",
+      mayPair: false,
+    },
+    allowlists: {
+      dm: params.isGroup ? [] : ["*"],
+      commandOwner: params.allowFrom ?? [],
+    },
+  });
+  const decision = decideChannelIngress(state, {
+    dmPolicy: params.isGroup ? "disabled" : "open",
+    groupPolicy: params.isGroup ? "open" : "disabled",
+    command: {
+      useAccessGroups: params.useAccessGroups,
+      allowTextCommands: false,
+      hasControlCommand: params.hasControlCommand,
+    },
+  });
+  return {
+    state,
+    decision,
+    commandAuthorized: findChannelIngressCommandGate(decision)?.allowed === true,
+  };
 }
 
 export function resolveFeishuGroupConfig(params: { cfg?: FeishuConfig; groupId?: string | null }) {

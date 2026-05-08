@@ -483,8 +483,9 @@ async function dispatchDiscordCommandInteraction(params: {
     return { accepted: false };
   }
   if (!isDirectMessage) {
-    commandAuthorized = resolveDiscordGuildNativeCommandAuthorized({
+    commandAuthorized = await resolveDiscordGuildNativeCommandAuthorized({
       cfg,
+      accountId,
       discordConfig,
       useAccessGroups,
       commandsAllowFromAccess,

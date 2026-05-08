@@ -8,7 +8,7 @@
  *     `context` directly to its own caller.
  */
 
-import { resolveQQBotAccess, type QQBotAccessResult } from "../../access/index.js";
+import type { QQBotAccessResult } from "../../access/index.js";
 import type { InboundContext, InboundPipelineDeps } from "../inbound-context.js";
 import type { QueuedMessage } from "../message-queue.js";
 import { buildBlockedInboundContext } from "./stub-contexts.js";
@@ -38,7 +38,10 @@ type AccessStageResult = AccessStageAllow | AccessStageBlock;
  * Resolve the routing target, walk the access policy, and decide whether
  * the inbound message should proceed to the rest of the pipeline.
  */
-export function runAccessStage(event: QueuedMessage, deps: InboundPipelineDeps): AccessStageResult {
+export async function runAccessStage(
+  event: QueuedMessage,
+  deps: InboundPipelineDeps,
+): Promise<AccessStageResult> {
   const { account, cfg, runtime, log } = deps;
 
   const isGroupChat = event.type === "guild" || event.type === "group";
@@ -52,9 +55,12 @@ export function runAccessStage(event: QueuedMessage, deps: InboundPipelineDeps):
     peer: { kind: isGroupChat ? "group" : "direct", id: peerId },
   });
 
-  const access = resolveQQBotAccess({
+  const access = await deps.adapters.access.resolveInboundAccess({
+    cfg,
+    accountId: account.accountId,
     isGroup: isGroupChat,
     senderId: event.senderId,
+    conversationId: peerId,
     allowFrom: account.config?.allowFrom,
     groupAllowFrom: account.config?.groupAllowFrom,
     dmPolicy: account.config?.dmPolicy,
@@ -122,6 +128,9 @@ function buildQualifiedTarget(event: QueuedMessage, isGroupChat: boolean): strin
  * access-policy derivative, not a gate derivative.
  */
 export function resolveCommandAuthorized(access: QQBotAccessResult): boolean {
+  if (typeof access.commandAuthorized === "boolean") {
+    return access.commandAuthorized;
+  }
   return (
     access.reasonCode === "dm_policy_open" ||
     access.reasonCode === "dm_policy_allowlisted" ||

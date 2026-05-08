@@ -2,10 +2,7 @@ import type { SlackActionMiddlewareArgs } from "@slack/bolt";
 import type { Block, KnownBlock } from "@slack/web-api";
 import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway-runtime";
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
-import {
-  resolveCommandAuthorization,
-  resolveCommandAuthorizedFromAuthorizers,
-} from "openclaw/plugin-sdk/command-auth-native";
+import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
 import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
 import {
@@ -17,8 +14,11 @@ import {
   SLACK_REPLY_BUTTON_ACTION_ID,
   SLACK_REPLY_SELECT_ACTION_ID,
 } from "../../reply-action-ids.js";
-import { resolveSlackAllowListMatch, resolveSlackUserAllowed } from "../allow-list.js";
-import { authorizeSlackSystemEventSender, resolveSlackEffectiveAllowFrom } from "../auth.js";
+import {
+  authorizeSlackSystemEventSender,
+  resolveSlackCommandIngress,
+  resolveSlackEffectiveAllowFrom,
+} from "../auth.js";
 import { resolveSlackChannelConfig } from "../channel-config.js";
 import type { SlackMonitorContext } from "../context.js";
 import {
@@ -712,15 +712,8 @@ async function resolveSlackBlockActionCommandAuthorized(params: {
   });
   const sender = await params.ctx.resolveUserName(params.parsed.userId).catch(() => undefined);
   const senderName = sender?.name;
-  const ownerAllowed = resolveSlackAllowListMatch({
-    allowList: allowFromLower,
-    id: params.parsed.userId,
-    name: senderName,
-    allowNameMatching: params.ctx.allowNameMatching,
-  }).allowed;
 
-  let channelUsersAllowlistConfigured = false;
-  let channelUserAllowed = false;
+  let channelUsers: Array<string | number> = [];
   if (isRoom && params.parsed.channelId) {
     const channelConfig = resolveSlackChannelConfig({
       channelId: params.parsed.channelId,
@@ -730,26 +723,23 @@ async function resolveSlackBlockActionCommandAuthorized(params: {
       defaultRequireMention: params.ctx.defaultRequireMention,
       allowNameMatching: params.ctx.allowNameMatching,
     });
-    channelUsersAllowlistConfigured =
-      Array.isArray(channelConfig?.users) && channelConfig.users.length > 0;
-    channelUserAllowed = channelUsersAllowlistConfigured
-      ? resolveSlackUserAllowed({
-          allowList: channelConfig?.users,
-          userId: params.parsed.userId,
-          userName: senderName,
-          allowNameMatching: params.ctx.allowNameMatching,
-        })
-      : false;
+    channelUsers = Array.isArray(channelConfig?.users) ? channelConfig.users : [];
   }
 
-  return resolveCommandAuthorizedFromAuthorizers({
-    useAccessGroups: params.ctx.useAccessGroups,
-    authorizers: [
-      { configured: allowFromLower.length > 0, allowed: ownerAllowed },
-      { configured: channelUsersAllowlistConfigured, allowed: channelUserAllowed },
-    ],
+  const commandIngress = await resolveSlackCommandIngress({
+    ctx: params.ctx,
+    senderId: params.parsed.userId,
+    senderName,
+    channelType: params.auth.channelType ?? "channel",
+    channelId: params.parsed.channelId ?? "slack-interaction",
+    ownerAllowFromLower: allowFromLower,
+    channelUsers,
+    allowTextCommands: false,
+    hasControlCommand: true,
+    eventKind: "button",
     modeWhenAccessGroupsOff: "configured",
   });
+  return commandIngress.commandAuthorized;
 }
 
 function enqueueSlackBlockActionEvent(params: {

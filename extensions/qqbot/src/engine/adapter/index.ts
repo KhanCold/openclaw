@@ -14,6 +14,7 @@
  *
  * - {@link HistoryPort} — group history record/build/clear
  * - {@link MentionGatePort} — mention + command gate evaluation
+ * - {@link AccessPort} — inbound sender policy evaluation
  * - {@link AudioConvertPort} — inbound SILK→WAV conversion
  * - {@link OutboundAudioPort} — outbound WAV→SILK conversion
  * - {@link CommandsPort} — slash-command version/approve dependencies
@@ -42,6 +43,8 @@ export interface EngineAdapters {
   history: import("./history.port.js").HistoryPort;
   /** Mention + command gate evaluation — backed by SDK `channel-mention-gating`. */
   mentionGate: import("./mention-gate.port.js").MentionGatePort;
+  /** Inbound sender access policy — backed by SDK channel ingress in the framework bridge. */
+  access: import("./access.port.js").AccessPort;
   /** Inbound audio conversion (SILK→WAV, voice detection). */
   audioConvert: import("./audio.port.js").AudioConvertPort;
   /** Outbound audio conversion (WAV→SILK, audio detection). */

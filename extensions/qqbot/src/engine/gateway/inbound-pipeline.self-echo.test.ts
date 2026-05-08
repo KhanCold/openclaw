@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { QQBotAccessResult } from "../access/index.js";
 import type { RefIndexEntry } from "../ref/types.js";
 import type { InboundPipelineDeps } from "./inbound-context.js";
 import { buildInboundContext } from "./inbound-pipeline.js";
@@ -130,6 +131,20 @@ function makeDeps(overrides: Partial<InboundPipelineDeps> = {}): InboundPipeline
           shouldBypassMention: false,
           implicitMention: false,
         })),
+      },
+      access: {
+        resolveInboundAccess: vi.fn(
+          (input): QQBotAccessResult => ({
+            decision: "allow",
+            reasonCode: input.isGroup ? "group_policy_allowed" : "dm_policy_open",
+            reason: input.isGroup ? "groupPolicy=open" : "dmPolicy=open",
+            effectiveAllowFrom: ["*"],
+            effectiveGroupAllowFrom: [],
+            dmPolicy: "open",
+            groupPolicy: "open",
+          }),
+        ),
+        resolveSlashCommandAuthorization: vi.fn(() => true),
       },
       audioConvert: {
         convertSilkToWav: vi.fn(async () => null),

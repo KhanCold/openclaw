@@ -4,11 +4,7 @@ import {
   resolveInboundMentionDecision,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
-import {
-  DM_GROUP_ACCESS_REASON,
-  resolveDmGroupAccessWithLists,
-} from "openclaw/plugin-sdk/channel-policy";
-import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk/command-auth";
+import { DM_GROUP_ACCESS_REASON } from "openclaw/plugin-sdk/channel-policy";
 import type { MarkdownTableMode, OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { KeyedAsyncQueue } from "openclaw/plugin-sdk/core";
 import { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
@@ -39,6 +35,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
 } from "openclaw/plugin-sdk/text-runtime";
+import { normalizeZalouserAllowEntry, resolveZalouserIngressAccess } from "./access-policy.js";
 import {
   buildZalouserGroupCandidates,
   findZalouserGroupEntry,
@@ -73,10 +70,6 @@ export type ZalouserMonitorResult = {
 };
 
 const ZALOUSER_TEXT_LIMIT = 2000;
-
-function normalizeZalouserEntry(entry: string): string {
-  return entry.replace(/^(zalouser|zlu):/i, "").trim();
-}
 
 function buildNameIndex<T>(items: T[], nameFn: (item: T) => string | undefined): Map<string, T[]> {
   const index = new Map<string, T[]>();
@@ -191,20 +184,6 @@ function logVerbose(core: ZalouserCoreRuntime, runtime: RuntimeEnv, message: str
   if (core.logging.shouldLogVerbose()) {
     runtime.log(`[zalouser] ${message}`);
   }
-}
-
-function isSenderAllowed(senderId: string | undefined, allowFrom: string[]): boolean {
-  if (allowFrom.includes("*")) {
-    return true;
-  }
-  const normalizedSenderId = normalizeOptionalLowercaseString(senderId);
-  if (!normalizedSenderId) {
-    return false;
-  }
-  return allowFrom.some((entry) => {
-    const normalized = normalizeLowercaseStringOrEmpty(entry).replace(/^(zalouser|zlu):/i, "");
-    return normalized === normalizedSenderId;
-  });
 }
 
 function resolveGroupRequireMention(params: {
@@ -368,15 +347,18 @@ async function processMessage(
     !isGroup && dmPolicy !== "allowlist" && dmPolicy !== "open"
       ? await pairing.readAllowFromStore().catch(() => [])
       : [];
-  const accessDecision = resolveDmGroupAccessWithLists({
+  const accessDecision = await resolveZalouserIngressAccess({
+    cfg: config,
+    accountId: account.accountId,
     isGroup,
+    senderId,
+    rawBody: commandBody,
     dmPolicy,
     groupPolicy: senderGroupPolicy,
     allowFrom: configAllowFrom,
     groupAllowFrom: configGroupAllowFrom,
     storeAllowFrom,
-    groupAllowFromFallbackToAllowFrom: false,
-    isSenderAllowed: (allowFrom) => isSenderAllowed(senderId, allowFrom),
+    commandRuntime: core.channel.commands,
   });
   if (isGroup && accessDecision.decision !== "allow") {
     if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_EMPTY_ALLOWLIST) {
@@ -426,23 +408,7 @@ async function processMessage(
     return;
   }
 
-  const { commandAuthorized } = await resolveSenderCommandAuthorization({
-    cfg: config,
-    rawBody: commandBody,
-    isGroup,
-    dmPolicy,
-    configuredAllowFrom: configAllowFrom,
-    configuredGroupAllowFrom: configGroupAllowFrom,
-    senderId,
-    isSenderAllowed,
-    channel: "zalouser",
-    accountId: account.accountId,
-    readAllowFromStore: async () => storeAllowFrom,
-    shouldComputeCommandAuthorized: (body, cfg) =>
-      core.channel.commands.shouldComputeCommandAuthorized(body, cfg),
-    resolveCommandAuthorizedFromAuthorizers: (params) =>
-      core.channel.commands.resolveCommandAuthorizedFromAuthorizers(params),
-  });
+  const commandAuthorized = accessDecision.commandAuthorized;
   const hasControlCommand = core.channel.commands.isControlCommandMessage(commandBody, config);
   if (isGroup && hasControlCommand && commandAuthorized !== true) {
     logVerbose(
@@ -834,10 +800,10 @@ export async function monitorZalouserProvider(
   try {
     const profile = account.profile;
     const allowFromEntries = (account.config.allowFrom ?? [])
-      .map((entry) => normalizeZalouserEntry(String(entry)))
+      .map((entry) => normalizeZalouserAllowEntry(String(entry)))
       .filter((entry) => entry && entry !== "*");
     const groupAllowFromEntries = (account.config.groupAllowFrom ?? [])
-      .map((entry) => normalizeZalouserEntry(String(entry)))
+      .map((entry) => normalizeZalouserAllowEntry(String(entry)))
       .filter((entry) => entry && entry !== "*");
     const allowNameMatching = isDangerousNameMatchingEnabled(account.config);
 
@@ -888,7 +854,7 @@ export async function monitorZalouserProvider(
       const unresolved: string[] = [];
       const nextGroups = { ...groupsConfig };
       for (const entry of groupKeys) {
-        const cleaned = normalizeZalouserEntry(entry);
+        const cleaned = normalizeZalouserAllowEntry(entry);
         if (/^\d+$/.test(cleaned)) {
           if (!nextGroups[cleaned]) {
             nextGroups[cleaned] = groupsConfig[entry];

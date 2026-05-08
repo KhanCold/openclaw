@@ -103,8 +103,6 @@ export const startNostrGatewayAccount: NostrGatewayStart = async (ctx) => {
       rawBody,
       runtime: {
         shouldComputeCommandAuthorized: runtime.channel.commands.shouldComputeCommandAuthorized,
-        resolveCommandAuthorizedFromAuthorizers:
-          runtime.channel.commands.resolveCommandAuthorizedFromAuthorizers,
       },
     });
 

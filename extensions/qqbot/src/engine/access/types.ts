@@ -50,4 +50,6 @@ export interface QQBotAccessResult {
   /** The dm/group policies that were used (after defaults were applied). */
   dmPolicy: QQBotDmPolicy;
   groupPolicy: QQBotGroupPolicy;
+  /** Sender-level command authorization, when provided by the injected access adapter. */
+  commandAuthorized?: boolean;
 }

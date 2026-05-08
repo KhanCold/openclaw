@@ -216,6 +216,7 @@ export async function startGateway(ctx: CoreGatewayContext): Promise<void> {
     cfg: ctx.cfg,
     log,
     runtime,
+    adapters,
     onReady: ctx.onReady,
     onResumed: ctx.onResumed,
     onError: ctx.onError,

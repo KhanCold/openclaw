@@ -5,7 +5,11 @@ import {
   hasExplicitFeishuGroupConfig,
   isFeishuGroupAllowed,
   resolveFeishuAllowlistMatch,
+  resolveFeishuCommandIngressAccess,
+  resolveFeishuDmIngressAccess,
   resolveFeishuGroupConfig,
+  resolveFeishuGroupConversationIngressAccess,
+  resolveFeishuGroupSenderIngressAccess,
   resolveFeishuReplyPolicy,
 } from "./policy.js";
 import type { FeishuConfig } from "./types.js";
@@ -330,5 +334,107 @@ describe("isFeishuGroupAllowed", () => {
         senderId: "oc_group_999",
       }),
     ).toBe(false);
+  });
+});
+
+describe("Feishu channel ingress", () => {
+  it("admits explicitly configured groups through ingress without leaking raw chat ids", async () => {
+    const cfg = createCfg({
+      groupPolicy: "allowlist",
+      groups: {
+        oc_sensitive_group: { requireMention: false },
+      },
+    });
+
+    const result = await resolveFeishuGroupConversationIngressAccess({
+      cfg,
+      accountId: "default",
+      chatId: "oc_sensitive_group",
+      groupPolicy: "allowlist",
+      groupAllowFrom: [],
+      groupExplicitlyConfigured: true,
+    });
+
+    expect(result.decision.admission).toBe("dispatch");
+    expect(JSON.stringify({ state: result.state, decision: result.decision })).not.toContain(
+      "oc_sensitive_group",
+    );
+  });
+
+  it("matches DM access groups through ingress without leaking raw user ids", async () => {
+    const cfg = {
+      accessGroups: {
+        operators: {
+          type: "message.senders",
+          members: {
+            feishu: ["ou_sensitive_user"],
+          },
+        },
+      },
+      channels: {
+        feishu: {
+          dmPolicy: "allowlist",
+          allowFrom: ["accessGroup:operators"],
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = await resolveFeishuDmIngressAccess({
+      cfg,
+      accountId: "default",
+      dmPolicy: "allowlist",
+      allowFrom: ["accessGroup:operators"],
+      storeAllowFrom: [],
+      senderOpenId: "ou_sensitive_user",
+      senderUserId: "on_sensitive_user",
+      conversationId: "ou_sensitive_user",
+      mayPair: true,
+    });
+
+    expect(result.decision.admission).toBe("dispatch");
+    expect(JSON.stringify({ state: result.state, decision: result.decision })).not.toContain(
+      "ou_sensitive_user",
+    );
+  });
+
+  it("uses ingress command gates for Feishu command authorization", async () => {
+    const cfg = createCfg({ allowFrom: ["ou_admin"] });
+
+    const result = await resolveFeishuCommandIngressAccess({
+      cfg,
+      accountId: "default",
+      isGroup: true,
+      conversationId: "oc_group",
+      allowFrom: ["ou_admin"],
+      senderOpenId: "ou_admin",
+      senderUserId: "on_admin",
+      useAccessGroups: true,
+      hasControlCommand: true,
+    });
+
+    expect(result.commandAuthorized).toBe(true);
+    expect(result.decision.admission).toBe("dispatch");
+  });
+
+  it("uses ingress sender gates for Feishu group sender allowlists", async () => {
+    const cfg = createCfg({ groupSenderAllowFrom: ["ou_allowed"] });
+
+    const allowed = await resolveFeishuGroupSenderIngressAccess({
+      cfg,
+      accountId: "default",
+      chatId: "oc_group",
+      allowFrom: ["ou_allowed"],
+      senderOpenId: "ou_allowed",
+    });
+    const blocked = await resolveFeishuGroupSenderIngressAccess({
+      cfg,
+      accountId: "default",
+      chatId: "oc_group",
+      allowFrom: ["ou_allowed"],
+      senderOpenId: "ou_blocked",
+    });
+
+    expect(allowed.decision.admission).toBe("dispatch");
+    expect(blocked.decision.admission).toBe("drop");
   });
 });

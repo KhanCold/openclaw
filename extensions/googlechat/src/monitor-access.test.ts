@@ -303,11 +303,7 @@ describe("googlechat inbound access policy", () => {
       ok: true,
     });
 
-    expect(resolveDmGroupAccessWithLists).toHaveBeenCalledWith(
-      expect.objectContaining({
-        allowFrom: ["accessGroup:operators", "users/alice"],
-      }),
-    );
+    expect(resolveDmGroupAccessWithLists).not.toHaveBeenCalled();
     expect(readAllowFromStore).not.toHaveBeenCalled();
   });
 
@@ -320,6 +316,7 @@ describe("googlechat inbound access policy", () => {
     resolveSenderScopedGroupPolicy.mockReturnValue("open");
     resolveSenderScopedGroupPolicy.mockClear();
     resolveDmGroupAccessWithLists.mockClear();
+    const logVerbose = vi.fn();
 
     await expect(
       applyInboundAccessPolicy({
@@ -333,21 +330,45 @@ describe("googlechat inbound access policy", () => {
             },
           },
         } as never,
+        logVerbose,
       }),
-    ).resolves.toEqual({
-      ok: true,
-      commandAuthorized: undefined,
-      effectiveWasMentioned: false,
-      groupSystemPrompt: undefined,
-    });
+    ).resolves.toEqual({ ok: false });
 
     expect(resolveSenderScopedGroupPolicy).not.toHaveBeenCalled();
-    expect(resolveDmGroupAccessWithLists).toHaveBeenCalledWith(
-      expect.objectContaining({
-        groupPolicy: "allowlist",
-        groupAllowFrom: [],
-      }),
+    expect(resolveDmGroupAccessWithLists).not.toHaveBeenCalled();
+    expect(logVerbose).toHaveBeenCalledWith(
+      "drop group message (sender policy blocked, reason=groupPolicy=allowlist (empty allowlist), space=spaces/AAA)",
     );
+  });
+
+  it("keeps configured space users sender-scoped when group policy is open", async () => {
+    primeCommonDefaults();
+    resolveAllowlistProviderRuntimeGroupPolicy.mockReturnValue({
+      groupPolicy: "open",
+      providerMissingFallbackApplied: false,
+    });
+    allowInboundGroupTraffic();
+    const logVerbose = vi.fn();
+
+    await expect(
+      applyInboundAccessPolicy({
+        account: {
+          accountId: "default",
+          config: {
+            groupPolicy: "open",
+            groups: {
+              "spaces/AAA": {
+                users: ["users/bob"],
+                requireMention: false,
+              },
+            },
+          },
+        } as never,
+        logVerbose,
+      }),
+    ).resolves.toEqual({ ok: false });
+
+    expect(logVerbose).toHaveBeenCalledWith("drop group message (sender not allowed, users/alice)");
   });
 
   it("drops unauthorized group control commands", async () => {
@@ -356,15 +377,28 @@ describe("googlechat inbound access policy", () => {
       effectiveGroupAllowFrom: [],
       effectiveWasMentioned: false,
     });
+    resolveAllowlistProviderRuntimeGroupPolicy.mockReturnValue({
+      groupPolicy: "open",
+      providerMissingFallbackApplied: false,
+    });
     const core = createCore();
     core.channel.commands.shouldComputeCommandAuthorized.mockReturnValue(true);
-    core.channel.commands.resolveCommandAuthorizedFromAuthorizers.mockReturnValue(false);
     core.channel.commands.isControlCommandMessage.mockReturnValue(true);
     const logVerbose = vi.fn();
 
     await expect(
       applyInboundAccessPolicy({
         core: core as never,
+        account: {
+          accountId: "default",
+          config: {
+            groups: {
+              "spaces/AAA": {
+                requireMention: false,
+              },
+            },
+          },
+        } as never,
         rawBody: "/admin",
         logVerbose,
       }),

@@ -16,7 +16,7 @@
  * orchestrator.
  */
 
-import { createQQBotSenderMatcher, normalizeQQBotAllowFrom } from "../../access/index.js";
+import type { QQBotAccessResult } from "../../access/index.js";
 import { DEFAULT_GROUP_PROMPT, resolveGroupSettings } from "../../config/group.js";
 import { resolveGroupActivation } from "../../group/activation.js";
 import { toAttachmentSummaries, type HistoryEntry } from "../../group/history.js";
@@ -24,6 +24,7 @@ import { detectWasMentioned, hasAnyMention, resolveImplicitMention } from "../..
 import { getRefIndex } from "../../ref/store.js";
 import type { InboundGroupInfo, InboundPipelineDeps } from "../inbound-context.js";
 import { isMergedTurn, type QueuedMessage } from "../message-queue.js";
+import { resolveCommandAuthorized } from "./access-stage.js";
 
 // ─────────────────────────── Types ───────────────────────────
 
@@ -50,6 +51,7 @@ interface GroupGateStageInput {
   userContent: string;
   /** Already-processed attachments (downloaded). Available for history recording. */
   processedAttachments?: import("../inbound-attachments.js").ProcessedAttachments;
+  access: QQBotAccessResult;
 }
 
 // ─────────────────────────── Stage ───────────────────────────
@@ -105,7 +107,7 @@ export function runGroupGateStage(input: GroupGateStageInput): GroupGateStageRes
   const content = (event.content ?? "").trim();
   const isControlCommand = Boolean(deps.isControlCommand?.(content));
   const commandAuthorized =
-    deps.allowTextCommands !== false && isSenderAllowedForCommands(event.senderId, deps);
+    deps.allowTextCommands !== false && resolveCommandAuthorized(input.access);
 
   // ---- 5. Gate evaluation ----
   // Layer 1 (ignoreOtherMentions) is QQ-specific and handled by
@@ -241,18 +243,6 @@ function resolveGateWithPort(params: {
     effectiveWasMentioned: decision.effectiveWasMentioned,
     shouldBypassMention: decision.shouldBypassMention,
   };
-}
-
-/**
- * Test whether the sender is on the DM `allowFrom` list.
- */
-function isSenderAllowedForCommands(senderId: string, deps: InboundPipelineDeps): boolean {
-  const raw = deps.account.config?.allowFrom;
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return true;
-  }
-  const normalized = normalizeQQBotAllowFrom(raw);
-  return createQQBotSenderMatcher(senderId)(normalized);
 }
 
 function recordGroupHistory(params: {

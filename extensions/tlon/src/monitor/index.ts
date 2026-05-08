@@ -38,10 +38,11 @@ import {
   extractMessageText,
   formatModelName,
   isBotMentioned,
-  isDmAllowed,
+  isDmAllowedWithIngress,
   isGroupInviteAllowed,
   isSummarizationRequest,
   resolveAuthorizedMessageText,
+  resolveTlonCommandAuthorizationWithIngress,
   stripBotMention,
 } from "./utils.js";
 
@@ -483,12 +484,12 @@ export async function monitorTlonProvider(opts: MonitorTlonOpts = {}): Promise<v
 
     if (shouldComputeAuth) {
       const useAccessGroups = cfg.commands?.useAccessGroups !== false;
-      const senderIsOwner = isOwner(senderShip);
-
-      commandAuthorized = core.channel.commands.resolveCommandAuthorizedFromAuthorizers({
+      const commandAccess = await resolveTlonCommandAuthorizationWithIngress({
+        senderShip,
+        ownerShip: effectiveOwnerShip,
         useAccessGroups,
-        authorizers: [{ configured: Boolean(effectiveOwnerShip), allowed: senderIsOwner }],
       });
+      commandAuthorized = commandAccess.commandAuthorized;
 
       // Log when non-owner attempts a slash command (will be silently ignored by Gateway)
       if (!commandAuthorized) {
@@ -961,7 +962,10 @@ export async function monitorTlonProvider(opts: MonitorTlonOpts = {}): Promise<v
           }
 
           // Auto-accept if on allowlist and auto-accept is enabled
-          if (effectiveAutoAcceptDmInvites && isDmAllowed(ship, effectiveDmAllowlist)) {
+          if (
+            effectiveAutoAcceptDmInvites &&
+            (await isDmAllowedWithIngress(ship, effectiveDmAllowlist))
+          ) {
             try {
               await api.poke({
                 app: "chat",
@@ -977,7 +981,7 @@ export async function monitorTlonProvider(opts: MonitorTlonOpts = {}): Promise<v
           }
 
           // If owner is configured and ship is not on allowlist, queue approval
-          if (effectiveOwnerShip && !isDmAllowed(ship, effectiveDmAllowlist)) {
+          if (effectiveOwnerShip && !(await isDmAllowedWithIngress(ship, effectiveDmAllowlist))) {
             const approval = createPendingApproval({
               type: "dm",
               requestingShip: ship,
@@ -1075,7 +1079,7 @@ export async function monitorTlonProvider(opts: MonitorTlonOpts = {}): Promise<v
           }
 
           // For DMs from others, check allowlist
-          if (!isDmAllowed(senderShip, effectiveDmAllowlist)) {
+          if (!(await isDmAllowedWithIngress(senderShip, effectiveDmAllowlist))) {
             // If owner is configured, queue approval request
             if (effectiveOwnerShip) {
               const approval = createPendingApproval({

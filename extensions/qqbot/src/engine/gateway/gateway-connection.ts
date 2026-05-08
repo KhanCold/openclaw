@@ -6,6 +6,7 @@
  */
 
 import WebSocket from "ws";
+import type { EngineAdapters } from "../adapter/index.js";
 import {
   trySlashCommand,
   type SlashCommandHandlerContext,
@@ -37,6 +38,7 @@ interface GatewayConnectionContext {
   cfg: unknown;
   log?: EngineLogger;
   runtime: GatewayPluginRuntime;
+  adapters: EngineAdapters;
   onReady?: (data: unknown) => void;
   /** Called when a RESUMED event is received (reconnect success). */
   onResumed?: (data: unknown) => void;
@@ -201,6 +203,12 @@ export class GatewayConnection {
         log,
         getMessagePeerId: (msg) => this.msgQueue.getMessagePeerId(msg),
         getQueueSnapshot: (peerId) => this.msgQueue.getSnapshot(peerId),
+        resolveCommandAuthorized: (params) =>
+          this.ctx.adapters.access.resolveSlashCommandAuthorization({
+            cfg: this.ctx.cfg,
+            accountId: account.accountId,
+            ...params,
+          }),
       };
 
       const trySlashCommandOrEnqueue = async (msg: QueuedMessage): Promise<void> => {
