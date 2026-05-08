@@ -500,7 +500,7 @@ function commandResultFromDecision(decision: ChannelIngressDecision): SlackComma
   const commandGate = findChannelIngressCommandGate(decision);
   return {
     decision,
-    commandAuthorized: commandGate?.allowed ?? true,
+    commandAuthorized: commandGate?.allowed === true,
     shouldBlockControlCommand: commandGate?.command?.shouldBlockControlCommand ?? false,
   };
 }

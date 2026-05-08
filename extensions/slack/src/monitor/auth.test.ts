@@ -5,6 +5,7 @@ const readStoreAllowFromForDmPolicyMock = vi.hoisted(() => vi.fn());
 let authorizeSlackSystemEventSender: typeof import("./auth.js").authorizeSlackSystemEventSender;
 let clearSlackAllowFromCacheForTest: typeof import("./auth.js").clearSlackAllowFromCacheForTest;
 let resolveSlackEffectiveAllowFrom: typeof import("./auth.js").resolveSlackEffectiveAllowFrom;
+let resolveSlackCommandIngress: typeof import("./auth.js").resolveSlackCommandIngress;
 
 vi.mock("openclaw/plugin-sdk/security-runtime", async () => {
   const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/security-runtime")>(
@@ -302,6 +303,35 @@ describe("authorizeSlackSystemEventSender", () => {
       channelType: "channel",
       channelName: undefined,
     });
+  });
+});
+
+describe("resolveSlackCommandIngress", () => {
+  beforeAll(async () => {
+    ({ resolveSlackCommandIngress, clearSlackAllowFromCacheForTest } = await import("./auth.js"));
+  });
+
+  beforeEach(() => {
+    clearSlackAllowFromCacheForTest();
+  });
+
+  it("does not authorize commands when sender denial stops before the command gate", async () => {
+    const result = await resolveSlackCommandIngress({
+      ctx: makeAuthorizeCtx(),
+      senderId: "U_DENIED",
+      channelType: "channel",
+      channelId: "C1",
+      ownerAllowFromLower: ["u_owner"],
+      channelUsers: ["U_ALLOWED"],
+      allowTextCommands: false,
+      hasControlCommand: true,
+      eventKind: "button",
+      modeWhenAccessGroupsOff: "configured",
+    });
+
+    expect(result.decision.decision).toBe("block");
+    expect(result.commandAuthorized).toBe(false);
+    expect(result.shouldBlockControlCommand).toBe(false);
   });
 });
 
