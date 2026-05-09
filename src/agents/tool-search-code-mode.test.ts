@@ -202,4 +202,65 @@ describe("Tool Search Code Mode", () => {
       undefined,
     );
   });
+
+  it("does not expose the host process to model-authored code", async () => {
+    const [runtimeCodeTool] = createToolSearchCodeModeTools({
+      sessionId: "session-escape",
+      sessionKey: "agent:main:main",
+      config: {},
+    });
+
+    await expect(
+      runtimeCodeTool.execute("call-escape", {
+        code: `return Function("return process")();`,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      runtimeCodeTool.execute("call-constructor-escape", {
+        code: `return globalThis.constructor.constructor("return process")();`,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("terminates async continuations that block the event loop after a bridge call", async () => {
+    const codeTool = pluginTool(
+      TOOL_SEARCH_CODE_MODE_TOOL_NAME,
+      "code mode",
+      "tool-search-code-mode",
+    );
+    const alpha = pluginTool("fake_timeout_target", "Target tool for timeout search");
+
+    const config = {
+      plugins: {
+        entries: {
+          "tool-search-code-mode": {
+            enabled: true,
+            config: { mode: "code", codeTimeoutMs: 1000 },
+          },
+        },
+      },
+    } as never;
+
+    applyToolSearchCodeModeCatalog({
+      tools: [codeTool, alpha],
+      config,
+      sessionId: "session-timeout",
+      sessionKey: "agent:main:main",
+    });
+
+    const [runtimeCodeTool] = createToolSearchCodeModeTools({
+      sessionId: "session-timeout",
+      sessionKey: "agent:main:main",
+      config,
+    });
+
+    await expect(
+      runtimeCodeTool.execute("call-timeout", {
+        code: `
+            await openclaw.tools.search("timeout", { limit: 1 });
+            while (true) {}
+          `,
+      }),
+    ).rejects.toThrow("tool_search_code timed out");
+  }, 5_000);
 });

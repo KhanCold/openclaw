@@ -152,9 +152,11 @@ The runtime must not expose:
   explicitly allows it
 
 When OpenClaw sandboxing is active, code mode should use the same sandbox
-boundary. When sandboxing is off, code mode still runs in an isolated Node VM
-for that tool call, but VM isolation is not a substitute for an OS or container
-sandbox.
+boundary. When sandboxing is off, code mode still runs in a short-lived Node
+subprocess for that tool call. The subprocess starts with Node's permission
+model enabled, an empty environment, no filesystem or network grants, and no
+child-process or worker grants. OpenClaw kills the subprocess on the wall-clock
+timeout, so async code that later spins CPU cannot hang the Gateway event loop.
 
 ## API
 

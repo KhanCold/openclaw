@@ -1,4 +1,5 @@
-import vm from "node:vm";
+import { spawn } from "node:child_process";
+import os from "node:os";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
@@ -60,6 +61,147 @@ type ToolSearchCatalogSession = {
   describeCount: number;
   callCount: number;
 };
+
+type CodeModeBridgeMethod = "search" | "describe" | "call";
+
+type CodeModeChildMessage =
+  | { type: "result"; ok: true; value: unknown }
+  | { type: "result"; ok: false; error?: string }
+  | { type: "log"; items?: unknown[] }
+  | { type: "bridge"; id?: unknown; method?: unknown; args?: unknown };
+
+type CodeModeBridgeResultMessage = {
+  type: "bridge-result";
+  id: string;
+  ok: boolean;
+  value?: unknown;
+  error?: string;
+};
+
+const TOOL_SEARCH_CODE_MODE_CHILD_SOURCE = String.raw`
+import vm from "node:vm";
+
+const pending = new Map();
+let nextBridgeId = 1;
+
+function send(message) {
+  if (typeof process.send === "function") {
+    process.send(message);
+  }
+}
+
+function toJsonSafe(value) {
+  if (value === undefined) {
+    return null;
+  }
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    if (value instanceof Error) {
+      return value.message;
+    }
+    if (value === null) {
+      return null;
+    }
+    switch (typeof value) {
+      case "string":
+        return value;
+      case "number":
+      case "boolean":
+      case "bigint":
+      case "symbol":
+      case "function":
+        return String(value);
+      default:
+        return Object.prototype.toString.call(value);
+    }
+  }
+}
+
+function formatLogItem(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  const safe = toJsonSafe(value);
+  return typeof safe === "string" ? safe : JSON.stringify(safe);
+}
+
+function bridge(method, args) {
+  const id = String(nextBridgeId++);
+  send({ type: "bridge", id, method, args });
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+  });
+}
+
+function settleBridge(message) {
+  const id = typeof message?.id === "string" ? message.id : "";
+  const waiter = pending.get(id);
+  if (!waiter) {
+    return;
+  }
+  pending.delete(id);
+  if (message.ok) {
+    waiter.resolve(message.value);
+  } else {
+    waiter.reject(new Error(typeof message.error === "string" ? message.error : "tool bridge failed"));
+  }
+}
+
+async function runModelCode(code, timeoutMs) {
+  const sandbox = Object.create(null);
+  const consoleBridge = Object.freeze({
+    log: (...items) => send({ type: "log", items: items.map(formatLogItem) }),
+    warn: (...items) => send({ type: "log", items: items.map(formatLogItem) }),
+    error: (...items) => send({ type: "log", items: items.map(formatLogItem) }),
+  });
+  const openclaw = Object.freeze({
+    tools: Object.freeze({
+      search: (query, options) => bridge("search", [query, options]),
+      describe: (id) => bridge("describe", [id]),
+      call: (id, input) => bridge("call", [id, input]),
+    }),
+  });
+  Object.defineProperties(sandbox, {
+    console: { value: consoleBridge, enumerable: true },
+    openclaw: { value: openclaw, enumerable: true },
+  });
+  const context = vm.createContext(sandbox, {
+    name: "tool_search_code",
+    codeGeneration: { strings: false, wasm: false },
+  });
+  const wrappedCode =
+    '"use strict";\n(async (openclaw, console) => {\n' +
+    code +
+    "\n})(openclaw, console)";
+  const script = new vm.Script(wrappedCode, { filename: "tool_search_code:model.js" });
+  const value = await script.runInContext(context, {
+    timeout: Math.max(1, Math.min(Number(timeoutMs) || 1, 2147483647)),
+    breakOnSigint: false,
+  });
+  send({ type: "result", ok: true, value: toJsonSafe(value) });
+}
+
+process.on("message", (message) => {
+  if (message?.type === "bridge-result") {
+    settleBridge(message);
+    return;
+  }
+  if (message?.type !== "run") {
+    return;
+  }
+  const code = typeof message.code === "string" ? message.code : "";
+  runModelCode(code, message.timeoutMs).catch((error) => {
+    send({
+      type: "result",
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }).finally(() => {
+    process.exit(0);
+  });
+});
+`;
 
 const SESSION_CATALOGS_KEY = Symbol.for("openclaw.toolSearchCodeMode.sessionCatalogs");
 const globalToolSearchState = globalThis as typeof globalThis & {
@@ -547,22 +689,6 @@ function toJsonSafe(value: unknown): unknown {
   }
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("tool_search_code timed out")), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-  }
-}
-
 async function runCodeMode(params: {
   ctx: OpenClawPluginToolContext;
   code: string;
@@ -570,33 +696,174 @@ async function runCodeMode(params: {
 }) {
   const runtime = new ToolSearchRuntime(params.ctx, params.config);
   const logs: string[] = [];
-  const openclaw = Object.freeze({
-    tools: Object.freeze({
-      search: runtime.search,
-      describe: runtime.describe,
-      call: runtime.call,
-    }),
+  const value = await runCodeModeChild({
+    code: params.code,
+    config: params.config,
+    logs,
+    runtime,
   });
-  const consoleBridge = Object.freeze({
-    log: (...items: unknown[]) => logs.push(items.map((item) => String(item)).join(" ")),
-    warn: (...items: unknown[]) => logs.push(items.map((item) => String(item)).join(" ")),
-    error: (...items: unknown[]) => logs.push(items.map((item) => String(item)).join(" ")),
-  });
-  const context = vm.createContext({
-    openclaw,
-    console: consoleBridge,
-  });
-  const script = new vm.Script(`"use strict";\n(async () => {\n${params.code}\n})()`);
-  const value = await withTimeout(
-    Promise.resolve(script.runInContext(context, { timeout: params.config.codeTimeoutMs })),
-    params.config.codeTimeoutMs,
-  );
   return {
     ok: true,
     value: toJsonSafe(value),
     logs,
     telemetry: runtime.telemetry(),
   };
+}
+
+function buildCodeModeChildArgs(): string[] {
+  if (!process.allowedNodeEnvironmentFlags.has("--permission")) {
+    throw new ToolInputError("tool_search_code requires a Node runtime with --permission support.");
+  }
+  return ["--permission", "--input-type=module", "--eval", TOOL_SEARCH_CODE_MODE_CHILD_SOURCE];
+}
+
+function isCodeModeBridgeMethod(value: unknown): value is CodeModeBridgeMethod {
+  return value === "search" || value === "describe" || value === "call";
+}
+
+async function runCodeModeBridgeRequest(
+  runtime: ToolSearchRuntime,
+  method: CodeModeBridgeMethod,
+  args: unknown,
+): Promise<unknown> {
+  const values = Array.isArray(args) ? args : [];
+  switch (method) {
+    case "search": {
+      const query = values[0];
+      if (typeof query !== "string") {
+        throw new ToolInputError("search query must be a string.");
+      }
+      const options = isRecord(values[1]) ? values[1] : undefined;
+      return await runtime.search(query, {
+        limit: typeof options?.limit === "number" ? options.limit : undefined,
+      });
+    }
+    case "describe": {
+      const id = values[0];
+      if (typeof id !== "string") {
+        throw new ToolInputError("describe id must be a string.");
+      }
+      return await runtime.describe(id);
+    }
+    case "call": {
+      const id = values[0];
+      if (typeof id !== "string") {
+        throw new ToolInputError("call id must be a string.");
+      }
+      return await runtime.call(id, values[1] ?? {});
+    }
+  }
+  throw new ToolInputError("Unsupported tool_search_code bridge method.");
+}
+
+function runCodeModeChild(params: {
+  code: string;
+  config: ToolSearchCodeModeConfig;
+  logs: string[];
+  runtime: ToolSearchRuntime;
+}): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, buildCodeModeChildArgs(), {
+      cwd: os.tmpdir(),
+      env: {},
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    const stderr: string[] = [];
+    let settled = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const settle = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+      settle(() => reject(new Error("tool_search_code timed out")));
+    }, params.config.codeTimeoutMs);
+
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr.push(chunk);
+    });
+
+    child.on("error", (error) => {
+      settle(() => reject(error));
+    });
+    child.on("exit", (code, signal) => {
+      if (settled) {
+        return;
+      }
+      const suffix = stderr.join("").trim();
+      const detail = suffix ? `: ${suffix.slice(0, 500)}` : "";
+      settle(() =>
+        reject(
+          new Error(
+            timedOut
+              ? "tool_search_code timed out"
+              : `tool_search_code child exited with ${signal ?? code}${detail}`,
+          ),
+        ),
+      );
+    });
+    child.on("message", (message: CodeModeChildMessage) => {
+      if (!isRecord(message) || typeof message.type !== "string") {
+        return;
+      }
+      if (message.type === "log") {
+        const items = Array.isArray(message.items) ? message.items : [];
+        params.logs.push(items.map((item) => String(item)).join(" "));
+        return;
+      }
+      if (message.type === "result") {
+        if (message.ok) {
+          settle(() => resolve(message.value));
+        } else {
+          settle(() =>
+            reject(new Error(typeof message.error === "string" ? message.error : "code failed")),
+          );
+        }
+        return;
+      }
+      if (message.type !== "bridge") {
+        return;
+      }
+      const id = typeof message.id === "string" ? message.id : "";
+      const method = isCodeModeBridgeMethod(message.method) ? message.method : undefined;
+      if (!id || !method) {
+        return;
+      }
+      void runCodeModeBridgeRequest(params.runtime, method, message.args)
+        .then((value) => {
+          const response: CodeModeBridgeResultMessage = {
+            type: "bridge-result",
+            id,
+            ok: true,
+            value: toJsonSafe(value),
+          };
+          child.send(response);
+        })
+        .catch((error: unknown) => {
+          const response: CodeModeBridgeResultMessage = {
+            type: "bridge-result",
+            id,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+          child.send(response);
+        });
+    });
+
+    child.send({
+      type: "run",
+      code: params.code,
+      timeoutMs: params.config.codeTimeoutMs,
+    });
+  });
 }
 
 function readCode(args: unknown): string {
@@ -616,7 +883,7 @@ export function createToolSearchCodeModeTools(ctx: OpenClawPluginToolContext): A
       name: TOOL_SEARCH_CODE_MODE_TOOL_NAME,
       label: "Tool Search Code Mode",
       description:
-        "Run JavaScript in an isolated Node VM with openclaw.tools.search, openclaw.tools.describe, and openclaw.tools.call for large tool catalogs.",
+        "Run JavaScript in an isolated Node subprocess with openclaw.tools.search, openclaw.tools.describe, and openclaw.tools.call for large tool catalogs.",
       parameters: Type.Object({
         code: Type.String({
           description:
