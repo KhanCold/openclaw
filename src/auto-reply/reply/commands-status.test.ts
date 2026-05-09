@@ -116,7 +116,6 @@ function writeTranscriptUsageLog(params: {
   replaceSqliteSessionTranscriptEvents({
     agentId: params.agentId,
     sessionId: params.sessionId,
-    transcriptPath,
     events: [
       {
         type: "message",
