@@ -407,6 +407,24 @@ export const FIELD_HELP: Record<string, string> = {
     "Experimental built-in tool flags. Keep these off by default and enable only when you are intentionally testing a preview surface.",
   "tools.experimental.planTool":
     "Enable the experimental structured `update_plan` tool for non-trivial multi-step work tracking. Leave this off unless you explicitly want the tool outside strict-agentic embedded Pi runs.",
+  "tools.toolSearchCodeMode":
+    "Core compact tool-catalog mode for large OpenClaw, MCP, and client tool sets. Enable when model prompt/tool-schema size matters and the selected provider handles either the code bridge or structured search fallback.",
+  "tools.toolSearchCodeMode.enabled":
+    "Enables core Tool Search Code Mode. When on, OpenClaw can hide large tool catalogs behind `tool_search_code` or structured search/describe/call tools during PI runs.",
+  "tools.toolSearchCodeMode.mode":
+    'Choose the model-facing surface: "code" exposes `tool_search_code`, "tools" exposes structured fallback tools, and "both" exposes both for testing.',
+  "tools.toolSearchCodeMode.includeOpenClawTools":
+    "Catalog OpenClaw-owned tools behind the compact search surface. Leave enabled unless you only want MCP or client tools compacted.",
+  "tools.toolSearchCodeMode.includeMcpTools":
+    "Catalog MCP tools exposed through OpenClaw behind the compact search surface. Disable only when MCP schemas should remain directly visible.",
+  "tools.toolSearchCodeMode.includeClientTools":
+    "Catalog client/app tools passed into PI sessions behind the same compact search surface. Disable when client tools must remain directly visible to the provider.",
+  "tools.toolSearchCodeMode.codeTimeoutMs":
+    "Wall-clock timeout for model-authored `tool_search_code` snippets. The gateway enforces this from the parent process and kills the isolated child on timeout.",
+  "tools.toolSearchCodeMode.searchDefaultLimit":
+    "Default number of catalog search results returned when the model does not specify a limit.",
+  "tools.toolSearchCodeMode.maxSearchLimit":
+    "Maximum number of catalog search results a single search call can request.",
   "tools.elevated":
     "Elevated tool access controls for privileged command surfaces that should only be reachable from trusted senders. Keep disabled unless operator workflows explicitly require elevated actions.",
   "tools.elevated.enabled":

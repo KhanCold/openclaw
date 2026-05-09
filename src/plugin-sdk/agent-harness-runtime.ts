@@ -130,8 +130,6 @@ export {
 } from "../agents/harness/prompt-compaction-hook-helpers.js";
 export { createCodexAppServerToolResultExtensionRunner } from "../agents/harness/codex-app-server-extensions.js";
 export { createAgentToolResultMiddlewareRunner } from "../agents/harness/tool-result-middleware.js";
-export { createToolSearchCodeModeTools } from "../agents/tool-search-code-mode.js";
-export type { ToolSearchCodeModeConfig } from "../agents/tool-search-code-mode.js";
 export {
   assembleHarnessContextEngine,
   bootstrapHarnessContextEngine,

@@ -288,10 +288,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - "extensions/tokenjuice/**"
-"extensions: tool-search-code-mode":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "extensions/tool-search-code-mode/**"
 "extensions: webhooks":
   - changed-files:
       - any-glob-to-any-file:

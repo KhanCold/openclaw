@@ -212,8 +212,6 @@ async function writeConfig(params: {
     workspaceDir: params.workspaceDir,
     controlUiEnabled: false,
     providerMode: "mock-openai",
-    enabledPluginIds: params.lane === "code" ? ["tool-search-code-mode"] : [],
-    transportPluginIds: params.lane === "code" ? ["tool-search-code-mode"] : [],
   });
   cfg = {
     ...cfg,
@@ -236,25 +234,21 @@ async function writeConfig(params: {
             "tool_call",
           ]),
         ],
+        toolSearchCodeMode: {
+          enabled: true,
+          mode: "code",
+          includeOpenClawTools: true,
+          includeMcpTools: true,
+          includeClientTools: true,
+        },
       },
       plugins: {
         ...cfg.plugins,
-        allow: [
-          ...new Set([...(cfg.plugins?.allow ?? []), FAKE_PLUGIN_ID, "tool-search-code-mode"]),
-        ],
+        allow: [...new Set([...(cfg.plugins?.allow ?? []), FAKE_PLUGIN_ID])],
         entries: {
           ...cfg.plugins?.entries,
           [FAKE_PLUGIN_ID]: {
             enabled: true,
-          },
-          "tool-search-code-mode": {
-            enabled: true,
-            config: {
-              mode: "code",
-              includeOpenClawTools: true,
-              includeMcpTools: true,
-              includeClientTools: true,
-            },
           },
         },
       },

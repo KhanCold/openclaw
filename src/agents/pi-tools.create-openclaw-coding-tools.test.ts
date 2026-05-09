@@ -134,6 +134,24 @@ describe("createOpenClawCodingTools", () => {
     );
   });
 
+  it("adds core Tool Search Code Mode control tools when enabled", () => {
+    const tools = createOpenClawCodingTools({
+      config: {
+        tools: {
+          toolSearchCodeMode: {
+            enabled: true,
+          },
+        },
+      },
+    });
+    const names = new Set(tools.map((tool) => tool.name));
+
+    expect(names.has("tool_search_code")).toBe(true);
+    expect(names.has("tool_search")).toBe(true);
+    expect(names.has("tool_describe")).toBe(true);
+    expect(names.has("tool_call")).toBe(true);
+  });
+
   it("exposes only an explicitly authorized owner-only tool to non-owner sessions", () => {
     const tools = createOpenClawCodingTools({
       config: testConfig,

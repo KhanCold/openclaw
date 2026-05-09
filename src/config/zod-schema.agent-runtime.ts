@@ -551,6 +551,20 @@ const ToolLoopDetectionSchema = z
   })
   .optional();
 
+const ToolSearchCodeModeSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(["code", "tools", "both"]).optional(),
+    includeOpenClawTools: z.boolean().optional(),
+    includeMcpTools: z.boolean().optional(),
+    includeClientTools: z.boolean().optional(),
+    codeTimeoutMs: z.number().int().min(1000).max(60000).optional(),
+    searchDefaultLimit: z.number().int().min(1).max(50).optional(),
+    maxSearchLimit: z.number().int().min(1).max(50).optional(),
+  })
+  .strict()
+  .optional();
+
 const SandboxSshSchema = z
   .object({
     target: z.string().min(1).optional(),
@@ -923,6 +937,7 @@ export const ToolsSchema = z
       .strict()
       .optional(),
     loopDetection: ToolLoopDetectionSchema,
+    toolSearchCodeMode: ToolSearchCodeModeSchema,
     message: z
       .object({
         allowCrossContextSend: z.boolean().optional(),

@@ -3,7 +3,7 @@ summary: "Tool Search Code Mode: discover and call OpenClaw, MCP, and client too
 title: "Tool Search Code Mode"
 read_when:
   - You want agents to use a large tool catalog without adding every tool to the prompt
-  - You want MCP tools, OpenClaw plugin tools, and client tools exposed through one code surface
+  - You want OpenClaw tools, MCP tools, and client tools exposed through one code surface
   - You are implementing or debugging code-mode tool discovery
 ---
 
@@ -26,7 +26,7 @@ return result;
 ```
 
 This keeps the model prompt small while preserving access to broad capability
-sets such as bundled plugin tools, configured MCP servers, and client-provided
+sets such as OpenClaw tools, configured MCP servers, and client-provided
 tools.
 
 ## How a turn runs
@@ -272,27 +272,23 @@ Tool Search Code Mode should fail closed:
 
 ## Example config
 
-Enable the bundled plugin:
+Enable the core mode:
 
 ```bash
-openclaw config set plugins.entries.tool-search-code-mode.enabled true
+openclaw config set tools.toolSearchCodeMode.enabled true
 ```
 
 Prefer code mode for large catalogs:
 
 ```json5
 {
-  plugins: {
-    entries: {
-      "tool-search-code-mode": {
-        enabled: true,
-        config: {
-          mode: "code",
-          includeOpenClawTools: true,
-          includeMcpTools: true,
-          includeClientTools: true,
-        },
-      },
+  tools: {
+    toolSearchCodeMode: {
+      enabled: true,
+      mode: "code",
+      includeOpenClawTools: true,
+      includeMcpTools: true,
+      includeClientTools: true,
     },
   },
 }
@@ -302,14 +298,10 @@ Use structured fallback tools instead:
 
 ```json5
 {
-  plugins: {
-    entries: {
-      "tool-search-code-mode": {
-        enabled: true,
-        config: {
-          mode: "tools",
-        },
-      },
+  tools: {
+    toolSearchCodeMode: {
+      enabled: true,
+      mode: "tools",
     },
   },
 }

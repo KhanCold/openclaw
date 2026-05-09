@@ -39,24 +39,15 @@ function pluginTool(name: string, description: string, pluginId = "fake-catalog"
 
 describe("Tool Search Code Mode", () => {
   it("compacts plugin tools behind the code surface and can search, describe, and call them", async () => {
-    const codeTool = pluginTool(
-      TOOL_SEARCH_CODE_MODE_TOOL_NAME,
-      "code mode",
-      "tool-search-code-mode",
-    );
+    const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const alpha = pluginTool("fake_create_ticket", "Create a ticket in the fake tracker");
     const beta = pluginTool("fake_weather", "Read fake weather");
 
     const compacted = applyToolSearchCodeModeCatalog({
       tools: [codeTool, alpha, beta],
       config: {
-        plugins: {
-          entries: {
-            "tool-search-code-mode": {
-              enabled: true,
-              config: { mode: "code" },
-            },
-          },
+        tools: {
+          toolSearchCodeMode: { enabled: true, mode: "code" },
         },
       } as never,
       sessionId: "session-1",
@@ -94,30 +85,17 @@ describe("Tool Search Code Mode", () => {
   });
 
   it("keeps raw fallback tools and hides the code tool in tools mode", () => {
-    const codeTool = pluginTool(
-      TOOL_SEARCH_CODE_MODE_TOOL_NAME,
-      "code mode",
-      "tool-search-code-mode",
-    );
-    const searchTool = pluginTool(TOOL_SEARCH_RAW_TOOL_NAME, "search", "tool-search-code-mode");
-    const describeTool = pluginTool(
-      TOOL_DESCRIBE_RAW_TOOL_NAME,
-      "describe",
-      "tool-search-code-mode",
-    );
-    const callTool = pluginTool(TOOL_CALL_RAW_TOOL_NAME, "call", "tool-search-code-mode");
+    const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
+    const searchTool = fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search");
+    const describeTool = fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe");
+    const callTool = fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call");
     const target = pluginTool("fake_lookup", "Lookup fake records");
 
     const compacted = applyToolSearchCodeModeCatalog({
       tools: [codeTool, searchTool, describeTool, callTool, target],
       config: {
-        plugins: {
-          entries: {
-            "tool-search-code-mode": {
-              enabled: true,
-              config: { mode: "tools" },
-            },
-          },
+        tools: {
+          toolSearchCodeMode: { enabled: true, mode: "tools" },
         },
       } as never,
       sessionId: "session-raw",
@@ -132,21 +110,22 @@ describe("Tool Search Code Mode", () => {
   });
 
   it("moves client tools into the same catalog when a session catalog exists", () => {
-    const codeTool = pluginTool(
-      TOOL_SEARCH_CODE_MODE_TOOL_NAME,
-      "code mode",
-      "tool-search-code-mode",
-    );
+    const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
+    const config = {
+      tools: {
+        toolSearchCodeMode: { enabled: true },
+      },
+    } as never;
     applyToolSearchCodeModeCatalog({
       tools: [codeTool],
-      config: {} as never,
+      config,
       sessionId: "session-client",
     });
 
     const clientTool = fakeTool("client_pick_file", "Ask the client to pick a file");
     const compacted = addClientToolsToToolSearchCodeModeCatalog({
       tools: [clientTool],
-      config: {} as never,
+      config,
       sessionId: "session-client",
     });
 
@@ -163,16 +142,12 @@ describe("Tool Search Code Mode", () => {
   });
 
   it("wraps cataloged OpenClaw tools with before_tool_call hooks", async () => {
-    const codeTool = pluginTool(
-      TOOL_SEARCH_CODE_MODE_TOOL_NAME,
-      "code mode",
-      "tool-search-code-mode",
-    );
+    const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const target = pluginTool("fake_hooked", "Run a hook-aware fake tool");
 
     applyToolSearchCodeModeCatalog({
       tools: [codeTool, target],
-      config: {} as never,
+      config: { tools: { toolSearchCodeMode: { enabled: true } } } as never,
       sessionId: "session-hooks",
       toolHookContext: {
         agentId: "agent-main",
@@ -223,21 +198,12 @@ describe("Tool Search Code Mode", () => {
   });
 
   it("terminates async continuations that block the event loop after a bridge call", async () => {
-    const codeTool = pluginTool(
-      TOOL_SEARCH_CODE_MODE_TOOL_NAME,
-      "code mode",
-      "tool-search-code-mode",
-    );
+    const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const alpha = pluginTool("fake_timeout_target", "Target tool for timeout search");
 
     const config = {
-      plugins: {
-        entries: {
-          "tool-search-code-mode": {
-            enabled: true,
-            config: { mode: "code", codeTimeoutMs: 1000 },
-          },
-        },
+      tools: {
+        toolSearchCodeMode: { enabled: true, mode: "code", codeTimeoutMs: 1000 },
       },
     } as never;
 

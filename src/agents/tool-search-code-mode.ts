@@ -4,7 +4,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import type { OpenClawPluginToolContext } from "../plugins/tool-types.js";
+import type { ToolSearchCodeModeConfig as ToolSearchCodeModeConfigShape } from "../config/types.tools.js";
 import { getPluginToolMeta } from "../plugins/tools.js";
 import {
   isToolWrappedWithBeforeToolCallHook,
@@ -14,7 +14,6 @@ import {
 import { asToolParamsRecord, jsonResult, ToolInputError } from "./tools/common.js";
 import type { AnyAgentTool } from "./tools/common.js";
 
-export const TOOL_SEARCH_CODE_MODE_PLUGIN_ID = "tool-search-code-mode";
 export const TOOL_SEARCH_CODE_MODE_TOOL_NAME = "tool_search_code";
 export const TOOL_SEARCH_RAW_TOOL_NAME = "tool_search";
 export const TOOL_DESCRIBE_RAW_TOOL_NAME = "tool_describe";
@@ -34,14 +33,16 @@ type ToolSearchCodeModeMode = "code" | "tools" | "both";
 type CatalogSource = "openclaw" | "mcp" | "client";
 type CatalogTool = AnyAgentTool | ToolDefinition;
 
-export type ToolSearchCodeModeConfig = {
+export type ToolSearchCodeModeConfig = Required<ToolSearchCodeModeConfigShape> & {
   mode: ToolSearchCodeModeMode;
-  includeOpenClawTools: boolean;
-  includeMcpTools: boolean;
-  includeClientTools: boolean;
-  codeTimeoutMs: number;
-  searchDefaultLimit: number;
-  maxSearchLimit: number;
+};
+
+export type ToolSearchCodeModeToolContext = {
+  config?: OpenClawConfig;
+  runtimeConfig?: OpenClawConfig;
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
 };
 
 export type ToolSearchCatalogEntry = {
@@ -215,13 +216,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function readPluginConfig(config?: OpenClawConfig): Record<string, unknown> {
-  const plugins = isRecord(config?.plugins) ? config.plugins : undefined;
-  const entries = isRecord(plugins?.entries) ? plugins.entries : undefined;
-  const entry = isRecord(entries?.[TOOL_SEARCH_CODE_MODE_PLUGIN_ID])
-    ? entries[TOOL_SEARCH_CODE_MODE_PLUGIN_ID]
+function readToolSearchCodeModeConfig(config?: OpenClawConfig): Record<string, unknown> {
+  const tools = isRecord(config?.tools) ? config.tools : undefined;
+  const toolSearchCodeMode = isRecord(tools?.toolSearchCodeMode)
+    ? tools.toolSearchCodeMode
     : undefined;
-  return isRecord(entry?.config) ? entry.config : {};
+  return toolSearchCodeMode ?? {};
 }
 
 function readBoolean(value: unknown, fallback: boolean): boolean {
@@ -233,12 +233,13 @@ function readInteger(value: unknown, fallback: number): number {
 }
 
 export function resolveToolSearchCodeModeConfig(config?: OpenClawConfig): ToolSearchCodeModeConfig {
-  const raw = readPluginConfig(config);
+  const raw = readToolSearchCodeModeConfig(config);
   const rawMode = typeof raw.mode === "string" ? raw.mode : "code";
   const mode: ToolSearchCodeModeMode =
     rawMode === "tools" || rawMode === "both" || rawMode === "code" ? rawMode : "code";
   const maxSearchLimit = Math.max(1, Math.min(50, readInteger(raw.maxSearchLimit, 20)));
   return {
+    enabled: readBoolean(raw.enabled, false),
     mode,
     includeOpenClawTools: readBoolean(raw.includeOpenClawTools, true),
     includeMcpTools: readBoolean(raw.includeMcpTools, true),
@@ -361,6 +362,9 @@ export function applyToolSearchCodeModeCatalog(params: {
   toolHookContext?: HookContext;
 }): { tools: AnyAgentTool[]; compacted: boolean; catalogToolCount: number } {
   const config = resolveToolSearchCodeModeConfig(params.config);
+  if (!config.enabled) {
+    return { tools: params.tools, compacted: false, catalogToolCount: 0 };
+  }
   const hasControlTool = params.tools.some(
     (tool) =>
       TOOL_SEARCH_CONTROL_TOOL_NAMES.has(tool.name) &&
@@ -405,7 +409,7 @@ export function addClientToolsToToolSearchCodeModeCatalog(params: {
 }): { tools: ToolDefinition[]; compacted: boolean; catalogToolCount: number } {
   const config = resolveToolSearchCodeModeConfig(params.config);
   const key = sessionCatalogKey(params);
-  if (!config.includeClientTools || !key) {
+  if (!config.enabled || !config.includeClientTools || !key) {
     return { tools: params.tools, compacted: false, catalogToolCount: 0 };
   }
   const existing = sessionCatalogs.get(key);
@@ -467,7 +471,7 @@ export function clearToolSearchCodeModeCatalog(params: {
   }
 }
 
-function resolveCatalog(ctx: OpenClawPluginToolContext): ToolSearchCatalogSession {
+function resolveCatalog(ctx: ToolSearchCodeModeToolContext): ToolSearchCatalogSession {
   for (const key of sessionCatalogKeys({
     sessionId: ctx.sessionId,
     sessionKey: ctx.sessionKey,
@@ -618,7 +622,7 @@ function getTelemetry(catalog: ToolSearchCatalogSession) {
 
 class ToolSearchRuntime {
   constructor(
-    private readonly ctx: OpenClawPluginToolContext,
+    private readonly ctx: ToolSearchCodeModeToolContext,
     private readonly config: ToolSearchCodeModeConfig,
   ) {}
 
@@ -690,7 +694,7 @@ function toJsonSafe(value: unknown): unknown {
 }
 
 async function runCodeMode(params: {
-  ctx: OpenClawPluginToolContext;
+  ctx: ToolSearchCodeModeToolContext;
   code: string;
   config: ToolSearchCodeModeConfig;
 }) {
@@ -875,7 +879,7 @@ function readCode(args: unknown): string {
   return code;
 }
 
-export function createToolSearchCodeModeTools(ctx: OpenClawPluginToolContext): AnyAgentTool[] {
+export function createToolSearchCodeModeTools(ctx: ToolSearchCodeModeToolContext): AnyAgentTool[] {
   const config = resolveToolSearchCodeModeConfig(ctx.runtimeConfig ?? ctx.config);
   const runtime = new ToolSearchRuntime(ctx, config);
   return [
