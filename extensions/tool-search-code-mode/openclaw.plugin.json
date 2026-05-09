@@ -1,0 +1,66 @@
+{
+  "id": "tool-search-code-mode",
+  "activation": {
+    "onStartup": true
+  },
+  "name": "Tool Search Code Mode",
+  "description": "Compacts large OpenClaw, MCP, and client tool catalogs behind searchable code-mode tools.",
+  "contracts": {
+    "tools": ["tool_search_code", "tool_search", "tool_describe", "tool_call"]
+  },
+  "toolMetadata": {
+    "tool_search_code": {
+      "optional": true
+    },
+    "tool_search": {
+      "optional": true
+    },
+    "tool_describe": {
+      "optional": true
+    },
+    "tool_call": {
+      "optional": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["code", "tools", "both"],
+        "default": "code"
+      },
+      "includeOpenClawTools": {
+        "type": "boolean",
+        "default": true
+      },
+      "includeMcpTools": {
+        "type": "boolean",
+        "default": true
+      },
+      "includeClientTools": {
+        "type": "boolean",
+        "default": true
+      },
+      "codeTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 60000,
+        "default": 10000
+      },
+      "searchDefaultLimit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "default": 8
+      },
+      "maxSearchLimit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "default": 20
+      }
+    }
+  }
+}

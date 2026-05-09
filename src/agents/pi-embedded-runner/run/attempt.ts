@@ -168,6 +168,11 @@ import {
   collectExplicitToolAllowlistSources,
 } from "../../tool-allowlist-guard.js";
 import { UNKNOWN_TOOL_THRESHOLD } from "../../tool-loop-detection.js";
+import {
+  addClientToolsToToolSearchCodeModeCatalog,
+  applyToolSearchCodeModeCatalog,
+  clearToolSearchCodeModeCatalog,
+} from "../../tool-search-code-mode.js";
 import { shouldAllowProviderOwnedThinkingReplay } from "../../transcript-policy.js";
 import { normalizeUsage, type NormalizedUsage } from "../../usage.js";
 import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
@@ -1119,7 +1124,36 @@ export async function runEmbeddedAttempt(
       ownerOnlyToolAllowlist: params.ownerOnlyToolAllowlist,
       warn: (message) => log.warn(message),
     });
-    const effectiveTools = [...tools, ...filteredBundledTools];
+    let effectiveTools = [...tools, ...filteredBundledTools];
+    const toolSearchCodeMode = applyToolSearchCodeModeCatalog({
+      tools: effectiveTools,
+      config: params.config,
+      sessionId: params.sessionId,
+      sessionKey: sandboxSessionKey,
+      agentId: sessionAgentId,
+      toolHookContext: {
+        agentId: sessionAgentId,
+        config: params.config,
+        cwd: effectiveWorkspace,
+        sessionKey: sandboxSessionKey,
+        sessionId: params.sessionId,
+        runId: params.runId,
+        channelId: params.currentChannelId,
+        trace: runTrace,
+        loopDetection: resolveToolLoopDetectionConfig({
+          cfg: params.config,
+          agentId: sessionAgentId,
+        }),
+        onToolOutcome: params.onToolOutcome,
+      },
+    });
+    effectiveTools = toolSearchCodeMode.tools;
+    if (toolSearchCodeMode.compacted) {
+      prepStages.mark("tool-search-code-mode");
+      log.info(
+        `tool-search-code-mode: cataloged ${toolSearchCodeMode.catalogToolCount} tools behind compact prompt surface`,
+      );
+    }
     prepStages.mark("bundle-tools");
     const allowedToolNames = collectAllowedToolNames({
       tools: effectiveTools,
@@ -1596,7 +1630,7 @@ export async function runEmbeddedAttempt(
       if (clientToolNameConflicts.length > 0) {
         throw createClientToolNameConflictError(clientToolNameConflicts);
       }
-      const clientToolDefs = clientTools
+      let clientToolDefs = clientTools
         ? toClientToolDefinitions(
             clientTools,
             {
@@ -1638,6 +1672,19 @@ export async function runEmbeddedAttempt(
             },
           )
         : [];
+      const clientToolSearchCodeMode = addClientToolsToToolSearchCodeModeCatalog({
+        tools: clientToolDefs,
+        config: params.config,
+        sessionId: params.sessionId,
+        sessionKey: sandboxSessionKey,
+        agentId: sessionAgentId,
+      });
+      clientToolDefs = clientToolSearchCodeMode.tools;
+      if (clientToolSearchCodeMode.compacted) {
+        log.info(
+          `tool-search-code-mode: cataloged ${clientToolSearchCodeMode.catalogToolCount} client tools behind compact prompt surface`,
+        );
+      }
 
       const allCustomTools = [...customTools, ...clientToolDefs];
       // Pi treats `tools` as a name allowlist during session creation. Pass the
@@ -3818,6 +3865,11 @@ export async function runEmbeddedAttempt(
       // See: https://github.com/openclaw/openclaw/issues/8643
       let cleanupError: unknown;
       try {
+        clearToolSearchCodeModeCatalog({
+          sessionId: params.sessionId,
+          sessionKey: sandboxSessionKey,
+          agentId: sessionAgentId,
+        });
         await cleanupEmbeddedAttemptResources({
           removeToolResultContextGuard,
           flushPendingToolResultsAfterIdle,

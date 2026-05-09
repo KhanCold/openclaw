@@ -1,0 +1,675 @@
+import vm from "node:vm";
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { Type } from "typebox";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { OpenClawPluginToolContext } from "../plugins/tool-types.js";
+import { getPluginToolMeta } from "../plugins/tools.js";
+import {
+  isToolWrappedWithBeforeToolCallHook,
+  type HookContext,
+  wrapToolWithBeforeToolCallHook,
+} from "./pi-tools.before-tool-call.js";
+import { asToolParamsRecord, jsonResult, ToolInputError } from "./tools/common.js";
+import type { AnyAgentTool } from "./tools/common.js";
+
+export const TOOL_SEARCH_CODE_MODE_PLUGIN_ID = "tool-search-code-mode";
+export const TOOL_SEARCH_CODE_MODE_TOOL_NAME = "tool_search_code";
+export const TOOL_SEARCH_RAW_TOOL_NAME = "tool_search";
+export const TOOL_DESCRIBE_RAW_TOOL_NAME = "tool_describe";
+export const TOOL_CALL_RAW_TOOL_NAME = "tool_call";
+
+const TOOL_SEARCH_CONTROL_TOOL_NAMES = new Set([
+  TOOL_SEARCH_CODE_MODE_TOOL_NAME,
+  TOOL_SEARCH_RAW_TOOL_NAME,
+  TOOL_DESCRIBE_RAW_TOOL_NAME,
+  TOOL_CALL_RAW_TOOL_NAME,
+]);
+
+const DEFAULT_CODE_TIMEOUT_MS = 10_000;
+const DEFAULT_SEARCH_LIMIT = 8;
+
+type ToolSearchCodeModeMode = "code" | "tools" | "both";
+type CatalogSource = "openclaw" | "mcp" | "client";
+type CatalogTool = AnyAgentTool | ToolDefinition;
+
+export type ToolSearchCodeModeConfig = {
+  mode: ToolSearchCodeModeMode;
+  includeOpenClawTools: boolean;
+  includeMcpTools: boolean;
+  includeClientTools: boolean;
+  codeTimeoutMs: number;
+  searchDefaultLimit: number;
+  maxSearchLimit: number;
+};
+
+export type ToolSearchCatalogEntry = {
+  id: string;
+  source: CatalogSource;
+  sourceName?: string;
+  name: string;
+  label?: string;
+  description: string;
+  parameters?: unknown;
+  tool: CatalogTool;
+};
+
+type ToolSearchCatalogSession = {
+  entries: ToolSearchCatalogEntry[];
+  searchCount: number;
+  describeCount: number;
+  callCount: number;
+};
+
+const SESSION_CATALOGS_KEY = Symbol.for("openclaw.toolSearchCodeMode.sessionCatalogs");
+const globalToolSearchState = globalThis as typeof globalThis & {
+  [SESSION_CATALOGS_KEY]?: Map<string, ToolSearchCatalogSession>;
+};
+const sessionCatalogs =
+  globalToolSearchState[SESSION_CATALOGS_KEY] ??
+  (globalToolSearchState[SESSION_CATALOGS_KEY] = new Map<string, ToolSearchCatalogSession>());
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function readPluginConfig(config?: OpenClawConfig): Record<string, unknown> {
+  const plugins = isRecord(config?.plugins) ? config.plugins : undefined;
+  const entries = isRecord(plugins?.entries) ? plugins.entries : undefined;
+  const entry = isRecord(entries?.[TOOL_SEARCH_CODE_MODE_PLUGIN_ID])
+    ? entries[TOOL_SEARCH_CODE_MODE_PLUGIN_ID]
+    : undefined;
+  return isRecord(entry?.config) ? entry.config : {};
+}
+
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readInteger(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+export function resolveToolSearchCodeModeConfig(config?: OpenClawConfig): ToolSearchCodeModeConfig {
+  const raw = readPluginConfig(config);
+  const rawMode = typeof raw.mode === "string" ? raw.mode : "code";
+  const mode: ToolSearchCodeModeMode =
+    rawMode === "tools" || rawMode === "both" || rawMode === "code" ? rawMode : "code";
+  const maxSearchLimit = Math.max(1, Math.min(50, readInteger(raw.maxSearchLimit, 20)));
+  return {
+    mode,
+    includeOpenClawTools: readBoolean(raw.includeOpenClawTools, true),
+    includeMcpTools: readBoolean(raw.includeMcpTools, true),
+    includeClientTools: readBoolean(raw.includeClientTools, true),
+    codeTimeoutMs: Math.max(
+      1000,
+      Math.min(60_000, readInteger(raw.codeTimeoutMs, DEFAULT_CODE_TIMEOUT_MS)),
+    ),
+    searchDefaultLimit: Math.max(
+      1,
+      Math.min(maxSearchLimit, readInteger(raw.searchDefaultLimit, DEFAULT_SEARCH_LIMIT)),
+    ),
+    maxSearchLimit,
+  };
+}
+
+function sessionCatalogKeys(input: {
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+}): string[] {
+  const keys: string[] = [];
+  if (input.sessionId?.trim()) {
+    keys.push(`session:${input.sessionId.trim()}`);
+  }
+  if (input.sessionKey?.trim()) {
+    keys.push(`key:${input.sessionKey.trim()}`);
+  }
+  if (input.agentId?.trim()) {
+    keys.push(`agent:${input.agentId.trim()}`);
+  }
+  return [...new Set(keys)];
+}
+
+function sessionCatalogKey(input: {
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+}): string | undefined {
+  return sessionCatalogKeys(input)[0];
+}
+
+function classifyTool(tool: CatalogTool): { source: CatalogSource; sourceName?: string } {
+  const meta = getPluginToolMeta(tool as AnyAgentTool);
+  const pluginId = meta?.pluginId?.trim();
+  if (pluginId === "bundle-mcp") {
+    return { source: "mcp", sourceName: pluginId };
+  }
+  if (pluginId) {
+    return { source: "openclaw", sourceName: pluginId };
+  }
+  return { source: "openclaw", sourceName: "core" };
+}
+
+function makeCatalogId(tool: CatalogTool, source: CatalogSource, sourceName?: string): string {
+  const owner = sourceName?.trim() || "core";
+  return `${source}:${owner}:${tool.name}`;
+}
+
+function wrapCatalogTool(tool: AnyAgentTool, hookContext?: HookContext): AnyAgentTool {
+  if (!hookContext || isToolWrappedWithBeforeToolCallHook(tool)) {
+    return tool;
+  }
+  return wrapToolWithBeforeToolCallHook(tool, hookContext);
+}
+
+function toCatalogEntry(
+  tool: CatalogTool,
+  sourceOverride?: CatalogSource,
+  hookContext?: HookContext,
+): ToolSearchCatalogEntry {
+  const classified = classifyTool(tool);
+  const source = sourceOverride ?? classified.source;
+  const sourceName = sourceOverride === "client" ? "client" : classified.sourceName;
+  const catalogTool =
+    source === "client" ? tool : wrapCatalogTool(tool as AnyAgentTool, hookContext);
+  return {
+    id: makeCatalogId(tool, source, sourceName),
+    source,
+    sourceName,
+    name: tool.name,
+    label: tool.label,
+    description: tool.description ?? "",
+    parameters: tool.parameters,
+    tool: catalogTool,
+  };
+}
+
+function shouldCatalogTool(tool: AnyAgentTool, config: ToolSearchCodeModeConfig): boolean {
+  if (TOOL_SEARCH_CONTROL_TOOL_NAMES.has(tool.name)) {
+    return false;
+  }
+  const { source } = classifyTool(tool);
+  if (source === "mcp") {
+    return config.includeMcpTools;
+  }
+  return config.includeOpenClawTools;
+}
+
+function shouldExposeControlTool(name: string, mode: ToolSearchCodeModeMode): boolean {
+  if (name === TOOL_SEARCH_CODE_MODE_TOOL_NAME) {
+    return mode === "code" || mode === "both";
+  }
+  if (
+    name === TOOL_SEARCH_RAW_TOOL_NAME ||
+    name === TOOL_DESCRIBE_RAW_TOOL_NAME ||
+    name === TOOL_CALL_RAW_TOOL_NAME
+  ) {
+    return mode === "tools" || mode === "both";
+  }
+  return false;
+}
+
+export function applyToolSearchCodeModeCatalog(params: {
+  tools: AnyAgentTool[];
+  config?: OpenClawConfig;
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+  toolHookContext?: HookContext;
+}): { tools: AnyAgentTool[]; compacted: boolean; catalogToolCount: number } {
+  const config = resolveToolSearchCodeModeConfig(params.config);
+  const hasControlTool = params.tools.some(
+    (tool) =>
+      TOOL_SEARCH_CONTROL_TOOL_NAMES.has(tool.name) &&
+      shouldExposeControlTool(tool.name, config.mode),
+  );
+  const key = sessionCatalogKey(params);
+  if (!hasControlTool || !key) {
+    return { tools: params.tools, compacted: false, catalogToolCount: 0 };
+  }
+
+  const visible: AnyAgentTool[] = [];
+  const catalog: ToolSearchCatalogEntry[] = [];
+  for (const tool of params.tools) {
+    if (TOOL_SEARCH_CONTROL_TOOL_NAMES.has(tool.name)) {
+      if (shouldExposeControlTool(tool.name, config.mode)) {
+        visible.push(tool);
+      }
+      continue;
+    }
+    if (shouldCatalogTool(tool, config)) {
+      catalog.push(toCatalogEntry(tool, undefined, params.toolHookContext));
+      continue;
+    }
+    visible.push(tool);
+  }
+  registerToolSearchCodeModeCatalog({
+    sessionId: params.sessionId,
+    sessionKey: params.sessionKey,
+    agentId: params.agentId,
+    entries: catalog,
+    append: false,
+  });
+  return { tools: visible, compacted: catalog.length > 0, catalogToolCount: catalog.length };
+}
+
+export function addClientToolsToToolSearchCodeModeCatalog(params: {
+  tools: ToolDefinition[];
+  config?: OpenClawConfig;
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+}): { tools: ToolDefinition[]; compacted: boolean; catalogToolCount: number } {
+  const config = resolveToolSearchCodeModeConfig(params.config);
+  const key = sessionCatalogKey(params);
+  if (!config.includeClientTools || !key) {
+    return { tools: params.tools, compacted: false, catalogToolCount: 0 };
+  }
+  const existing = sessionCatalogs.get(key);
+  if (!existing) {
+    return { tools: params.tools, compacted: false, catalogToolCount: 0 };
+  }
+  registerToolSearchCodeModeCatalog({
+    sessionId: params.sessionId,
+    sessionKey: params.sessionKey,
+    agentId: params.agentId,
+    entries: params.tools.map((tool) => toCatalogEntry(tool, "client")),
+    append: true,
+  });
+  return { tools: [], compacted: params.tools.length > 0, catalogToolCount: params.tools.length };
+}
+
+export function registerToolSearchCodeModeCatalog(params: {
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+  entries: ToolSearchCatalogEntry[];
+  append?: boolean;
+}): void {
+  const keys = sessionCatalogKeys(params);
+  if (keys.length === 0) {
+    return;
+  }
+  const primaryKey = keys[0];
+  if (!primaryKey) {
+    return;
+  }
+  const prior = params.append ? sessionCatalogs.get(primaryKey) : undefined;
+  const byId = new Map<string, ToolSearchCatalogEntry>();
+  for (const entry of prior?.entries ?? []) {
+    byId.set(entry.id, entry);
+  }
+  for (const entry of params.entries) {
+    byId.set(entry.id, entry);
+    byId.set(entry.name, entry);
+  }
+  const next = {
+    entries: [...new Set(byId.values())].toSorted((a, b) => a.id.localeCompare(b.id)),
+    searchCount: prior?.searchCount ?? 0,
+    describeCount: prior?.describeCount ?? 0,
+    callCount: prior?.callCount ?? 0,
+  };
+  for (const key of keys) {
+    sessionCatalogs.set(key, next);
+  }
+}
+
+export function clearToolSearchCodeModeCatalog(params: {
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+}): void {
+  for (const key of sessionCatalogKeys(params)) {
+    sessionCatalogs.delete(key);
+  }
+}
+
+function resolveCatalog(ctx: OpenClawPluginToolContext): ToolSearchCatalogSession {
+  for (const key of sessionCatalogKeys({
+    sessionId: ctx.sessionId,
+    sessionKey: ctx.sessionKey,
+    agentId: ctx.agentId,
+  })) {
+    const catalog = sessionCatalogs.get(key);
+    if (catalog) {
+      return catalog;
+    }
+  }
+  const uniqueCatalogs = [...new Set(sessionCatalogs.values())];
+  if (uniqueCatalogs.length === 1) {
+    const catalog = uniqueCatalogs[0];
+    if (catalog) {
+      return catalog;
+    }
+  }
+  throw new ToolInputError("Tool Search Code Mode catalog is unavailable for this run.");
+}
+
+function compactEntry(entry: ToolSearchCatalogEntry) {
+  return {
+    id: entry.id,
+    source: entry.source,
+    sourceName: entry.sourceName,
+    name: entry.name,
+    label: entry.label,
+    description: entry.description,
+  };
+}
+
+function describeEntry(entry: ToolSearchCatalogEntry) {
+  return {
+    ...compactEntry(entry),
+    parameters: entry.parameters ?? {},
+  };
+}
+
+function tokenize(input: string): string[] {
+  return input
+    .toLowerCase()
+    .split(/[^a-z0-9_./:-]+/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function scoreEntry(entry: ToolSearchCatalogEntry, terms: string[]): number {
+  if (terms.length === 0) {
+    return 1;
+  }
+  const name = entry.name.toLowerCase();
+  const id = entry.id.toLowerCase();
+  const label = (entry.label ?? "").toLowerCase();
+  const description = entry.description.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (name === term || id === term) {
+      score += 20;
+    }
+    if (name.includes(term)) {
+      score += 8;
+    }
+    if (id.includes(term)) {
+      score += 6;
+    }
+    if (label.includes(term)) {
+      score += 4;
+    }
+    if (description.includes(term)) {
+      score += 2;
+    }
+  }
+  return score;
+}
+
+function findEntry(catalog: ToolSearchCatalogSession, id: string): ToolSearchCatalogEntry {
+  const needle = id.trim();
+  const entry = catalog.entries.find(
+    (candidate) => candidate.id === needle || candidate.name === needle,
+  );
+  if (!entry) {
+    throw new ToolInputError(`Unknown tool id: ${needle}`);
+  }
+  return entry;
+}
+
+function readId(args: unknown): string {
+  const params = asToolParamsRecord(args);
+  const value = params.id ?? params.toolId ?? params.name;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ToolInputError("id must be a non-empty string.");
+  }
+  return value.trim();
+}
+
+function readLimit(value: unknown, config: ToolSearchCodeModeConfig): number {
+  if (value === undefined) {
+    return config.searchDefaultLimit;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new ToolInputError("limit must be a positive integer.");
+  }
+  return Math.min(value, config.maxSearchLimit);
+}
+
+function readSearchArgs(
+  args: unknown,
+  config: ToolSearchCodeModeConfig,
+): { query: string; limit: number } {
+  const params = asToolParamsRecord(args);
+  const query = params.query;
+  if (typeof query !== "string") {
+    throw new ToolInputError("query must be a string.");
+  }
+  const options = isRecord(params.options) ? params.options : undefined;
+  return {
+    query,
+    limit: readLimit(params.limit ?? options?.limit, config),
+  };
+}
+
+function readCallArgs(args: unknown): { id: string; input: unknown } {
+  const params = asToolParamsRecord(args);
+  const id = readId(params);
+  return {
+    id,
+    input: params.args ?? params.input ?? {},
+  };
+}
+
+function getTelemetry(catalog: ToolSearchCatalogSession) {
+  const sources: Record<CatalogSource, number> = {
+    openclaw: 0,
+    mcp: 0,
+    client: 0,
+  };
+  for (const entry of catalog.entries) {
+    sources[entry.source] += 1;
+  }
+  return {
+    catalogSize: catalog.entries.length,
+    sources,
+    searchCount: catalog.searchCount,
+    describeCount: catalog.describeCount,
+    callCount: catalog.callCount,
+  };
+}
+
+class ToolSearchRuntime {
+  constructor(
+    private readonly ctx: OpenClawPluginToolContext,
+    private readonly config: ToolSearchCodeModeConfig,
+  ) {}
+
+  search = async (query: string, options?: { limit?: number }) => {
+    const catalog = resolveCatalog(this.ctx);
+    catalog.searchCount += 1;
+    const limit = readLimit(options?.limit, this.config);
+    const terms = tokenize(query);
+    return catalog.entries
+      .map((entry) => ({ entry, score: scoreEntry(entry, terms) }))
+      .filter((hit) => hit.score > 0)
+      .toSorted((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id))
+      .slice(0, limit)
+      .map((hit) => compactEntry(hit.entry));
+  };
+
+  describe = async (id: string) => {
+    const catalog = resolveCatalog(this.ctx);
+    catalog.describeCount += 1;
+    return describeEntry(findEntry(catalog, id));
+  };
+
+  call = async (id: string, input?: unknown) => {
+    const catalog = resolveCatalog(this.ctx);
+    const entry = findEntry(catalog, id);
+    catalog.callCount += 1;
+    const execute = entry.tool.execute as (
+      toolCallId: string,
+      input: unknown,
+    ) => Promise<AgentToolResult<unknown>>;
+    const result = await execute(`tool_search_code:${entry.name}`, input ?? {});
+    return {
+      tool: compactEntry(entry),
+      result,
+    };
+  };
+
+  telemetry() {
+    return getTelemetry(resolveCatalog(this.ctx));
+  }
+}
+
+function toJsonSafe(value: unknown): unknown {
+  if (value === undefined) {
+    return null;
+  }
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown;
+  } catch {
+    if (value instanceof Error) {
+      return value.message;
+    }
+    if (value === null) {
+      return null;
+    }
+    switch (typeof value) {
+      case "string":
+        return value;
+      case "number":
+      case "boolean":
+      case "bigint":
+      case "symbol":
+      case "function":
+        return String(value);
+      default:
+        return Object.prototype.toString.call(value);
+    }
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("tool_search_code timed out")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+async function runCodeMode(params: {
+  ctx: OpenClawPluginToolContext;
+  code: string;
+  config: ToolSearchCodeModeConfig;
+}) {
+  const runtime = new ToolSearchRuntime(params.ctx, params.config);
+  const logs: string[] = [];
+  const openclaw = Object.freeze({
+    tools: Object.freeze({
+      search: runtime.search,
+      describe: runtime.describe,
+      call: runtime.call,
+    }),
+  });
+  const consoleBridge = Object.freeze({
+    log: (...items: unknown[]) => logs.push(items.map((item) => String(item)).join(" ")),
+    warn: (...items: unknown[]) => logs.push(items.map((item) => String(item)).join(" ")),
+    error: (...items: unknown[]) => logs.push(items.map((item) => String(item)).join(" ")),
+  });
+  const context = vm.createContext({
+    openclaw,
+    console: consoleBridge,
+  });
+  const script = new vm.Script(`"use strict";\n(async () => {\n${params.code}\n})()`);
+  const value = await withTimeout(
+    Promise.resolve(script.runInContext(context, { timeout: params.config.codeTimeoutMs })),
+    params.config.codeTimeoutMs,
+  );
+  return {
+    ok: true,
+    value: toJsonSafe(value),
+    logs,
+    telemetry: runtime.telemetry(),
+  };
+}
+
+function readCode(args: unknown): string {
+  const params = asToolParamsRecord(args);
+  const code = params.code;
+  if (typeof code !== "string" || !code.trim()) {
+    throw new ToolInputError("code must be a non-empty string.");
+  }
+  return code;
+}
+
+export function createToolSearchCodeModeTools(ctx: OpenClawPluginToolContext): AnyAgentTool[] {
+  const config = resolveToolSearchCodeModeConfig(ctx.runtimeConfig ?? ctx.config);
+  const runtime = new ToolSearchRuntime(ctx, config);
+  return [
+    {
+      name: TOOL_SEARCH_CODE_MODE_TOOL_NAME,
+      label: "Tool Search Code Mode",
+      description:
+        "Run JavaScript in an isolated Node VM with openclaw.tools.search, openclaw.tools.describe, and openclaw.tools.call for large tool catalogs.",
+      parameters: Type.Object({
+        code: Type.String({
+          description:
+            "JavaScript body for an async function. Use return to return the final value. The openclaw.tools bridge is available.",
+        }),
+      }),
+      execute: async (_toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> =>
+        jsonResult(await runCodeMode({ ctx, code: readCode(args), config })),
+    },
+    {
+      name: TOOL_SEARCH_RAW_TOOL_NAME,
+      label: "Tool Search",
+      description: "Search the effective Tool Search Code Mode catalog.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Search query." }),
+        limit: Type.Optional(Type.Number({ description: "Maximum number of results." })),
+      }),
+      execute: async (_toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> => {
+        const search = readSearchArgs(args, config);
+        return jsonResult(await runtime.search(search.query, { limit: search.limit }));
+      },
+    },
+    {
+      name: TOOL_DESCRIBE_RAW_TOOL_NAME,
+      label: "Tool Describe",
+      description: "Load the full schema and metadata for one search result.",
+      parameters: Type.Object({
+        id: Type.String({ description: "Tool search result id or tool name." }),
+      }),
+      execute: async (_toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> =>
+        jsonResult(await runtime.describe(readId(args))),
+    },
+    {
+      name: TOOL_CALL_RAW_TOOL_NAME,
+      label: "Tool Call",
+      description: "Call a selected Tool Search Code Mode catalog entry through OpenClaw.",
+      parameters: Type.Object({
+        id: Type.String({ description: "Tool search result id or tool name." }),
+        args: Type.Optional(
+          Type.Record(Type.String(), Type.Unknown(), { description: "Tool input." }),
+        ),
+      }),
+      execute: async (_toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> => {
+        const call = readCallArgs(args);
+        return jsonResult(await runtime.call(call.id, call.input));
+      },
+    },
+  ];
+}
+
+export const __testing = {
+  sessionCatalogs,
+  resolveToolSearchCodeModeConfig,
+  applyToolSearchCodeModeCatalog,
+  addClientToolsToToolSearchCodeModeCatalog,
+};

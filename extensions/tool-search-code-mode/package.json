@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/tool-search-code-mode",
+  "version": "2026.5.8",
+  "description": "Tool search and code-mode bridge for large OpenClaw tool catalogs",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
