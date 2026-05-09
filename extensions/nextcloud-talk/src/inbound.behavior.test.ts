@@ -7,16 +7,12 @@ import type { CoreConfig, NextcloudTalkInboundMessage } from "./types.js";
 
 const {
   createChannelPairingControllerMock,
-  readStoreAllowFromForDmPolicyMock,
-  resolveDmGroupAccessWithCommandGateMock,
   resolveAllowlistProviderRuntimeGroupPolicyMock,
   resolveDefaultGroupPolicyMock,
   warnMissingProviderGroupPolicyFallbackOnceMock,
 } = vi.hoisted(() => {
   return {
     createChannelPairingControllerMock: vi.fn(),
-    readStoreAllowFromForDmPolicyMock: vi.fn(),
-    resolveDmGroupAccessWithCommandGateMock: vi.fn(),
     resolveAllowlistProviderRuntimeGroupPolicyMock: vi.fn(),
     resolveDefaultGroupPolicyMock: vi.fn(),
     warnMissingProviderGroupPolicyFallbackOnceMock: vi.fn(),
@@ -31,8 +27,6 @@ vi.mock("../runtime-api.js", async () => {
   return {
     ...actual,
     createChannelPairingController: createChannelPairingControllerMock,
-    readStoreAllowFromForDmPolicy: readStoreAllowFromForDmPolicyMock,
-    resolveDmGroupAccessWithCommandGate: resolveDmGroupAccessWithCommandGateMock,
     resolveAllowlistProviderRuntimeGroupPolicy: resolveAllowlistProviderRuntimeGroupPolicyMock,
     resolveDefaultGroupPolicy: resolveDefaultGroupPolicyMock,
     warnMissingProviderGroupPolicyFallbackOnce: warnMissingProviderGroupPolicyFallbackOnceMock,
@@ -53,26 +47,35 @@ vi.mock("./room-info.js", async () => {
 
 function installRuntime(params?: {
   buildMentionRegexes?: () => RegExp[];
+  hasControlCommand?: (body: string) => boolean;
   matchesMentionPatterns?: (body: string, regexes: RegExp[]) => boolean;
+  shouldHandleTextCommands?: () => boolean;
 }) {
-  setNextcloudTalkRuntime({
+  const runtime = {
     channel: {
+      turn: {
+        runPrepared: vi.fn(async ({ runDispatch }: { runDispatch: () => Promise<void> }) => {
+          await runDispatch();
+        }),
+      },
       pairing: {
         readAllowFromStore: vi.fn(async () => []),
         upsertPairingRequest: vi.fn(async () => ({ code: "123456", created: true })),
       },
       commands: {
-        shouldHandleTextCommands: vi.fn(() => false),
+        shouldHandleTextCommands: params?.shouldHandleTextCommands ?? vi.fn(() => false),
       },
       text: {
-        hasControlCommand: vi.fn(() => false),
+        hasControlCommand: params?.hasControlCommand ?? vi.fn(() => false),
       },
       mentions: {
         buildMentionRegexes: params?.buildMentionRegexes ?? vi.fn(() => []),
         matchesMentionPatterns: params?.matchesMentionPatterns ?? vi.fn(() => false),
       },
     },
-  } as unknown as PluginRuntime);
+  };
+  setNextcloudTalkRuntime(runtime as unknown as PluginRuntime);
+  return runtime;
 }
 
 function createRuntimeEnv() {
@@ -129,7 +132,6 @@ describe("nextcloud-talk inbound behavior", () => {
       providerMissingFallbackApplied: false,
     });
     warnMissingProviderGroupPolicyFallbackOnceMock.mockReturnValue(undefined);
-    readStoreAllowFromForDmPolicyMock.mockResolvedValue([]);
   });
 
   it("issues a DM pairing challenge and sends the challenge text", async () => {
@@ -141,12 +143,6 @@ describe("nextcloud-talk inbound behavior", () => {
     createChannelPairingControllerMock.mockReturnValue({
       readStoreForDmPolicy: vi.fn(),
       issueChallenge,
-    });
-    resolveDmGroupAccessWithCommandGateMock.mockReturnValue({
-      decision: "pairing",
-      reason: "pairing_required",
-      commandAuthorized: false,
-      effectiveGroupAllowFrom: [],
     });
     sendMessageNextcloudTalkMock.mockResolvedValue(undefined);
 
@@ -193,12 +189,6 @@ describe("nextcloud-talk inbound behavior", () => {
       issueChallenge: vi.fn(),
     });
     resolveNextcloudTalkRoomKindMock.mockResolvedValue("group");
-    resolveDmGroupAccessWithCommandGateMock.mockReturnValue({
-      decision: "allow",
-      reason: "allow",
-      commandAuthorized: false,
-      effectiveGroupAllowFrom: ["user-1"],
-    });
     const runtime = createRuntimeEnv();
 
     await handleNextcloudTalkInbound({
@@ -221,5 +211,51 @@ describe("nextcloud-talk inbound behavior", () => {
 
     expect(sendMessageNextcloudTalkMock).not.toHaveBeenCalled();
     expect(runtime.log).toHaveBeenCalledWith("nextcloud-talk: drop room room-group (no mention)");
+  });
+
+  it("blocks unauthorized group text control commands even when room sender access allows chat", async () => {
+    const buildMentionRegexes = vi.fn(() => [/@openclaw/i]);
+    const coreRuntime = installRuntime({
+      buildMentionRegexes,
+      hasControlCommand: vi.fn(() => true),
+      shouldHandleTextCommands: vi.fn(() => true),
+    });
+    createChannelPairingControllerMock.mockReturnValue({
+      readStoreForDmPolicy: vi.fn(),
+      issueChallenge: vi.fn(),
+    });
+    resolveNextcloudTalkRoomKindMock.mockResolvedValue("group");
+    const runtime = createRuntimeEnv();
+
+    await handleNextcloudTalkInbound({
+      message: createMessage({
+        roomToken: "room-group",
+        roomName: "Ops",
+        isGroupChat: true,
+        text: "/openclaw reload",
+      }),
+      account: createAccount({
+        config: {
+          dmPolicy: "pairing",
+          allowFrom: [],
+          groupPolicy: "allowlist",
+          groupAllowFrom: [],
+          rooms: {
+            "room-group": {
+              allowFrom: ["user-1"],
+              requireMention: false,
+            },
+          },
+        },
+      }),
+      config: { channels: { "nextcloud-talk": {} } } as CoreConfig,
+      runtime,
+    });
+
+    expect(coreRuntime.channel.turn.runPrepared).not.toHaveBeenCalled();
+    expect(buildMentionRegexes).not.toHaveBeenCalled();
+    expect(runtime.log).toHaveBeenCalledWith(
+      "nextcloud-talk: drop control command (unauthorized) target=user-1",
+    );
   });
 });

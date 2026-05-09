@@ -413,8 +413,8 @@ describe("describeIMessageEchoDropLog", () => {
 });
 
 describe("buildIMessageInboundContext", () => {
-  it("keeps numeric row id and provider GUID separately for action tooling", () => {
-    const decision = resolveIMessageInboundDecision({
+  it("keeps numeric row id and provider GUID separately for action tooling", async () => {
+    const decision = await resolveIMessageInboundDecision({
       cfg: {} as OpenClawConfig,
       accountId: "default",
       message: {
