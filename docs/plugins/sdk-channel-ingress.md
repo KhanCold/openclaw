@@ -15,11 +15,14 @@ It answers one question before the turn kernel runs: should this message,
 command, reaction, button, postback, or native command dispatch, skip, observe,
 drop, or start pairing?
 
-Use `openclaw/plugin-sdk/channel-ingress` from channel runtime receive paths
-when your plugin needs shared DM/group allowlist, route, command, event, or
-mention-activation policy. The API is experimental because the bundled plugins
-are still proving which policy shapes are generic enough for third-party
-channels.
+Use `openclaw/plugin-sdk/channel-ingress-runtime` from channel runtime receive
+paths when your plugin needs the common DM/group allowlist, pairing-store,
+route, command, event, or mention-activation policy envelope. Use
+`openclaw/plugin-sdk/channel-ingress` only when an unusual path needs the
+low-level state and decision graph directly.
+
+Both APIs are experimental because the bundled plugins are still proving which
+policy shapes are generic enough for third-party channels.
 
 ## Design
 
@@ -37,9 +40,7 @@ only selected policy slices and normalized facts into the resolver.
 transport event
   -> plugin verifies webhook, token, replay, and platform auth
   -> plugin resolves account, sender, conversation, route, and mention facts
-  -> plugin reads caller-owned dynamic state such as pairing entries
-  -> resolveChannelIngressState(...)
-  -> decideChannelIngress(...) or decideChannelIngressBundle(...)
+  -> resolveChannelMessageIngress(...)
   -> plugin sends pairing, command, ack, or local-event side effects
   -> mapChannelIngressDecisionToTurnAdmission(...)
   -> turn kernel
@@ -55,6 +56,7 @@ Core owns generic policy semantics:
 - DM policy: `pairing`, `allowlist`, `open`, `disabled`
 - group policy: `allowlist`, `open`, `disabled`
 - pairing-store entries as DM-only authorization facts
+- effective DM and group allowlist derivation
 - route gates, route-sender gates, and empty-route-sender failure semantics
 - command authorization from owner/group authorizers
 - event authorization modes
@@ -72,7 +74,75 @@ Plugins own platform-specific facts and side effects:
 - command replies, local event acknowledgements, reactions, typing, media, and history
 - channel-specific logs and user-visible text
 
-## Basic flow
+## Runtime Flow
+
+Describe identity, pass platform facts, and let the runtime helper derive the
+generic policy envelope:
+
+```ts
+const identity = defineStableChannelIngressIdentity({
+  kind: "stable-id",
+  normalize: normalizePlatformUserId,
+});
+
+const result = await resolveChannelMessageIngress({
+  channelId: "my-channel",
+  accountId,
+  identity,
+  subject: { stableId: platformUserId },
+  conversation: { kind: isGroup ? "group" : "direct", id: conversationId },
+  event: { kind: "message", authMode: "inbound", mayPair: !isGroup },
+  policy: {
+    dmPolicy: config.dmPolicy,
+    groupPolicy: config.groupPolicy,
+    groupAllowFromFallbackToAllowFrom: true,
+  },
+  allowFrom: config.allowFrom,
+  groupAllowFrom: config.groupAllowFrom,
+  accessGroups: cfg.accessGroups,
+  resolveAccessGroupMembership,
+  routeFacts,
+  readStoreAllowFrom,
+  command: hasControlCommand ? commandPolicy : undefined,
+});
+
+const { ingress, senderAccess, commandAccess, eventAccess, activationAccess, accessFacts } = result;
+```
+
+The caller should not precompute `effectiveAllowFrom`,
+`effectiveGroupAllowFrom`, `commandOwner`, or `commandGroup`. Those are derived
+inside the runtime helper from the selected policy, raw allowlists, store
+callback, route facts, and conversation kind.
+
+When `allowFrom` or `groupAllowFrom` contains `accessGroup:<name>`, the runtime
+resolver keeps the group reference redacted, resolves static groups itself, and
+calls `resolveAccessGroupMembership` only for dynamic groups that require
+platform APIs. Matched groups expand the effective lists; failed dynamic
+lookups fail closed.
+
+Use `command.commandOwnerAllowFrom` only for paths where sender authorization
+and command authorization intentionally use different lists, such as an
+interactive DM event where the sender gate stays open but the command gate must
+still require an owner allowlist. Keep that override narrow; normal message
+paths should let the resolver derive command owners from `allowFrom`.
+
+`resolveChannelMessageIngress(...)` returns separate projections so plugin code
+does not need old compatibility shapes:
+
+- `ingress`: the full ordered gate decision and admission
+- `senderAccess`: sender and conversation authorization only
+- `commandAccess`: command authorization, unauthorized when the command gate did
+  not run
+- `eventAccess`: reaction, button, callback, postback, and origin-subject
+  authorization
+- `activationAccess`: mention or activation routing
+- `accessFacts`: redacted turn-context projection
+
+Bundled plugin receive paths and SDK compatibility helpers should use those
+modern fields. Old third-party return shapes are rebuilt inside deprecated SDK
+helpers, not exposed on the modern runtime result.
+
+## Low-Level Flow
 
 Create a subject, choose an adapter, resolve state, then decide:
 
@@ -216,9 +286,16 @@ and shared policy:
 - `mentionFacts`: optional mention-detection facts
 - `event`: event kind and event auth mode
 
-The resolver accepts selected policy slices, not runtime config objects. If a
-plugin needs to read a pairing store, fetch room membership, or expand an
-access group through a platform API, do that before calling the resolver.
+The low-level state resolver accepts selected policy slices, not runtime config
+objects. If an unusual low-level path needs to read a pairing store, fetch room
+membership, or expand an access group through a platform API, do that before
+calling `resolveChannelIngressState(...)`. For normal receive paths, prefer
+`resolveChannelMessageIngress(...)` and pass a `readStoreAllowFrom` callback so
+the shared runtime resolver owns the pairing-store read rules. If a migrated
+runtime only needs the standard pairing store reader, use
+`readChannelIngressStoreAllowFromForDmPolicy(...)` from
+`openclaw/plugin-sdk/channel-ingress-runtime` instead of the deprecated
+security-runtime helper.
 
 ## Events
 
@@ -261,10 +338,12 @@ const senderGate = findChannelIngressSenderGate(decision, { isGroup });
 const commandGate = findChannelIngressCommandGate(decision);
 ```
 
-Use `decideChannelIngressBundle(...)` when a plugin needs related decisions for
-the same event shape, such as normal sender dispatch and command authorization.
-The bundle keeps the policy shape explicit without forcing plugin handlers to
-guess which gate was decisive.
+Use `resolveChannelMessageIngressBundle(...)` for runtime paths that need
+related direct and group decisions for one platform event. Signal- and
+Matrix-style handlers use this to compute direct pairing/sender compatibility
+state and group sender state without duplicating resolver setup. Use
+`decideChannelIngressBundle(...)` only when an unusual low-level path already
+has resolved states and policies.
 
 ## Route gates
 
@@ -275,10 +354,16 @@ nested route policy. Core only evaluates the generic gate shape:
 - `effect`: `allow`, `block-dispatch`, or `ignore`
 - `senderPolicy`: `inherit`, `replace`, or `deny-when-empty`
 - `senderAllowFrom`: optional route-owned sender allowlist
+- `senderAllowFromSource`: optional `"effective-dm"` or `"effective-group"`
+  source when the route should reuse the runtime-derived sender list
 
 Use `senderPolicy: "deny-when-empty"` when a matched route must fail closed if
 the route has no configured sender allowlist. Use `"replace"` when the route
 sender allowlist replaces the channel-level group allowlist.
+
+Prefer `senderAllowFromSource: "effective-group"` for route-heavy group
+channels that already use the configured group policy. That keeps fallback,
+normalization, and access-group expansion in the shared runtime resolver.
 
 ## Command authorization
 
@@ -287,19 +372,21 @@ inline buttons, reactions, or group callbacks by route scope while still telling
 plugin handlers whether the actor is authorized to run commands.
 
 ```ts
-const commandDecision = decideChannelIngress(state, {
-  dmPolicy,
-  groupPolicy,
+const result = await resolveChannelMessageIngress({
+  ...messageInput,
   command: {
     allowTextCommands: true,
     hasControlCommand,
     useAccessGroups: true,
   },
 });
+
+const commandAuthorized = result.commandAccess.authorized;
 ```
 
 For callbacks that pass command authorization into plugin handlers, use the
-command decision or command gate. Do not replace it with a route-only boolean.
+command access projection or command gate. Do not replace it with a route-only
+boolean.
 
 ## Activation
 
@@ -350,13 +437,26 @@ truth.
 New code should read decision, reason-code, and gate metadata rather than those
 compatibility arrays.
 
-## Legacy DM/group projection
+## Deprecated DM/group projection
 
-Some migrated channel runtimes still expose older DM/group access result
-shapes internally while they move hot paths to direct ingress decisions. Use
-`resolveChannelIngressAccess(...)` when a runtime needs the common
-state-resolution, decision, sender-reason, command-gate, and legacy DM/group
-projection bundle:
+Old plugin-facing helpers still expose DM/group access result shapes. Keep that
+compatibility in SDK shims, not in bundled plugin receive paths.
+
+Deprecated SDK shims should adapt `senderAccess` back to the old shape when
+needed:
+
+```ts
+const result = await resolveChannelMessageIngress(input);
+return {
+  decision: result.senderAccess.decision,
+  reasonCode: result.senderAccess.reasonCode,
+  reason: result.senderAccess.reason,
+  effectiveAllowFrom: result.senderAccess.effectiveAllowFrom,
+};
+```
+
+`resolveChannelIngressAccess(...)` is deprecated. It remains available only for
+old compatibility callers that already build low-level state input:
 
 ```ts
 import { resolveChannelIngressAccess } from "openclaw/plugin-sdk/channel-ingress";
@@ -370,8 +470,8 @@ const result = await resolveChannelIngressAccess({
 ```
 
 Use `projectChannelIngressDmGroupAccess(...)` when the runtime already has a
-decision and only needs transitional DM/group mapping. Do not copy reason-code
-tables into each plugin:
+decision and a compatibility shim needs transitional DM/group mapping. Do not
+copy reason-code tables into each plugin:
 
 ```ts
 import { projectChannelIngressDmGroupAccess } from "openclaw/plugin-sdk/channel-ingress";
@@ -384,8 +484,15 @@ const legacyAccess = projectChannelIngressDmGroupAccess({
 });
 ```
 
-Keep this as compatibility glue. New runtime code should prefer the ingress
-decision and selected gates directly.
+Use `projectChannelIngressSenderGroupAccess(...)` for older sender/group
+access shapes that only need the group sender result, and
+`formatChannelIngressPolicyReason(...)` when a compatibility path needs the
+standard legacy reason string. New code should still prefer the decision graph
+and typed gate selectors.
+
+Keep this as compatibility glue. Bundled plugin runtime code should prefer
+`senderAccess`, `commandAccess`, `eventAccess`, `activationAccess`, and the
+ingress decision directly.
 
 ## Tests
 

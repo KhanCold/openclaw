@@ -1,9 +1,6 @@
 import type { Message } from "@grammyjs/types";
 import type { Bot } from "grammy";
-import {
-  decideChannelIngress,
-  resolveChannelIngressState,
-} from "openclaw/plugin-sdk/channel-ingress";
+import { resolveChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
 import type { DmPolicy } from "openclaw/plugin-sdk/config-types";
 import { upsertChannelPairingRequest } from "openclaw/plugin-sdk/conversation-runtime";
@@ -15,7 +12,7 @@ import {
   createTelegramIngressSubject,
   telegramAllowEntries,
   TELEGRAM_CHANNEL_ID,
-  telegramIngressAdapter,
+  telegramIngressIdentity,
 } from "./ingress.js";
 
 type TelegramDmAccessLogger = {
@@ -48,28 +45,27 @@ async function decideTelegramDmAccess(params: {
   sender: TelegramSenderIdentity;
   effectiveDmAllow: NormalizedAllowFrom;
 }) {
-  const state = await resolveChannelIngressState({
+  const result = await resolveChannelMessageIngress({
     channelId: TELEGRAM_CHANNEL_ID,
     accountId: params.accountId,
+    identity: telegramIngressIdentity,
     subject: createTelegramIngressSubject(params.sender.candidateId),
     conversation: {
       kind: "direct",
       id: params.sender.candidateId,
     },
-    adapter: telegramIngressAdapter,
     event: {
       kind: "message",
       authMode: "inbound",
       mayPair: true,
     },
-    allowlists: {
-      dm: telegramAllowEntries(params.effectiveDmAllow),
+    policy: {
+      dmPolicy: params.dmPolicy,
+      groupPolicy: "disabled",
     },
+    allowFrom: telegramAllowEntries(params.effectiveDmAllow),
   });
-  return decideChannelIngress(state, {
-    dmPolicy: params.dmPolicy,
-    groupPolicy: "disabled",
-  });
+  return result.ingress;
 }
 
 export async function enforceTelegramDmAccess(params: {

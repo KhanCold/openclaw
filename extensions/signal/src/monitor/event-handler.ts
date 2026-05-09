@@ -652,7 +652,7 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
     }
 
     const commandAccess = resolveCommandAccess(isGroup);
-    const commandAuthorized = commandAccess.commandAuthorized;
+    const commandAuthorized = commandAccess.authorized;
     if (isGroup && commandAccess.shouldBlockControlCommand) {
       logInboundDrop({
         log: logVerbose,

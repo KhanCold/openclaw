@@ -287,10 +287,7 @@ describe("msteams monitor handler authz", () => {
     const handler = createMSTeamsMessageHandler(deps);
     await handler(createAttackerGroupActivity({ text: "" }));
 
-    expect(readAllowFromStore).toHaveBeenCalledWith({
-      channel: "msteams",
-      accountId: "default",
-    });
+    expect(readAllowFromStore).not.toHaveBeenCalled();
     expect(conversationStore.upsert).not.toHaveBeenCalled();
   });
 

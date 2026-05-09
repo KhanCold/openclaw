@@ -256,23 +256,23 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       pairing,
       isDirectMessage,
       channelGate,
-      access,
-      effectiveDmAllowFrom,
-      effectiveGroupAllowFrom,
+      senderAccess,
+      commandAccess,
       allowNameMatching,
       groupPolicy,
-      senderGroupAccess,
-      commandAuthorized,
-      shouldBlockControlCommand,
     } = await resolveMSTeamsSenderAccess({
       cfg,
       activity,
       hasControlCommand: core.channel.text.hasControlCommand(text, cfg),
     });
+    const senderGroupAccess = senderAccess.groupAccess;
+    const commandAuthorized = commandAccess.requested ? commandAccess.authorized : undefined;
+    const effectiveDmAllowFrom = senderAccess.effectiveAllowFrom;
+    const effectiveGroupAllowFrom = senderAccess.effectiveGroupAllowFrom;
     const isChannel = conversationType === "channel";
 
-    if (isDirectMessage && msteamsCfg && access.decision !== "allow") {
-      if (access.reason === "dmPolicy=disabled") {
+    if (isDirectMessage && msteamsCfg && senderAccess.decision !== "allow") {
+      if (senderAccess.reason === "dmPolicy=disabled") {
         log.info("dropping dm (dms disabled)", {
           sender: senderId,
           label: senderName,
@@ -286,7 +286,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         senderName,
         allowNameMatching,
       });
-      if (access.decision === "pairing") {
+      if (senderAccess.decision === "pairing") {
         conversationStore.upsert(conversationId, conversationRef).catch((err) => {
           log.debug?.("failed to save conversation reference", {
             error: formatUnknownError(err),
@@ -312,7 +312,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         sender: senderId,
         label: senderName,
         dmPolicy,
-        reason: access.reason,
+        reason: senderAccess.reason,
         allowlistMatch: formatAllowlistMatchMeta(allowMatch),
       });
       return;
@@ -337,7 +337,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         return;
       }
 
-      if (!senderGroupAccess.allowed && senderGroupAccess.reason === "disabled") {
+      if (senderGroupAccess?.allowed === false && senderGroupAccess.reason === "disabled") {
         log.info("dropping group message (groupPolicy: disabled)", {
           conversationId,
         });
@@ -346,7 +346,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         });
         return;
       }
-      if (!senderGroupAccess.allowed && senderGroupAccess.reason === "empty_allowlist") {
+      if (senderGroupAccess?.allowed === false && senderGroupAccess.reason === "empty_allowlist") {
         log.info("dropping group message (groupPolicy: allowlist, no allowlist)", {
           conversationId,
         });
@@ -355,7 +355,10 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         });
         return;
       }
-      if (!senderGroupAccess.allowed && senderGroupAccess.reason === "sender_not_allowlisted") {
+      if (
+        senderGroupAccess?.allowed === false &&
+        senderGroupAccess.reason === "sender_not_allowlisted"
+      ) {
         const allowMatch = resolveMSTeamsAllowlistMatch({
           allowFrom: effectiveGroupAllowFrom,
           senderId,
@@ -376,7 +379,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       }
     }
 
-    if (shouldBlockControlCommand) {
+    if (commandAccess.shouldBlockControlCommand) {
       logInboundDrop({
         log: logVerboseMessage,
         channel: "msteams",

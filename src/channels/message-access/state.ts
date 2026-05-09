@@ -1,5 +1,5 @@
-import { parseAccessGroupAllowFromEntry } from "../../plugin-sdk/access-groups.js";
 import { normalizeStringEntries } from "../../shared/string-normalization.js";
+import { parseAccessGroupAllowFromEntry } from "../allow-from.js";
 import type {
   AccessGroupMembershipFact,
   ChannelIngressState,
@@ -342,6 +342,13 @@ async function resolveRouteFacts(
   );
   const resolved: ResolvedRouteGateFacts[] = [];
   for (const route of routeFacts) {
+    const senderAllowFrom =
+      route.senderAllowFrom ??
+      (route.senderAllowFromSource === "effective-dm"
+        ? input.allowlists.dm
+        : route.senderAllowFromSource === "effective-group"
+          ? input.allowlists.group
+          : undefined);
     resolved.push({
       id: route.id,
       kind: route.kind,
@@ -351,10 +358,10 @@ async function resolveRouteFacts(
       senderPolicy: route.senderPolicy,
       match: route.match,
       senderAllowlist:
-        route.senderAllowFrom != null
+        senderAllowFrom != null
           ? await resolveIngressAllowlist({
               input,
-              rawEntries: route.senderAllowFrom,
+              rawEntries: senderAllowFrom,
               context: "route",
             })
           : undefined,

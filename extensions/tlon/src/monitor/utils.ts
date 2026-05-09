@@ -1,13 +1,8 @@
 import {
-  createChannelIngressPluginId,
-  createChannelIngressStringAdapter,
-  createChannelIngressSubject,
-  decideChannelIngress,
-  findChannelIngressCommandGate,
-  resolveChannelIngressState,
-  type ChannelIngressDecision,
-  type ChannelIngressState,
-} from "openclaw/plugin-sdk/channel-ingress";
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+  type ResolvedChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { formatErrorMessage as sharedFormatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { normalizeShip } from "../targets.js";
 
@@ -132,115 +127,79 @@ export function stripBotMention(messageText: string, botShipName: string): strin
   return messageText.replace(normalizeShip(botShipName), "").trim();
 }
 
-export function isDmAllowed(senderShip: string, allowlist: string[] | undefined): boolean {
-  if (!allowlist || allowlist.length === 0) {
-    return false;
-  }
-  const normalizedSender = normalizeShip(senderShip);
-  return allowlist.map((ship) => normalizeShip(ship)).some((ship) => ship === normalizedSender);
-}
-
-const tlonIngressPluginId = createChannelIngressPluginId("tlon");
-const tlonShipIngressAdapter = createChannelIngressStringAdapter({
-  normalizeEntry: normalizeShip,
-  normalizeSubject: normalizeShip,
+const tlonIngressIdentity = defineStableChannelIngressIdentity({
+  key: "sender-ship",
+  normalize: normalizeShip,
+  sensitivity: "pii",
   isWildcardEntry: () => false,
+  entryIdPrefix: "tlon-entry",
 });
 
 export async function resolveTlonDmAccessWithIngress(
   senderShip: string,
   allowlist: string[] | undefined,
-): Promise<{
-  allowed: boolean;
-  state: ChannelIngressState;
-  decision: ChannelIngressDecision;
-}> {
-  const normalizedSender = normalizeShip(senderShip);
-  const state = await resolveChannelIngressState({
-    channelId: tlonIngressPluginId,
+): Promise<ResolvedChannelMessageIngress> {
+  return await resolveChannelMessageIngress({
+    channelId: "tlon",
     accountId: "default",
-    subject: createChannelIngressSubject({
-      opaqueId: "sender-ship",
-      value: normalizedSender,
-    }),
+    identity: tlonIngressIdentity,
+    subject: { stableId: senderShip },
     conversation: {
       kind: "direct",
       id: "direct",
     },
-    adapter: tlonShipIngressAdapter,
     event: {
       kind: "message",
       authMode: "inbound",
       mayPair: false,
     },
-    allowlists: {
-      dm: allowlist ?? [],
+    policy: {
+      dmPolicy: "allowlist",
+      groupPolicy: "disabled",
     },
+    allowFrom: allowlist ?? [],
   });
-  const decision = decideChannelIngress(state, {
-    dmPolicy: "allowlist",
-    groupPolicy: "disabled",
-  });
-  return {
-    allowed: decision.admission === "dispatch",
-    state,
-    decision,
-  };
 }
 
 export async function isDmAllowedWithIngress(
   senderShip: string,
   allowlist: string[] | undefined,
 ): Promise<boolean> {
-  return (await resolveTlonDmAccessWithIngress(senderShip, allowlist)).allowed;
+  return (await resolveTlonDmAccessWithIngress(senderShip, allowlist)).senderAccess.allowed;
 }
 
 export async function resolveTlonCommandAuthorizationWithIngress(params: {
   senderShip: string;
   ownerShip: string | null | undefined;
   useAccessGroups: boolean;
-}): Promise<{
-  commandAuthorized: boolean;
-  state: ChannelIngressState;
-  decision: ChannelIngressDecision;
-}> {
-  const normalizedSender = normalizeShip(params.senderShip);
+}): Promise<ResolvedChannelMessageIngress> {
   const normalizedOwner = params.ownerShip ? normalizeShip(params.ownerShip) : null;
-  const state = await resolveChannelIngressState({
-    channelId: tlonIngressPluginId,
+  const resolved = await resolveChannelMessageIngress({
+    channelId: "tlon",
     accountId: "default",
-    subject: createChannelIngressSubject({
-      opaqueId: "sender-ship",
-      value: normalizedSender,
-    }),
+    identity: tlonIngressIdentity,
+    subject: { stableId: params.senderShip },
     conversation: {
       kind: "direct",
       id: "command",
     },
-    adapter: tlonShipIngressAdapter,
     event: {
       kind: "message",
       authMode: "none",
       mayPair: false,
     },
-    allowlists: {
-      commandOwner: normalizedOwner ? [normalizedOwner] : [],
+    policy: {
+      dmPolicy: "allowlist",
+      groupPolicy: "open",
     },
-  });
-  const decision = decideChannelIngress(state, {
-    dmPolicy: "allowlist",
-    groupPolicy: "open",
+    allowFrom: normalizedOwner ? [normalizedOwner] : [],
     command: {
       useAccessGroups: params.useAccessGroups,
       allowTextCommands: false,
       hasControlCommand: true,
     },
   });
-  return {
-    commandAuthorized: findChannelIngressCommandGate(decision)?.allowed === true,
-    state,
-    decision,
-  };
+  return resolved;
 }
 
 /**

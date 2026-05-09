@@ -34,8 +34,8 @@ describe("resolveDiscordTextCommandAccess", () => {
         allowTextCommands: true,
         hasControlCommand: true,
       }),
-    ).resolves.toEqual({
-      commandAuthorized: true,
+    ).resolves.toMatchObject({
+      authorized: true,
       shouldBlockControlCommand: false,
     });
   });
@@ -53,8 +53,8 @@ describe("resolveDiscordTextCommandAccess", () => {
         allowTextCommands: true,
         hasControlCommand: true,
       }),
-    ).resolves.toEqual({
-      commandAuthorized: true,
+    ).resolves.toMatchObject({
+      authorized: true,
       shouldBlockControlCommand: false,
     });
   });
@@ -72,8 +72,8 @@ describe("resolveDiscordTextCommandAccess", () => {
         allowTextCommands: true,
         hasControlCommand: true,
       }),
-    ).resolves.toEqual({
-      commandAuthorized: false,
+    ).resolves.toMatchObject({
+      authorized: false,
       shouldBlockControlCommand: true,
     });
   });
@@ -91,8 +91,8 @@ describe("resolveDiscordTextCommandAccess", () => {
         allowTextCommands: true,
         hasControlCommand: true,
       }),
-    ).resolves.toEqual({
-      commandAuthorized: true,
+    ).resolves.toMatchObject({
+      authorized: true,
       shouldBlockControlCommand: false,
     });
   });

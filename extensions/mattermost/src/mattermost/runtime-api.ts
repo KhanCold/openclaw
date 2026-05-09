@@ -13,12 +13,7 @@ export { buildAgentMediaPayload } from "openclaw/plugin-sdk/agent-media-payload"
 export { resolveAllowlistMatchSimple } from "openclaw/plugin-sdk/allow-from";
 export { logInboundDrop } from "openclaw/plugin-sdk/channel-inbound";
 export { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
-export {
-  DM_GROUP_ACCESS_REASON,
-  readStoreAllowFromForDmPolicy,
-  resolveDmGroupAccessWithLists,
-  resolveEffectiveAllowFromLists,
-} from "openclaw/plugin-sdk/channel-policy";
+export { DM_GROUP_ACCESS_REASON } from "openclaw/plugin-sdk/channel-policy";
 export { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-message";
 export { logTypingFailure } from "openclaw/plugin-sdk/channel-feedback";
 export {

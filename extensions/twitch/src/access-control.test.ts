@@ -327,6 +327,38 @@ describe("checkTwitchAccessControl", () => {
       expect(result.reason).toContain("does not mention the bot");
     });
 
+    it("checks requireMention before sender allowlists for unauthorized chat", async () => {
+      const result = await runAccessCheck({
+        account: {
+          requireMention: true,
+          allowFrom: ["789012"],
+        },
+        message: {
+          message: "ordinary chat",
+          userId: "123456",
+        },
+      });
+
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain("does not mention the bot");
+    });
+
+    it("checks requireMention before role gates for unauthorized chat", async () => {
+      const result = await runAccessCheck({
+        account: {
+          requireMention: true,
+          allowedRoles: ["moderator"],
+        },
+        message: {
+          message: "ordinary chat",
+          isMod: false,
+        },
+      });
+
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain("does not mention the bot");
+    });
+
     it("checks allowlist before allowedRoles", async () => {
       const result = await runAccessCheck({
         account: {

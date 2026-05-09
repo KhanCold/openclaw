@@ -1,16 +1,18 @@
 import {
-  createChannelIngressPluginId,
-  createChannelIngressStringAdapter,
-  createChannelIngressSubject,
-  resolveChannelIngressAccess,
   type ChannelIngressDecision,
-  type IngressReasonCode,
   type RouteGateFacts,
 } from "openclaw/plugin-sdk/channel-ingress";
 import {
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+  routeAllowlistFact,
+  routeDisabledFact,
+  routeSenderAllowlistFact,
+  type ResolvedChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
+import {
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
-  type DmPolicy,
   type GroupPolicy,
   type OpenClawConfig,
 } from "../runtime-api.js";
@@ -23,19 +25,17 @@ import {
 } from "./policy.js";
 import type { CoreConfig, NextcloudTalkRoomConfig } from "./types.js";
 
-type NextcloudTalkAccessDecision = "allow" | "block" | "pairing";
 type NextcloudTalkRoomMatch = ReturnType<typeof resolveNextcloudTalkRoomMatch>;
 type NextcloudTalkRoomGateReason =
   | "room_not_allowlisted"
   | "room_disabled"
   | "room_sender_not_allowlisted";
 
-const NEXTCLOUD_TALK_CHANNEL_ID = createChannelIngressPluginId("nextcloud-talk");
-const nextcloudTalkIngressAdapter = createChannelIngressStringAdapter({
-  normalizeEntry: normalizeNextcloudTalkIngressEntry,
-  normalizeSubject: normalizeNextcloudTalkIngressEntry,
+const nextcloudTalkIngressIdentity = defineStableChannelIngressIdentity({
+  key: "nextcloud-talk-user-id",
+  normalize: normalizeNextcloudTalkIngressEntry,
   sensitivity: "pii",
-  resolveEntryId: ({ index }) => `nextcloud-talk-entry-${index + 1}`,
+  entryIdPrefix: "nextcloud-talk-entry",
 });
 
 function normalizeNextcloudTalkIngressEntry(value: string): string | null {
@@ -55,18 +55,6 @@ function resolveConfiguredGroupAllowFrom(
     : stringEntries(accountConfig.allowFrom);
 }
 
-async function readNextcloudTalkPairingStore(params: {
-  isGroup: boolean;
-  dmPolicy: DmPolicy;
-  readAllowFromStore: () => Promise<string[]>;
-}): Promise<string[]> {
-  if (params.isGroup || params.dmPolicy === "allowlist" || params.dmPolicy === "open") {
-    return [];
-  }
-  const entries = await params.readAllowFromStore().catch(() => []);
-  return Array.isArray(entries) ? entries : [];
-}
-
 function hasEntries(entries: string[]): boolean {
   return normalizeNextcloudTalkAllowlist(entries).length > 0;
 }
@@ -76,25 +64,32 @@ function roomSenderRouteFact(params: {
   outerGroupAllowFrom: string[];
   roomAllowFrom: string[];
 }): RouteGateFacts | null {
-  if (!hasEntries(params.outerGroupAllowFrom) || !hasEntries(params.roomAllowFrom)) {
+  if (!hasEntries(params.roomAllowFrom)) {
     return null;
+  }
+  if (!hasEntries(params.outerGroupAllowFrom)) {
+    return routeSenderAllowlistFact({
+      id: "nextcloud-talk:room-sender",
+      kind: "nestedAllowlist",
+      precedence: 20,
+      senderPolicy: "replace",
+      senderAllowFrom: params.roomAllowFrom,
+    });
   }
   const match = resolveNextcloudTalkAllowlistMatch({
     allowFrom: params.roomAllowFrom,
     senderId: params.senderId,
   });
-  return {
+  return routeAllowlistFact({
     id: "nextcloud-talk:room-sender",
     kind: "nestedAllowlist",
-    gate: match.allowed ? "matched" : "not-matched",
-    effect: match.allowed ? "allow" : "block-dispatch",
+    matched: match.allowed,
     precedence: 20,
-    senderPolicy: "inherit",
     match: {
       matched: match.allowed,
       matchedEntryIds: match.allowed ? ["nextcloud-talk-room-sender"] : [],
     },
-  };
+  });
 }
 
 function roomRouteFacts(params: {
@@ -111,28 +106,25 @@ function roomRouteFacts(params: {
   }
   const facts: RouteGateFacts[] = [];
   if (params.roomMatch.allowlistConfigured) {
-    facts.push({
-      id: "nextcloud-talk:room",
-      kind: "route",
-      gate: params.roomMatch.allowed ? "matched" : "not-matched",
-      effect: params.roomMatch.allowed ? "allow" : "block-dispatch",
-      precedence: 0,
-      senderPolicy: "inherit",
-      match: {
+    facts.push(
+      routeAllowlistFact({
+        id: "nextcloud-talk:room",
         matched: params.roomMatch.allowed,
-        matchedEntryIds: params.roomMatch.allowed ? ["nextcloud-talk-room"] : [],
-      },
-    });
+        precedence: 0,
+        match: {
+          matched: params.roomMatch.allowed,
+          matchedEntryIds: params.roomMatch.allowed ? ["nextcloud-talk-room"] : [],
+        },
+      }),
+    );
   }
   if (params.roomConfig?.enabled === false) {
-    facts.push({
-      id: "nextcloud-talk:room-enabled",
-      kind: "route",
-      gate: "disabled",
-      effect: "block-dispatch",
-      precedence: 10,
-      senderPolicy: "inherit",
-    });
+    facts.push(
+      routeDisabledFact({
+        id: "nextcloud-talk:room-enabled",
+        precedence: 10,
+      }),
+    );
   }
   if (params.groupPolicy === "allowlist") {
     const roomSender = roomSenderRouteFact({
@@ -147,47 +139,13 @@ function roomRouteFacts(params: {
   return facts;
 }
 
-function resolveSenderGroupAllowFrom(params: {
-  groupPolicy: GroupPolicy;
-  outerGroupAllowFrom: string[];
-  roomAllowFrom: string[];
-}): string[] {
-  if (
-    params.groupPolicy === "allowlist" &&
-    !hasEntries(params.outerGroupAllowFrom) &&
-    hasEntries(params.roomAllowFrom)
-  ) {
-    return params.roomAllowFrom;
-  }
-  return params.outerGroupAllowFrom;
-}
-
-function reasonFromIngress(reasonCode: IngressReasonCode): string {
-  switch (reasonCode) {
-    case "dm_policy_pairing_required":
-      return "dmPolicy=pairing (not allowlisted)";
-    case "dm_policy_disabled":
-      return "dmPolicy=disabled";
-    case "dm_policy_allowlisted":
-      return "dmPolicy=allowlisted";
-    case "group_policy_disabled":
-      return "groupPolicy=disabled";
-    case "group_policy_empty_allowlist":
-      return "groupPolicy=allowlist (empty allowlist)";
-    case "group_policy_allowed":
-    case "group_policy_open":
-      return "groupPolicy=allowed";
-    case "route_blocked":
-      return "route blocked";
-    default:
-      return "not allowlisted";
-  }
-}
-
 function roomGateReason(params: {
   decision: ChannelIngressDecision;
   roomMatch: NextcloudTalkRoomMatch;
   roomConfig?: NextcloudTalkRoomConfig;
+  groupPolicy: GroupPolicy;
+  outerGroupAllowFrom: string[];
+  roomAllowFrom: string[];
 }): NextcloudTalkRoomGateReason | undefined {
   const decisiveId = params.decision.decisiveGateId;
   if (decisiveId === "nextcloud-talk:room" && !params.roomMatch.allowed) {
@@ -197,6 +155,14 @@ function roomGateReason(params: {
     return "room_disabled";
   }
   if (decisiveId === "nextcloud-talk:room-sender") {
+    return "room_sender_not_allowlisted";
+  }
+  if (
+    decisiveId === "sender:group" &&
+    params.groupPolicy === "allowlist" &&
+    !hasEntries(params.outerGroupAllowFrom) &&
+    hasEntries(params.roomAllowFrom)
+  ) {
     return "room_sender_not_allowlisted";
   }
   return undefined;
@@ -212,24 +178,15 @@ export async function resolveNextcloudTalkIngressAccess(params: {
   allowTextCommands: boolean;
   hasControlCommand: boolean;
   readAllowFromStore: () => Promise<string[]>;
-}): Promise<{
-  ingress: ChannelIngressDecision;
-  decision: NextcloudTalkAccessDecision;
-  reason: string;
-  reasonCode: IngressReasonCode;
-  commandAuthorized: boolean;
-  shouldBlockControlCommand: boolean;
-  groupPolicy: GroupPolicy;
-  providerMissingFallbackApplied: boolean;
-  roomGateReason?: NextcloudTalkRoomGateReason;
-}> {
+}): Promise<
+  ResolvedChannelMessageIngress & {
+    groupPolicy: GroupPolicy;
+    providerMissingFallbackApplied: boolean;
+    roomGateReason?: NextcloudTalkRoomGateReason;
+  }
+> {
   const dmPolicy = params.account.config.dmPolicy ?? "pairing";
   const allowFrom = stringEntries(params.account.config.allowFrom);
-  const storeAllowFrom = await readNextcloudTalkPairingStore({
-    isGroup: params.isGroup,
-    dmPolicy,
-    readAllowFromStore: params.readAllowFromStore,
-  });
   const { groupPolicy, providerMissingFallbackApplied } =
     resolveAllowlistProviderRuntimeGroupPolicy({
       providerConfigPresent:
@@ -241,24 +198,15 @@ export async function resolveNextcloudTalkIngressAccess(params: {
   const outerGroupAllowFrom = resolveConfiguredGroupAllowFrom(params.account.config);
   const roomConfig = params.roomMatch.roomConfig;
   const roomAllowFrom = stringEntries(roomConfig?.allowFrom);
-  const senderGroupAllowFrom = resolveSenderGroupAllowFrom({
-    groupPolicy,
-    outerGroupAllowFrom,
-    roomAllowFrom,
-  });
-  const resolved = await resolveChannelIngressAccess({
-    channelId: NEXTCLOUD_TALK_CHANNEL_ID,
+  const resolved = await resolveChannelMessageIngress({
+    channelId: "nextcloud-talk",
     accountId: params.account.accountId,
-    subject: createChannelIngressSubject({
-      opaqueId: "nextcloud-talk-user-id",
-      value: params.senderId,
-      sensitivity: "pii",
-    }),
+    identity: nextcloudTalkIngressIdentity,
+    subject: { stableId: params.senderId },
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: params.isGroup ? params.roomToken : params.senderId,
     },
-    adapter: nextcloudTalkIngressAdapter,
     accessGroups: (params.config as OpenClawConfig).accessGroups,
     routeFacts: roomRouteFacts({
       isGroup: params.isGroup,
@@ -274,48 +222,34 @@ export async function resolveNextcloudTalkIngressAccess(params: {
       authMode: "inbound",
       mayPair: !params.isGroup,
     },
-    allowlists: {
-      dm: allowFrom,
-      group: senderGroupAllowFrom,
-      pairingStore: storeAllowFrom,
-      commandOwner: params.isGroup ? allowFrom : [...allowFrom, ...storeAllowFrom],
-      commandGroup: params.isGroup ? outerGroupAllowFrom : [],
-    },
     policy: {
       dmPolicy,
       groupPolicy,
-      groupAllowFromFallbackToAllowFrom: false,
-      command: {
-        useAccessGroups:
-          (params.config.commands as Record<string, unknown> | undefined)?.useAccessGroups !==
-          false,
-        allowTextCommands: false,
-        hasControlCommand: params.hasControlCommand,
-        modeWhenAccessGroupsOff: "allow",
-      },
+      groupAllowFromFallbackToAllowFrom: true,
+    },
+    allowFrom,
+    groupAllowFrom: params.account.config.groupAllowFrom,
+    readStoreAllowFrom: async () => await params.readAllowFromStore(),
+    command: {
+      useAccessGroups:
+        (params.config.commands as Record<string, unknown> | undefined)?.useAccessGroups !== false,
+      allowTextCommands: params.allowTextCommands,
+      hasControlCommand: params.hasControlCommand,
+      modeWhenAccessGroupsOff: "allow",
     },
   });
   const ingress = resolved.ingress;
-  const reasonCode = resolved.senderReasonCode;
   return {
-    ingress,
-    decision: resolved.access.decision,
-    reason: reasonFromIngress(
-      ingress.reasonCode === "route_blocked" ? "route_blocked" : reasonCode,
-    ),
-    reasonCode,
-    commandAuthorized: resolved.commandAuthorized,
-    shouldBlockControlCommand:
-      params.isGroup &&
-      params.allowTextCommands &&
-      params.hasControlCommand &&
-      !resolved.commandAuthorized,
+    ...resolved,
     groupPolicy,
     providerMissingFallbackApplied,
     roomGateReason: roomGateReason({
       decision: ingress,
       roomMatch: params.roomMatch,
       roomConfig,
+      groupPolicy,
+      outerGroupAllowFrom,
+      roomAllowFrom,
     }),
   };
 }

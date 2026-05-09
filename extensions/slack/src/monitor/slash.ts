@@ -535,7 +535,7 @@ export async function registerSlackMonitorSlashCommands(params: {
         eventKind: "slash-command",
         modeWhenAccessGroupsOff: "configured",
       });
-      const senderGate = findChannelIngressSenderGate(slashIngress.decision, { isGroup: true });
+      const senderGate = findChannelIngressSenderGate(slashIngress.ingress, { isGroup: true });
       if (isRoom && senderGate?.allowed === false) {
         await respond({
           text: "You are not authorized to use this command here.",
@@ -546,7 +546,7 @@ export async function registerSlackMonitorSlashCommands(params: {
 
       // DMs: allow chatting in dmPolicy=open, but keep privileged command gating intact by setting
       // CommandAuthorized based on allowlists/access-groups (downstream decides which commands need it).
-      commandAuthorized = slashIngress.commandAuthorized;
+      commandAuthorized = slashIngress.commandAccess.authorized;
       if (isRoomish) {
         if (ctx.useAccessGroups && !commandAuthorized) {
           await respond({

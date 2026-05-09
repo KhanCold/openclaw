@@ -489,7 +489,7 @@ export async function monitorTlonProvider(opts: MonitorTlonOpts = {}): Promise<v
         ownerShip: effectiveOwnerShip,
         useAccessGroups,
       });
-      commandAuthorized = commandAccess.commandAuthorized;
+      commandAuthorized = commandAccess.commandAccess.authorized;
 
       // Log when non-owner attempts a slash command (will be silently ignored by Gateway)
       if (!commandAuthorized) {

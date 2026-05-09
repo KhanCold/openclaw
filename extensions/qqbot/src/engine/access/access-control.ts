@@ -5,7 +5,7 @@
  * whether an inbound message from a given sender is allowed to
  * proceed into the outbound pipeline. The implementation mirrors the
  * semantics of the framework-wide `resolveDmGroupAccessDecision`
- * (`src/security/dm-policy-shared.ts`) but is kept standalone so the
+ * (`src/channels/message-access/legacy-policy.ts`) but is kept standalone so the
  * `engine/` layer does not pull in `openclaw/plugin-sdk/*` modules —
  * a hard constraint shared with the standalone `openclaw-qqbot` build.
  *

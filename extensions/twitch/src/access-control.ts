@@ -1,16 +1,12 @@
 import {
-  createChannelIngressPluginId,
-  createChannelIngressStringAdapter,
-  createChannelIngressSubject,
-  decideChannelIngress,
-  resolveChannelIngressState,
-  type ChannelIngressAdapter,
   type ChannelIngressDecision,
-  type ChannelIngressPolicyInput,
   type ChannelIngressState,
-  type ChannelIngressSubject,
-  type ChannelIngressSubjectIdentifierInput,
 } from "openclaw/plugin-sdk/channel-ingress";
+import {
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+  type ChannelIngressIdentitySubjectInput,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import type { TwitchAccountConfig, TwitchChatMessage } from "./types.js";
 
@@ -31,13 +27,40 @@ export type TwitchAccessControlIngressResult = {
   decision: ChannelIngressDecision;
 };
 
-const twitchIngressPluginId = createChannelIngressPluginId("twitch");
-const twitchUserIdAdapter = createChannelIngressStringAdapter();
-const twitchRoleAdapter = createChannelIngressStringAdapter({
+type TwitchPolicyKind = TwitchAccessControlIngressResult["policyKind"];
+
+const twitchUserIdentity = defineStableChannelIngressIdentity({
+  key: "sender-id",
+  entryIdPrefix: "twitch-user-entry",
+});
+
+const twitchRoleIdentity = defineStableChannelIngressIdentity({
+  key: "role-moderator",
   kind: "role",
   normalizeEntry: normalizeTwitchRole,
   normalizeSubject: normalizeTwitchRole,
+  aliases: [
+    {
+      key: "role-owner",
+      kind: "role",
+      normalizeEntry: () => null,
+      normalizeSubject: normalizeTwitchRole,
+    },
+    {
+      key: "role-vip",
+      kind: "role",
+      normalizeEntry: () => null,
+      normalizeSubject: normalizeTwitchRole,
+    },
+    {
+      key: "role-subscriber",
+      kind: "role",
+      normalizeEntry: () => null,
+      normalizeSubject: normalizeTwitchRole,
+    },
+  ],
   isWildcardEntry: (entry) => normalizeTwitchRole(entry) === "all",
+  resolveEntryId: ({ entryIndex }) => `twitch-role-entry-${entryIndex + 1}`,
 });
 
 /**
@@ -128,148 +151,126 @@ export async function resolveTwitchAccessControlIngress(params: {
   botUsername: string;
 }): Promise<TwitchAccessControlIngressResult> {
   const { message, account, botUsername } = params;
+  const policyKind = resolveTwitchPolicyKind(account);
+  const mentionFacts = {
+    canDetectMention: true,
+    wasMentioned: extractMentions(message.message).includes(
+      normalizeLowercaseStringOrEmpty(botUsername),
+    ),
+  };
+  const activation = {
+    requireMention: account.requireMention ?? true,
+    allowTextCommands: false,
+  };
 
-  const activation = await decideTwitchAccess({
-    message,
-    adapter: twitchUserIdAdapter,
-    subject: createChannelIngressSubject({ identifiers: [] }),
-    allowlists: {},
-    mentionFacts: {
-      canDetectMention: true,
-      wasMentioned: extractMentions(message.message).includes(
-        normalizeLowercaseStringOrEmpty(botUsername),
-      ),
-    },
-    policy: {
-      dmPolicy: "open",
-      groupPolicy: "open",
-      activation: {
-        requireMention: account.requireMention ?? true,
-        allowTextCommands: false,
+  if (activation.requireMention && !mentionFacts.wasMentioned) {
+    const activationResolved = await resolveChannelMessageIngress({
+      channelId: "twitch",
+      accountId: "default",
+      identity: twitchUserIdentity,
+      subject: {},
+      conversation: {
+        kind: "group",
+        id: message.channel,
       },
-    },
-  });
-  if (activation.decision.admission !== "dispatch") {
+      event: {
+        kind: "message",
+        authMode: "inbound",
+        mayPair: false,
+      },
+      mentionFacts,
+      policy: {
+        dmPolicy: "open",
+        groupPolicy: "open",
+        activation,
+      },
+    });
+
     return {
       stage: "activation",
       policyKind: "open",
-      ...activation,
+      state: activationResolved.state,
+      decision: activationResolved.ingress,
     };
   }
 
-  if (account.allowFrom !== undefined) {
-    return {
-      stage: "sender",
-      policyKind: "allowFrom",
-      ...(await decideTwitchAccess({
-        message,
-        adapter: twitchUserIdAdapter,
-        subject: twitchUserIdSubject(message),
-        allowlists: {
-          group: account.allowFrom,
-        },
-        policy: {
-          dmPolicy: "open",
-          groupPolicy: "allowlist",
-        },
-      })),
-    };
-  }
-
-  if (account.allowedRoles && account.allowedRoles.length > 0) {
-    return {
-      stage: "sender",
-      policyKind: "role",
-      ...(await decideTwitchAccess({
-        message,
-        adapter: twitchRoleAdapter,
-        subject: twitchRoleSubject(message),
-        allowlists: {
-          group: account.allowedRoles,
-        },
-        policy: {
-          dmPolicy: "open",
-          groupPolicy: "allowlist",
-        },
-      })),
-    };
-  }
-
-  return {
-    stage: "activation",
-    policyKind: "open",
-    ...activation,
-  };
-}
-
-async function decideTwitchAccess(params: {
-  message: TwitchChatMessage;
-  adapter: ChannelIngressAdapter;
-  subject: ChannelIngressSubject;
-  allowlists: {
-    group?: Array<string | number>;
-  };
-  policy: ChannelIngressPolicyInput;
-  mentionFacts?: {
-    canDetectMention: boolean;
-    wasMentioned: boolean;
-  };
-}): Promise<{
-  state: ChannelIngressState;
-  decision: ChannelIngressDecision;
-}> {
-  const state = await resolveChannelIngressState({
-    channelId: twitchIngressPluginId,
+  const resolved = await resolveChannelMessageIngress({
+    channelId: "twitch",
     accountId: "default",
-    subject: params.subject,
+    identity: policyKind === "role" ? twitchRoleIdentity : twitchUserIdentity,
+    subject:
+      policyKind === "role"
+        ? twitchRoleSubject(message)
+        : ({ stableId: message.userId } satisfies ChannelIngressIdentitySubjectInput),
     conversation: {
       kind: "group",
-      id: params.message.channel,
+      id: message.channel,
     },
-    adapter: params.adapter,
     event: {
       kind: "message",
       authMode: "inbound",
       mayPair: false,
     },
-    mentionFacts: params.mentionFacts,
-    allowlists: params.allowlists,
+    mentionFacts,
+    policy: {
+      dmPolicy: "open",
+      groupPolicy: policyKind === "open" ? "open" : "allowlist",
+      activation,
+    },
+    groupAllowFrom:
+      policyKind === "allowFrom"
+        ? account.allowFrom
+        : policyKind === "role"
+          ? account.allowedRoles
+          : undefined,
   });
+
+  if (
+    resolved.ingress.admission !== "dispatch" &&
+    resolved.ingress.decisiveGateId === "activation"
+  ) {
+    return {
+      stage: "activation",
+      policyKind: "open",
+      state: resolved.state,
+      decision: resolved.ingress,
+    };
+  }
+
   return {
-    state,
-    decision: decideChannelIngress(state, params.policy),
+    stage: policyKind === "open" ? "activation" : "sender",
+    policyKind,
+    state: resolved.state,
+    decision: resolved.ingress,
   };
 }
 
-function twitchUserIdSubject(message: TwitchChatMessage): ChannelIngressSubject {
-  if (!message.userId) {
-    return createChannelIngressSubject({ identifiers: [] });
+function resolveTwitchPolicyKind(account: TwitchAccountConfig): TwitchPolicyKind {
+  if (account.allowFrom !== undefined) {
+    return "allowFrom";
   }
-  return createChannelIngressSubject({
-    opaqueId: "sender-id",
-    value: message.userId,
-  });
+  if (account.allowedRoles && account.allowedRoles.length > 0) {
+    return "role";
+  }
+  return "open";
 }
 
-function twitchRoleSubject(message: TwitchChatMessage): ChannelIngressSubject {
-  const identifiers: ChannelIngressSubjectIdentifierInput[] = [];
-  if (message.isMod) {
-    identifiers.push({ opaqueId: "role-moderator", kind: "role", value: "moderator" });
-  }
-  if (message.isOwner) {
-    identifiers.push({ opaqueId: "role-owner", kind: "role", value: "owner" });
-  }
-  if (message.isVip) {
-    identifiers.push({ opaqueId: "role-vip", kind: "role", value: "vip" });
-  }
-  if (message.isSub) {
-    identifiers.push({ opaqueId: "role-subscriber", kind: "role", value: "subscriber" });
-  }
-  return createChannelIngressSubject({ identifiers });
+function twitchRoleSubject(message: TwitchChatMessage): ChannelIngressIdentitySubjectInput {
+  return {
+    stableId: message.isMod ? "moderator" : undefined,
+    aliases: {
+      "role-owner": message.isOwner ? "owner" : undefined,
+      "role-vip": message.isVip ? "vip" : undefined,
+      "role-subscriber": message.isSub ? "subscriber" : undefined,
+    },
+  };
 }
 
 function normalizeTwitchRole(value: string): string | null {
   const role = normalizeLowercaseStringOrEmpty(value);
+  if (role === "*") {
+    return "all";
+  }
   return role === "moderator" ||
     role === "owner" ||
     role === "vip" ||

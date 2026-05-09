@@ -495,7 +495,7 @@ export async function preflightDiscordMessage(
       allowTextCommands,
       hasControlCommand: hasControlCommandInMessage,
     });
-    commandAuthorized = commandAccess.commandAuthorized;
+    commandAuthorized = commandAccess.authorized;
 
     if (commandAccess.shouldBlockControlCommand) {
       logInboundDrop({

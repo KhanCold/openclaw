@@ -1,77 +1,70 @@
+import { type ChannelIngressIdentifierKind } from "openclaw/plugin-sdk/channel-ingress";
 import {
-  mergeDmAllowFromSources,
-  resolveGroupAllowFromSources,
-} from "openclaw/plugin-sdk/allow-from";
-import {
-  createChannelIngressPluginId,
-  createChannelIngressMultiIdentifierAdapter,
-  createChannelIngressSubject,
-  resolveChannelIngressAccess,
-  type ChannelIngressAdapterEntry,
-  type ChannelIngressDecision,
-  type ChannelIngressIdentifierKind,
-  type IngressReasonCode,
-} from "openclaw/plugin-sdk/channel-ingress";
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+  type ResolvedChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import type { DmPolicy, GroupPolicy, OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { normalizeIMessageHandle, parseIMessageAllowTarget } from "../targets.js";
 
-type IMessageAccessDecision = "allow" | "block" | "pairing";
-
-const IMESSAGE_CHANNEL_ID = createChannelIngressPluginId("imessage");
 const IMESSAGE_CHAT_ID_KIND = "plugin:imessage-chat-id" as ChannelIngressIdentifierKind;
 const IMESSAGE_CHAT_GUID_KIND = "plugin:imessage-chat-guid" as ChannelIngressIdentifierKind;
 const IMESSAGE_CHAT_IDENTIFIER_KIND =
   "plugin:imessage-chat-identifier" as ChannelIngressIdentifierKind;
 
-function entryId(index: number): string {
-  return `imessage-entry-${index + 1}`;
-}
-
-function normalizeIMessageIngressEntry(entry: string, index: number): ChannelIngressAdapterEntry[] {
+function normalizeIMessageHandleEntry(entry: string): string | null {
   const trimmed = entry.trim();
   if (!trimmed) {
-    return [];
+    return null;
   }
-  let normalized: { kind: ChannelIngressIdentifierKind; value: string } | null;
-  if (trimmed === "*") {
-    normalized = { kind: "stable-id", value: "*" };
-  } else {
-    const parsed = parseIMessageAllowTarget(trimmed);
-    if (parsed.kind === "chat_id") {
-      normalized = { kind: IMESSAGE_CHAT_ID_KIND, value: String(parsed.chatId) };
-    } else if (parsed.kind === "chat_guid") {
-      normalized = { kind: IMESSAGE_CHAT_GUID_KIND, value: parsed.chatGuid.trim() };
-    } else if (parsed.kind === "chat_identifier") {
-      normalized = {
-        kind: IMESSAGE_CHAT_IDENTIFIER_KIND,
-        value: parsed.chatIdentifier.trim(),
-      };
-    } else {
-      const handle = normalizeIMessageHandle(parsed.handle);
-      normalized = handle ? { kind: "stable-id", value: handle } : null;
-    }
-  }
-  return normalized
-    ? [
-        {
-          opaqueEntryId: entryId(index),
-          kind: normalized.kind,
-          value: normalized.value,
-          sensitivity: "pii",
-        },
-      ]
-    : [];
+  const parsed = parseIMessageAllowTarget(trimmed);
+  return parsed.kind === "handle" ? normalizeIMessageHandle(parsed.handle) : null;
 }
 
-const imessageIngressAdapter = createChannelIngressMultiIdentifierAdapter({
-  normalizeEntry: normalizeIMessageIngressEntry,
-  getSubjectMatchKeys(identifier) {
-    const normalized =
-      identifier.kind === "stable-id"
-        ? normalizeIMessageHandle(identifier.value)
-        : identifier.value.trim();
-    return normalized ? [`${identifier.kind}:${normalized}`] : [];
-  },
+function normalizeIMessageChatIdEntry(entry: string): string | null {
+  const parsed = parseIMessageAllowTarget(entry.trim());
+  return parsed.kind === "chat_id" ? String(parsed.chatId) : null;
+}
+
+function normalizeIMessageChatGuidEntry(entry: string): string | null {
+  const parsed = parseIMessageAllowTarget(entry.trim());
+  return parsed.kind === "chat_guid" ? parsed.chatGuid.trim() || null : null;
+}
+
+function normalizeIMessageChatIdentifierEntry(entry: string): string | null {
+  const parsed = parseIMessageAllowTarget(entry.trim());
+  return parsed.kind === "chat_identifier" ? parsed.chatIdentifier.trim() || null : null;
+}
+
+const imessageIngressIdentity = defineStableChannelIngressIdentity({
+  key: "imessage-sender",
+  normalizeEntry: normalizeIMessageHandleEntry,
+  normalizeSubject: normalizeIMessageHandle,
+  sensitivity: "pii",
+  aliases: [
+    {
+      key: "imessage-chat-id",
+      kind: IMESSAGE_CHAT_ID_KIND,
+      normalizeEntry: normalizeIMessageChatIdEntry,
+      normalizeSubject: (value) => value.trim() || null,
+      sensitivity: "pii",
+    },
+    {
+      key: "imessage-chat-guid",
+      kind: IMESSAGE_CHAT_GUID_KIND,
+      normalizeEntry: normalizeIMessageChatGuidEntry,
+      normalizeSubject: (value) => value.trim() || null,
+      sensitivity: "pii",
+    },
+    {
+      key: "imessage-chat-identifier",
+      kind: IMESSAGE_CHAT_IDENTIFIER_KIND,
+      normalizeEntry: normalizeIMessageChatIdentifierEntry,
+      normalizeSubject: (value) => value.trim() || null,
+      sensitivity: "pii",
+    },
+  ],
+  resolveEntryId: ({ entryIndex }) => `imessage-entry-${entryIndex + 1}`,
 });
 
 function normalizeDmPolicy(policy: string): DmPolicy {
@@ -82,77 +75,17 @@ function normalizeGroupPolicy(policy: string): GroupPolicy {
   return policy === "open" || policy === "disabled" ? policy : "allowlist";
 }
 
-function subjectIdentifiers(params: {
+function subjectAliases(params: {
   sender: string;
   chatId?: number;
   chatGuid?: string;
   chatIdentifier?: string;
 }) {
-  return [
-    {
-      opaqueId: "imessage-sender",
-      value: params.sender,
-      sensitivity: "pii" as const,
-    },
-    ...(params.chatId != null
-      ? [
-          {
-            opaqueId: "imessage-chat-id",
-            kind: IMESSAGE_CHAT_ID_KIND,
-            value: String(params.chatId),
-            sensitivity: "pii" as const,
-          },
-        ]
-      : []),
-    ...(params.chatGuid
-      ? [
-          {
-            opaqueId: "imessage-chat-guid",
-            kind: IMESSAGE_CHAT_GUID_KIND,
-            value: params.chatGuid,
-            sensitivity: "pii" as const,
-          },
-        ]
-      : []),
-    ...(params.chatIdentifier
-      ? [
-          {
-            opaqueId: "imessage-chat-identifier",
-            kind: IMESSAGE_CHAT_IDENTIFIER_KIND,
-            value: params.chatIdentifier,
-            sensitivity: "pii" as const,
-          },
-        ]
-      : []),
-  ];
-}
-
-function reasonFromIngress(params: {
-  reasonCode: IngressReasonCode;
-  dmPolicy: DmPolicy;
-  groupPolicy: GroupPolicy;
-  isGroup: boolean;
-}): string {
-  switch (params.reasonCode) {
-    case "group_policy_disabled":
-      return "groupPolicy=disabled";
-    case "group_policy_empty_allowlist":
-      return "groupPolicy=allowlist (empty allowlist)";
-    case "group_policy_allowed":
-    case "group_policy_open":
-      return `groupPolicy=${params.groupPolicy}`;
-    case "dm_policy_disabled":
-      return "dmPolicy=disabled";
-    case "dm_policy_pairing_required":
-      return "dmPolicy=pairing (not allowlisted)";
-    case "dm_policy_allowlisted":
-    case "dm_policy_open":
-      return `dmPolicy=${params.dmPolicy}`;
-    default:
-      return params.isGroup
-        ? "groupPolicy=allowlist (not allowlisted)"
-        : `dmPolicy=${params.dmPolicy} (not allowlisted)`;
-  }
+  return {
+    ...(params.chatId != null ? { "imessage-chat-id": String(params.chatId) } : {}),
+    ...(params.chatGuid ? { "imessage-chat-guid": params.chatGuid } : {}),
+    ...(params.chatIdentifier ? { "imessage-chat-identifier": params.chatIdentifier } : {}),
+  };
 }
 
 export async function resolveIMessageIngressAccess(params: {
@@ -169,88 +102,48 @@ export async function resolveIMessageIngressAccess(params: {
   dmPolicy: string;
   groupPolicy: string;
   hasControlCommand: boolean;
-}): Promise<{
-  ingress: ChannelIngressDecision;
-  decision: IMessageAccessDecision;
-  reasonCode: IngressReasonCode;
-  reason: string;
-  commandAuthorized: boolean;
-  shouldBlockControlCommand: boolean;
-  effectiveDmAllowFrom: string[];
-  effectiveGroupAllowFrom: string[];
-}> {
+}): Promise<ResolvedChannelMessageIngress> {
   const dmPolicy = normalizeDmPolicy(params.dmPolicy);
   const groupPolicy = normalizeGroupPolicy(params.groupPolicy);
-  const effectiveDmAllowFrom = mergeDmAllowFromSources({
-    allowFrom: params.allowFrom,
-    storeAllowFrom: params.storeAllowFrom,
-    dmPolicy,
-  });
-  const effectiveGroupAllowFrom = resolveGroupAllowFromSources({
-    allowFrom: params.allowFrom,
-    groupAllowFrom: params.groupAllowFrom,
-    fallbackToAllowFrom: false,
-  });
-  const resolved = await resolveChannelIngressAccess({
-    channelId: IMESSAGE_CHANNEL_ID,
+  return await resolveChannelMessageIngress({
+    channelId: "imessage",
     accountId: params.accountId,
-    subject: createChannelIngressSubject({
-      identifiers: subjectIdentifiers({
+    identity: imessageIngressIdentity,
+    subject: {
+      stableId: params.sender,
+      aliases: subjectAliases({
         sender: params.sender,
         chatId: params.chatId,
         chatGuid: params.chatGuid,
         chatIdentifier: params.chatIdentifier,
       }),
-    }),
+    },
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: params.isGroup
         ? String(params.chatId ?? params.chatGuid ?? params.chatIdentifier ?? "unknown")
         : normalizeIMessageHandle(params.sender),
     },
-    adapter: imessageIngressAdapter,
     accessGroups: params.cfg.accessGroups,
     event: {
       kind: "message",
       authMode: "inbound",
       mayPair: !params.isGroup,
     },
-    allowlists: {
-      dm: params.allowFrom,
-      group: params.groupAllowFrom,
-      pairingStore: params.isGroup ? [] : params.storeAllowFrom,
-      commandOwner: params.isGroup ? params.allowFrom : effectiveDmAllowFrom,
-      commandGroup: effectiveGroupAllowFrom,
-    },
-    effectiveAllowFrom: effectiveDmAllowFrom,
-    effectiveGroupAllowFrom,
     policy: {
       dmPolicy,
       groupPolicy,
       groupAllowFromFallbackToAllowFrom: false,
-      command: {
-        useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
-        allowTextCommands: false,
-        hasControlCommand: params.hasControlCommand,
-        modeWhenAccessGroupsOff: "allow",
-      },
+    },
+    allowFrom: params.allowFrom,
+    groupAllowFrom: params.groupAllowFrom,
+    readStoreAllowFrom: async () => params.storeAllowFrom,
+    command: {
+      useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
+      allowTextCommands: params.isGroup,
+      hasControlCommand: params.hasControlCommand,
+      modeWhenAccessGroupsOff: "allow",
+      directGroupAllowFrom: "effective",
     },
   });
-  const reasonCode = resolved.senderReasonCode;
-  return {
-    ingress: resolved.ingress,
-    decision: resolved.access.decision,
-    reasonCode,
-    reason: reasonFromIngress({
-      reasonCode,
-      dmPolicy,
-      groupPolicy,
-      isGroup: params.isGroup,
-    }),
-    commandAuthorized: resolved.commandAuthorized,
-    shouldBlockControlCommand:
-      params.isGroup && params.hasControlCommand && !resolved.commandAuthorized,
-    effectiveDmAllowFrom,
-    effectiveGroupAllowFrom,
-  };
 }

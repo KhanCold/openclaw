@@ -430,11 +430,11 @@ async function authorizeSynologyWebhook(params: {
     dmPolicy: params.account.dmPolicy,
     allowedUserIds: params.account.allowedUserIds,
   });
-  if (!auth.allowed) {
-    if (auth.reason === "disabled") {
+  if (!auth.senderAccess.allowed) {
+    if (auth.senderAccess.ingressReasonCode === "dm_policy_disabled") {
       return { ok: false, statusCode: 403, error: "DMs are disabled" };
     }
-    if (auth.reason === "allowlist-empty") {
+    if (params.account.dmPolicy === "allowlist" && params.account.allowedUserIds.length === 0) {
       params.log?.warn(
         "Synology Chat allowlist is empty while dmPolicy=allowlist; rejecting message",
       );
@@ -455,7 +455,7 @@ async function authorizeSynologyWebhook(params: {
     return { ok: false, statusCode: 429, error: "Rate limit exceeded" };
   }
 
-  return { ok: true, commandAuthorized: auth.allowed };
+  return { ok: true, commandAuthorized: auth.senderAccess.allowed };
 }
 
 function sanitizeSynologyWebhookText(payload: SynologyWebhookPayload): string {

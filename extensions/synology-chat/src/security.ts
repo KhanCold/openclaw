@@ -3,31 +3,20 @@
  */
 
 import {
-  createChannelIngressPluginId,
-  createChannelIngressStringAdapter,
-  createChannelIngressSubject,
-  decideChannelIngress,
-  resolveChannelIngressState,
-  type ChannelIngressDecision,
-  type ChannelIngressState,
-} from "openclaw/plugin-sdk/channel-ingress";
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+  type ResolvedChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import {
   createFixedWindowRateLimiter,
   type FixedWindowRateLimiter,
 } from "openclaw/plugin-sdk/webhook-ingress";
 
-export type DmAuthorizationResult =
-  | { allowed: true }
-  | { allowed: false; reason: "disabled" | "allowlist-empty" | "not-allowlisted" };
-
-export type SynologyDmAuthorizationIngressResult = DmAuthorizationResult & {
-  state: ChannelIngressState;
-  decision: ChannelIngressDecision;
-};
-
-const synologyChatIngressPluginId = createChannelIngressPluginId("synology-chat");
-const synologyChatUserIdAdapter = createChannelIngressStringAdapter();
+const synologyChatIngressIdentity = defineStableChannelIngressIdentity({
+  key: "sender-id",
+  entryIdPrefix: "synology-chat-entry",
+});
 
 /**
  * Validate webhook token using constant-time comparison.
@@ -40,103 +29,32 @@ export function validateToken(received: string, expected: string): boolean {
   return safeEqualSecret(received, expected);
 }
 
-/**
- * Check if a user ID is in the allowed list.
- * Allowlist mode must be explicit; empty lists should not match any user.
- */
-export function checkUserAllowed(userId: string, allowedUserIds: string[]): boolean {
-  if (allowedUserIds.length === 0) {
-    return false;
-  }
-  if (allowedUserIds.includes("*")) {
-    return true;
-  }
-  return allowedUserIds.includes(userId);
-}
-
-/**
- * Resolve DM authorization for a sender across all DM policy modes.
- * Keeps policy semantics in one place so webhook/startup behavior stays consistent.
- */
-export function authorizeUserForDm(
-  userId: string,
-  dmPolicy: "open" | "allowlist" | "disabled",
-  allowedUserIds: string[],
-): DmAuthorizationResult {
-  if (dmPolicy === "disabled") {
-    return { allowed: false, reason: "disabled" };
-  }
-  if (dmPolicy === "open") {
-    return checkUserAllowed(userId, allowedUserIds)
-      ? { allowed: true }
-      : { allowed: false, reason: "not-allowlisted" };
-  }
-  if (allowedUserIds.length === 0) {
-    return { allowed: false, reason: "allowlist-empty" };
-  }
-  if (!checkUserAllowed(userId, allowedUserIds)) {
-    return { allowed: false, reason: "not-allowlisted" };
-  }
-  return { allowed: true };
-}
-
 export async function authorizeUserForDmWithIngress(params: {
   accountId: string;
   userId: string;
   dmPolicy: "open" | "allowlist" | "disabled";
   allowedUserIds: string[];
-}): Promise<SynologyDmAuthorizationIngressResult> {
-  const state = await resolveChannelIngressState({
-    channelId: synologyChatIngressPluginId,
+}): Promise<ResolvedChannelMessageIngress> {
+  return await resolveChannelMessageIngress({
+    channelId: "synology-chat",
     accountId: params.accountId,
-    subject: createChannelIngressSubject({
-      opaqueId: "sender-id",
-      value: params.userId,
-    }),
+    identity: synologyChatIngressIdentity,
+    subject: { stableId: params.userId },
     conversation: {
       kind: "direct",
       id: "direct",
     },
-    adapter: synologyChatUserIdAdapter,
     event: {
       kind: "message",
       authMode: "inbound",
       mayPair: false,
     },
-    allowlists: {
-      dm: params.allowedUserIds,
-    },
-  });
-  const decision = decideChannelIngress(state, {
-    dmPolicy: params.dmPolicy,
-    groupPolicy: "disabled",
-  });
-  return {
-    ...mapSynologyDmDecision({
-      decision,
+    policy: {
       dmPolicy: params.dmPolicy,
-      allowedUserIds: params.allowedUserIds,
-    }),
-    state,
-    decision,
-  };
-}
-
-function mapSynologyDmDecision(params: {
-  decision: ChannelIngressDecision;
-  dmPolicy: "open" | "allowlist" | "disabled";
-  allowedUserIds: string[];
-}): DmAuthorizationResult {
-  if (params.decision.admission === "dispatch") {
-    return { allowed: true };
-  }
-  if (params.dmPolicy === "disabled") {
-    return { allowed: false, reason: "disabled" };
-  }
-  if (params.dmPolicy === "allowlist" && params.allowedUserIds.length === 0) {
-    return { allowed: false, reason: "allowlist-empty" };
-  }
-  return { allowed: false, reason: "not-allowlisted" };
+      groupPolicy: "disabled",
+    },
+    allowFrom: params.allowedUserIds,
+  });
 }
 
 /**

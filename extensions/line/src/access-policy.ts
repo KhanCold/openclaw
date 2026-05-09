@@ -1,14 +1,14 @@
 import {
-  createChannelIngressPluginId,
-  createChannelIngressStringAdapter,
-  createChannelIngressSubject,
-  resolveChannelIngressAccess,
-  type ChannelIngressDecision,
   type ChannelIngressEventInput,
-  type IngressReasonCode,
   type RouteGateFacts,
 } from "openclaw/plugin-sdk/channel-ingress";
-import type { DmPolicy, GroupPolicy, OpenClawConfig } from "openclaw/plugin-sdk/config-types";
+import {
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+  routeDisabledFact,
+  type ResolvedChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
+import type { GroupPolicy, OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import {
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
@@ -16,14 +16,16 @@ import {
 import { firstDefined, normalizeLineAllowEntry } from "./bot-access.js";
 import type { LineAccountConfig, LineGroupConfig } from "./types.js";
 
-type LineAccessDecision = "allow" | "block" | "pairing";
+export type ResolvedLineIngressAccess = ResolvedChannelMessageIngress & {
+  groupPolicy: GroupPolicy;
+  providerMissingFallbackApplied: boolean;
+};
 
-const LINE_CHANNEL_ID = createChannelIngressPluginId("line");
-const lineIngressAdapter = createChannelIngressStringAdapter({
-  normalizeEntry: normalizeLineIngressEntry,
-  normalizeSubject: normalizeLineIngressEntry,
+const lineIngressIdentity = defineStableChannelIngressIdentity({
+  key: "line-user-id",
+  normalize: normalizeLineIngressEntry,
   sensitivity: "pii",
-  resolveEntryId: ({ index }) => `line-entry-${index + 1}`,
+  entryIdPrefix: "line-entry",
 });
 
 function normalizeLineIngressEntry(value: string): string | null {
@@ -33,17 +35,6 @@ function normalizeLineIngressEntry(value: string): string | null {
 
 function stringEntries(entries: Array<string | number> | undefined): string[] {
   return (entries ?? []).map((entry) => String(entry));
-}
-
-async function readLinePairingStore(params: {
-  isGroup: boolean;
-  dmPolicy: DmPolicy;
-  readAllowFromStore: () => Promise<string[]>;
-}): Promise<string[]> {
-  if (params.isGroup || params.dmPolicy === "allowlist" || params.dmPolicy === "open") {
-    return [];
-  }
-  return await params.readAllowFromStore().catch(() => []);
 }
 
 function resolveLineGroupAllowFrom(params: {
@@ -80,14 +71,9 @@ function routeFactsForLineGroupConfig(params: {
     return [];
   }
   return [
-    {
+    routeDisabledFact({
       id: "line:group-config",
-      kind: "route",
-      gate: "disabled",
-      effect: "block-dispatch",
-      precedence: 0,
-      senderPolicy: "inherit",
-    },
+    }),
   ];
 }
 
@@ -103,21 +89,9 @@ export async function resolveLineIngressAccess(params: {
   eventKind: ChannelIngressEventInput["kind"];
   groupConfig?: LineGroupConfig;
   readAllowFromStore: () => Promise<string[]>;
-}): Promise<{
-  ingress: ChannelIngressDecision;
-  decision: LineAccessDecision;
-  reasonCode: IngressReasonCode;
-  commandAuthorized: boolean;
-  groupPolicy: GroupPolicy;
-  providerMissingFallbackApplied: boolean;
-}> {
+}): Promise<ResolvedLineIngressAccess> {
   const dmPolicy = params.accountConfig.dmPolicy ?? "pairing";
   const allowFrom = stringEntries(params.accountConfig.allowFrom);
-  const storeAllowFrom = await readLinePairingStore({
-    isGroup: params.isGroup,
-    dmPolicy,
-    readAllowFromStore: params.readAllowFromStore,
-  });
   const { groupPolicy: runtimeGroupPolicy, providerMissingFallbackApplied } =
     resolveAllowlistProviderRuntimeGroupPolicy({
       providerConfigPresent: params.providerConfigPresent,
@@ -132,19 +106,15 @@ export async function resolveLineIngressAccess(params: {
     accountConfig: params.accountConfig,
     groupConfig: params.groupConfig,
   });
-  const resolved = await resolveChannelIngressAccess({
-    channelId: LINE_CHANNEL_ID,
+  const resolved = await resolveChannelMessageIngress({
+    channelId: "line",
     accountId: params.accountId,
-    subject: createChannelIngressSubject({
-      opaqueId: "line-user-id",
-      value: params.senderId,
-      sensitivity: "pii",
-    }),
+    identity: lineIngressIdentity,
+    subject: { stableId: params.senderId },
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: params.conversationId,
     },
-    adapter: lineIngressAdapter,
     accessGroups: params.cfg.accessGroups,
     routeFacts: routeFactsForLineGroupConfig({
       isGroup: params.isGroup,
@@ -155,30 +125,24 @@ export async function resolveLineIngressAccess(params: {
       authMode: "inbound",
       mayPair: !params.isGroup,
     },
-    allowlists: {
-      dm: allowFrom,
-      group: groupAllowFrom,
-      pairingStore: storeAllowFrom,
-      commandOwner: params.isGroup ? [] : [...allowFrom, ...storeAllowFrom],
-      commandGroup: params.isGroup ? groupAllowFrom : [],
-    },
     policy: {
       dmPolicy,
       groupPolicy,
       groupAllowFromFallbackToAllowFrom: false,
-      command: {
-        useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
-        allowTextCommands: false,
-        hasControlCommand: params.hasControlCommand,
-        modeWhenAccessGroupsOff: "allow",
-      },
+    },
+    allowFrom,
+    groupAllowFrom,
+    readStoreAllowFrom: async () => await params.readAllowFromStore(),
+    command: {
+      useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
+      allowTextCommands: false,
+      hasControlCommand: params.hasControlCommand,
+      modeWhenAccessGroupsOff: "allow",
+      groupOwnerAllowFrom: "none",
     },
   });
   return {
-    ingress: resolved.ingress,
-    decision: resolved.access.decision,
-    reasonCode: resolved.senderReasonCode,
-    commandAuthorized: resolved.commandAuthorized,
+    ...resolved,
     groupPolicy,
     providerMissingFallbackApplied,
   };

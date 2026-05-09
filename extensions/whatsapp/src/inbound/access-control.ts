@@ -71,10 +71,11 @@ export async function checkInboundAccessControl(params: {
     senderId: params.group ? params.senderE164 : params.from,
     dmSenderId: params.from,
   });
-  if (params.group && access.decision !== "allow") {
-    if (access.reason === "groupPolicy=disabled") {
+  const { senderAccess } = access;
+  if (params.group && senderAccess.decision !== "allow") {
+    if (senderAccess.reason === "groupPolicy=disabled") {
       logWhatsAppVerbose(params.verbose, "Blocked group message (groupPolicy: disabled)");
-    } else if (access.reason === "groupPolicy=allowlist (empty allowlist)") {
+    } else if (senderAccess.reason === "groupPolicy=allowlist (empty allowlist)") {
       logWhatsAppVerbose(
         params.verbose,
         "Blocked group message (groupPolicy: allowlist, no groupAllowFrom)",
@@ -104,7 +105,7 @@ export async function checkInboundAccessControl(params: {
         resolvedAccountId: policy.account.accountId,
       };
     }
-    if (access.decision === "block" && access.reason === "dmPolicy=disabled") {
+    if (senderAccess.decision === "block" && senderAccess.reason === "dmPolicy=disabled") {
       logWhatsAppVerbose(params.verbose, "Blocked dm (dmPolicy: disabled)");
       return {
         allowed: false,
@@ -113,7 +114,7 @@ export async function checkInboundAccessControl(params: {
         resolvedAccountId: policy.account.accountId,
       };
     }
-    if (access.decision === "pairing" && !policy.isSamePhone(params.from)) {
+    if (senderAccess.decision === "pairing" && !policy.isSamePhone(params.from)) {
       const candidate = params.from;
       if (suppressPairingReply) {
         logWhatsAppVerbose(
@@ -158,7 +159,7 @@ export async function checkInboundAccessControl(params: {
         resolvedAccountId: policy.account.accountId,
       };
     }
-    if (access.decision !== "allow") {
+    if (senderAccess.decision !== "allow") {
       logWhatsAppVerbose(
         params.verbose,
         `Blocked unauthorized sender ${params.from} (dmPolicy=${policy.dmPolicy})`,

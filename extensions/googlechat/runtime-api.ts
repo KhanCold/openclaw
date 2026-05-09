@@ -24,7 +24,6 @@ export { createChannelPairingController } from "openclaw/plugin-sdk/channel-pair
 export { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-message";
 export {
   evaluateGroupRouteAccessForPolicy,
-  resolveDmGroupAccessWithLists,
   resolveSenderScopedGroupPolicy,
 } from "openclaw/plugin-sdk/channel-policy";
 export { PAIRING_APPROVED_MESSAGE } from "openclaw/plugin-sdk/channel-status";

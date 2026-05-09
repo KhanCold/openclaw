@@ -941,7 +941,7 @@ export const registerTelegramHandlers = ({
         useAccessGroups,
         eventKind: "button",
       })
-    ).commandAuthorized;
+    ).authorized;
   };
 
   // Handle emoji reactions to messages.

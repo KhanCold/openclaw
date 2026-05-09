@@ -50,7 +50,7 @@ describe("zalo shared ingress access policy", () => {
       },
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: false,
       groupPolicy: "disabled",
       reason: "disabled",
@@ -66,7 +66,7 @@ describe("zalo shared ingress access policy", () => {
       senderId: "attacker",
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: false,
       groupPolicy: "allowlist",
       reason: "empty_allowlist",
@@ -82,7 +82,7 @@ describe("zalo shared ingress access policy", () => {
       senderId: "attacker-user-999",
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: false,
       groupPolicy: "allowlist",
       reason: "sender_not_allowlisted",
@@ -98,7 +98,7 @@ describe("zalo shared ingress access policy", () => {
       senderId: "12345",
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: true,
       groupPolicy: "allowlist",
       reason: "allowed",
@@ -115,7 +115,7 @@ describe("zalo shared ingress access policy", () => {
       senderId: "12345",
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: true,
       groupPolicy: "allowlist",
       reason: "allowed",
@@ -131,7 +131,7 @@ describe("zalo shared ingress access policy", () => {
       senderId: "random-user",
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: true,
       groupPolicy: "allowlist",
       reason: "allowed",
@@ -147,7 +147,7 @@ describe("zalo shared ingress access policy", () => {
       senderId: "attacker-user-999",
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: true,
       groupPolicy: "open",
       reason: "allowed",
@@ -165,8 +165,8 @@ describe("zalo shared ingress access policy", () => {
       shouldComputeCommandAuthorized: true,
     });
 
-    expect(result.access.decision).toBe("allow");
-    expect(result.commandAuthorized).toBe(false);
+    expect(result.senderAccess.decision).toBe("allow");
+    expect(result.commandAccess.authorized).toBe(false);
   });
 
   it("authorizes direct commands from the pairing store", async () => {
@@ -183,11 +183,11 @@ describe("zalo shared ingress access policy", () => {
     });
 
     expect(readAllowFromStore).toHaveBeenCalledTimes(1);
-    expect(result.access).toMatchObject({
+    expect(result.senderAccess).toMatchObject({
       decision: "allow",
-      reasonCode: "dm_policy_allowlisted",
+      ingressReasonCode: "dm_policy_allowlisted",
     });
-    expect(result.commandAuthorized).toBe(true);
+    expect(result.commandAccess.authorized).toBe(true);
   });
 
   it("requires an explicit wildcard or allowlist match for open DMs", async () => {
@@ -201,9 +201,9 @@ describe("zalo shared ingress access policy", () => {
     });
 
     expect(readAllowFromStore).not.toHaveBeenCalled();
-    expect(result.access).toMatchObject({
+    expect(result.senderAccess).toMatchObject({
       decision: "block",
-      reasonCode: "dm_policy_not_allowlisted",
+      ingressReasonCode: "dm_policy_not_allowlisted",
     });
   });
 
@@ -226,7 +226,7 @@ describe("zalo shared ingress access policy", () => {
       senderId: "12345",
     });
 
-    expect(result.groupAccess).toMatchObject({
+    expect(result.senderAccess.groupAccess).toMatchObject({
       allowed: true,
       groupPolicy: "allowlist",
       reason: "allowed",

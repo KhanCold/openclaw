@@ -168,9 +168,6 @@ type IMessageInboundDispatchDecision = {
   replyContext: IMessageReplyContext | null;
   effectiveWasMentioned: boolean;
   commandAuthorized: boolean;
-  // Used for allowlist checks for control commands.
-  effectiveDmAllowFrom: string[];
-  effectiveGroupAllowFrom: string[];
   // Forwarded as ctxPayload.GroupSystemPrompt for group messages. Resolved
   // from `channels.imessage.groups.<chat_id>.systemPrompt` (or the `"*"`
   // wildcard) at gate time. Always undefined for DMs.
@@ -325,32 +322,32 @@ export async function resolveIMessageInboundDecision(params: {
     groupPolicy: params.groupPolicy,
     hasControlCommand: hasControlCommandInMessage,
   });
-  const effectiveDmAllowFrom = accessDecision.effectiveDmAllowFrom;
-  const effectiveGroupAllowFrom = accessDecision.effectiveGroupAllowFrom;
+  const { commandAccess, senderAccess } = accessDecision;
+  const effectiveGroupAllowFrom = senderAccess.effectiveGroupAllowFrom;
 
-  if (accessDecision.decision !== "allow") {
+  if (senderAccess.decision !== "allow") {
     if (isGroup) {
-      if (accessDecision.reasonCode === "group_policy_disabled") {
+      if (senderAccess.ingressReasonCode === "group_policy_disabled") {
         params.logVerbose?.("Blocked iMessage group message (groupPolicy: disabled)");
         return { kind: "drop", reason: "groupPolicy disabled" };
       }
-      if (accessDecision.reasonCode === "group_policy_empty_allowlist") {
+      if (senderAccess.ingressReasonCode === "group_policy_empty_allowlist") {
         params.logVerbose?.(
           "Blocked iMessage group message (groupPolicy: allowlist, no groupAllowFrom)",
         );
         return { kind: "drop", reason: "groupPolicy allowlist (empty groupAllowFrom)" };
       }
-      if (accessDecision.reasonCode === "group_policy_not_allowlisted") {
+      if (senderAccess.ingressReasonCode === "group_policy_not_allowlisted") {
         params.logVerbose?.(`Blocked iMessage sender ${sender} (not in groupAllowFrom)`);
         return { kind: "drop", reason: "not in groupAllowFrom" };
       }
-      params.logVerbose?.(`Blocked iMessage group message (${accessDecision.reason})`);
-      return { kind: "drop", reason: accessDecision.reason };
+      params.logVerbose?.(`Blocked iMessage group message (${senderAccess.reason})`);
+      return { kind: "drop", reason: senderAccess.reason };
     }
-    if (accessDecision.reasonCode === "dm_policy_disabled") {
+    if (senderAccess.ingressReasonCode === "dm_policy_disabled") {
       return { kind: "drop", reason: "dmPolicy disabled" };
     }
-    if (accessDecision.decision === "pairing") {
+    if (senderAccess.decision === "pairing") {
       return { kind: "pairing", senderId: senderNormalized };
     }
     params.logVerbose?.(`Blocked iMessage sender ${sender} (dmPolicy=${params.dmPolicy})`);
@@ -473,8 +470,8 @@ export async function resolveIMessageInboundDecision(params: {
   });
   const canDetectMention = mentionRegexes.length > 0;
 
-  const commandAuthorized = accessDecision.commandAuthorized;
-  if (accessDecision.shouldBlockControlCommand) {
+  const commandAuthorized = commandAccess.authorized;
+  if (commandAccess.shouldBlockControlCommand) {
     if (params.logVerbose) {
       logInboundDrop({
         log: params.logVerbose,
@@ -548,8 +545,6 @@ export async function resolveIMessageInboundDecision(params: {
     replyContext: filteredReplyContext,
     effectiveWasMentioned,
     commandAuthorized,
-    effectiveDmAllowFrom,
-    effectiveGroupAllowFrom,
     groupSystemPrompt,
   };
 }

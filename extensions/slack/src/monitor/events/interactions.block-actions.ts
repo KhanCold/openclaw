@@ -739,7 +739,7 @@ async function resolveSlackBlockActionCommandAuthorized(params: {
     eventKind: "button",
     modeWhenAccessGroupsOff: "configured",
   });
-  return commandIngress.commandAuthorized;
+  return commandIngress.commandAccess.authorized;
 }
 
 function enqueueSlackBlockActionEvent(params: {

@@ -1,8 +1,12 @@
+import {
+  ACCESS_GROUP_ALLOW_FROM_PREFIX,
+  parseAccessGroupAllowFromEntry,
+} from "../channels/allow-from.js";
 import type { ChannelId } from "../channels/plugins/types.public.js";
 import type { AccessGroupConfig } from "../config/types.access-groups.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
-export const ACCESS_GROUP_ALLOW_FROM_PREFIX = "accessGroup:";
+export { ACCESS_GROUP_ALLOW_FROM_PREFIX, parseAccessGroupAllowFromEntry };
 
 export type AccessGroupMembershipResolver = (params: {
   cfg: OpenClawConfig;
@@ -31,15 +35,6 @@ export type ResolvedAccessGroupAllowFromState = {
   hasReferences: boolean;
   hasMatch: boolean;
 };
-
-export function parseAccessGroupAllowFromEntry(entry: string): string | null {
-  const trimmed = entry.trim();
-  if (!trimmed.startsWith(ACCESS_GROUP_ALLOW_FROM_PREFIX)) {
-    return null;
-  }
-  const name = trimmed.slice(ACCESS_GROUP_ALLOW_FROM_PREFIX.length).trim();
-  return name.length > 0 ? name : null;
-}
 
 function resolveMessageSenderGroupEntries(params: {
   group: AccessGroupConfig;

@@ -745,15 +745,14 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           eventKind: isReactionEvent ? "reaction" : "message",
         });
         const {
-          effectiveAllowFrom,
           effectiveGroupAllowFrom,
           effectiveRoomUsers,
-          groupAllowConfigured,
           directAllowMatch,
           roomUserMatch,
           groupAllowMatch,
-          ingressDecision,
+          messageIngress,
         } = accessState;
+        const ingressDecision = messageIngress.ingress;
 
         if (isDirectMessage) {
           if (!dmEnabled || dmPolicy === "disabled") {
@@ -826,7 +825,6 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           } else if (
             groupPolicy === "allowlist" &&
             effectiveRoomUsers.length === 0 &&
-            groupAllowConfigured &&
             groupAllowMatch &&
             !groupAllowMatch.allowed
           ) {
@@ -972,12 +970,12 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           commandCheckText,
           cfg,
         );
-        const commandAccess = resolveMatrixMonitorCommandAccess(accessState, {
+        const commandAccess = await resolveMatrixMonitorCommandAccess(accessState, {
           useAccessGroups,
           allowTextCommands,
           hasControlCommand: hasControlCommandInMessage,
         });
-        const commandAuthorized = commandAccess.commandAuthorized;
+        const commandAuthorized = commandAccess.authorized;
         if (isRoom && commandAccess.shouldBlockControlCommand) {
           logInboundDrop({
             log: logVerboseMessage,
@@ -1155,7 +1153,6 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           triggerSnapshot,
           threadRootId,
           thread,
-          effectiveAllowFrom,
           effectiveGroupAllowFrom,
           effectiveRoomUsers,
         };

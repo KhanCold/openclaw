@@ -8,7 +8,7 @@ export * from "../secrets/shared.js";
 export type * from "../secrets/target-registry-types.js";
 export * from "../security/channel-metadata.js";
 export * from "../security/context-visibility.js";
-export * from "../security/dm-policy-shared.js";
+export * from "../channels/message-access/legacy-policy.js";
 export {
   ACCESS_GROUP_ALLOW_FROM_PREFIX,
   expandAllowFromWithAccessGroups,

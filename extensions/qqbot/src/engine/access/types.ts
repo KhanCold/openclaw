@@ -7,7 +7,7 @@
  * plugin builds.
  *
  * The reason codes here intentionally match
- * `src/security/dm-policy-shared.ts::DM_GROUP_ACCESS_REASON` so metric
+ * `src/channels/message-access/legacy-policy.ts::DM_GROUP_ACCESS_REASON` so metric
  * dashboards can treat QQBot decisions identically to WhatsApp /
  * Telegram / Discord decisions.
  */

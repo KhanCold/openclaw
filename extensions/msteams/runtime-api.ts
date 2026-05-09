@@ -20,9 +20,6 @@ export { logTypingFailure } from "openclaw/plugin-sdk/channel-logging";
 export { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
 export {
   evaluateSenderGroupAccessForPolicy,
-  readStoreAllowFromForDmPolicy,
-  resolveDmGroupAccessWithLists,
-  resolveEffectiveAllowFromLists,
   resolveSenderScopedGroupPolicy,
   resolveToolsBySender,
 } from "openclaw/plugin-sdk/channel-policy";

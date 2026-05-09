@@ -450,7 +450,7 @@ export async function prepareSlackMessage(params: {
     allowTextCommands,
     hasControlCommand: hasControlCommandInMessage,
   });
-  const senderGate = findChannelIngressSenderGate(messageIngress.decision, { isGroup: true });
+  const senderGate = findChannelIngressSenderGate(messageIngress.ingress, { isGroup: true });
   if (isRoom && senderGate?.allowed === false) {
     logVerbose(`Blocked unauthorized slack sender ${senderId} (not in channel users)`);
     return null;
@@ -483,9 +483,9 @@ export async function prepareSlackMessage(params: {
     channel: "slack",
     accountId: account.accountId,
   });
-  const commandAuthorized = messageIngress.commandAuthorized;
+  const commandAuthorized = messageIngress.commandAccess.authorized;
 
-  if (isRoomish && messageIngress.shouldBlockControlCommand) {
+  if (isRoomish && messageIngress.commandAccess.shouldBlockControlCommand) {
     logInboundDrop({
       log: logVerbose,
       channel: "slack",

@@ -1,9 +1,5 @@
 import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-message";
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
-import {
-  readStoreAllowFromForDmPolicy,
-  resolveEffectiveAllowFromLists,
-} from "openclaw/plugin-sdk/channel-policy";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
 import {
@@ -21,16 +17,9 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/text-runtime";
-import { resolveIrcCommandAccess } from "./access-policy.js";
+import { resolveIrcIngressAccess } from "./access-policy.js";
 import type { ResolvedIrcAccount } from "./accounts.js";
-import { normalizeIrcAllowlist, resolveIrcAllowlistMatch } from "./normalize.js";
-import {
-  resolveIrcMentionGate,
-  resolveIrcGroupAccessGate,
-  resolveIrcGroupMatch,
-  resolveIrcGroupSenderAllowed,
-  resolveIrcRequireMention,
-} from "./policy.js";
+import { resolveIrcGroupMatch, resolveIrcRequireMention } from "./policy.js";
 import { getIrcRuntime } from "./runtime.js";
 import { sendMessageIrc } from "./send.js";
 import type { CoreConfig, IrcInboundMessage } from "./types.js";
@@ -38,26 +27,6 @@ import type { CoreConfig, IrcInboundMessage } from "./types.js";
 const CHANNEL_ID = "irc" as const;
 
 const escapeIrcRegexLiteral = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-function resolveIrcEffectiveAllowlists(params: {
-  configAllowFrom: string[];
-  configGroupAllowFrom: string[];
-  storeAllowList: string[];
-  dmPolicy: string;
-}): {
-  effectiveAllowFrom: string[];
-  effectiveGroupAllowFrom: string[];
-} {
-  const { effectiveAllowFrom, effectiveGroupAllowFrom } = resolveEffectiveAllowFromLists({
-    allowFrom: params.configAllowFrom,
-    groupAllowFrom: params.configGroupAllowFrom,
-    storeAllowFrom: params.storeAllowList,
-    dmPolicy: params.dmPolicy,
-    // IRC intentionally requires explicit groupAllowFrom; do not fallback to allowFrom.
-    groupAllowFromFallbackToAllowFrom: false,
-  });
-  return { effectiveAllowFrom, effectiveGroupAllowFrom };
-}
 
 async function deliverIrcReply(params: {
   payload: OutboundReplyPayload;
@@ -132,118 +101,16 @@ export async function handleIrcInbound(params: {
     log: (message) => runtime.log?.(message),
   });
 
-  const configAllowFrom = normalizeIrcAllowlist(account.config.allowFrom);
-  const configGroupAllowFrom = normalizeIrcAllowlist(account.config.groupAllowFrom);
-  const storeAllowFrom = await readStoreAllowFromForDmPolicy({
-    provider: CHANNEL_ID,
-    accountId: account.accountId,
-    dmPolicy,
-    readStore: pairing.readStoreForDmPolicy,
-  });
-  const storeAllowList = normalizeIrcAllowlist(storeAllowFrom);
-
   const groupMatch = resolveIrcGroupMatch({
     groups: account.config.groups,
     target: message.target,
-  });
-
-  if (message.isGroup) {
-    const groupAccess = resolveIrcGroupAccessGate({ groupPolicy, groupMatch });
-    if (!groupAccess.allowed) {
-      runtime.log?.(`irc: drop channel ${message.target} (${groupAccess.reason})`);
-      return;
-    }
-  }
-
-  const directGroupAllowFrom = normalizeIrcAllowlist(groupMatch.groupConfig?.allowFrom);
-  const wildcardGroupAllowFrom = normalizeIrcAllowlist(groupMatch.wildcardConfig?.allowFrom);
-  const groupAllowFrom =
-    directGroupAllowFrom.length > 0 ? directGroupAllowFrom : wildcardGroupAllowFrom;
-
-  const { effectiveAllowFrom, effectiveGroupAllowFrom } = resolveIrcEffectiveAllowlists({
-    configAllowFrom,
-    configGroupAllowFrom,
-    storeAllowList,
-    dmPolicy,
   });
 
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
     cfg: config as OpenClawConfig,
     surface: CHANNEL_ID,
   });
-  const useAccessGroups = config.commands?.useAccessGroups !== false;
   const hasControlCommand = core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig);
-  const commandAccess = await resolveIrcCommandAccess({
-    accountId: account.accountId,
-    message,
-    effectiveAllowFrom,
-    effectiveGroupAllowFrom,
-    allowNameMatching,
-    allowTextCommands,
-    hasControlCommand,
-    useAccessGroups,
-  });
-  const commandAuthorized = commandAccess.commandAuthorized;
-
-  if (message.isGroup) {
-    const senderAllowed = resolveIrcGroupSenderAllowed({
-      groupPolicy,
-      message,
-      outerAllowFrom: effectiveGroupAllowFrom,
-      innerAllowFrom: groupAllowFrom,
-      allowNameMatching,
-    });
-    if (!senderAllowed) {
-      runtime.log?.(`irc: drop group sender ${senderDisplay} (policy=${groupPolicy})`);
-      return;
-    }
-  } else {
-    if (dmPolicy === "disabled") {
-      runtime.log?.(`irc: drop DM sender=${senderDisplay} (dmPolicy=disabled)`);
-      return;
-    }
-    const dmAllowed = resolveIrcAllowlistMatch({
-      allowFrom: effectiveAllowFrom,
-      message,
-      allowNameMatching,
-    }).allowed;
-    if (!dmAllowed) {
-      if (dmPolicy === "pairing") {
-        await pairing.issueChallenge({
-          senderId: normalizeLowercaseStringOrEmpty(senderDisplay),
-          senderIdLine: `Your IRC id: ${senderDisplay}`,
-          meta: { name: message.senderNick || undefined },
-          sendPairingReply: async (text) => {
-            await deliverIrcReply({
-              payload: { text },
-              cfg: config,
-              target: message.senderNick,
-              accountId: account.accountId,
-              sendReply: params.sendReply,
-              statusSink,
-            });
-          },
-          onReplyError: (err) => {
-            runtime.error?.(`irc: pairing reply failed for ${senderDisplay}: ${String(err)}`);
-          },
-        });
-      }
-      runtime.log?.(`irc: drop DM sender ${senderDisplay} (dmPolicy=${dmPolicy})`);
-      return;
-    }
-  }
-
-  if (message.isGroup && commandAccess.shouldBlockControlCommand) {
-    const { logInboundDrop } = await import("openclaw/plugin-sdk/channel-inbound");
-    logInboundDrop({
-      log: (line) => runtime.log?.(line),
-      channel: CHANNEL_ID,
-      reason: "control command (unauthorized)",
-      target: senderDisplay,
-    });
-    return;
-  }
-
   const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
   const mentionNick = connectedNick?.trim() || account.nick;
   const explicitMentionRegex = mentionNick
@@ -252,24 +119,82 @@ export async function handleIrcInbound(params: {
   const wasMentioned =
     core.channel.mentions.matchesMentionPatterns(rawBody, mentionRegexes) ||
     (explicitMentionRegex ? explicitMentionRegex.test(rawBody) : false);
-
   const requireMention = message.isGroup
     ? resolveIrcRequireMention({
         groupConfig: groupMatch.groupConfig,
         wildcardConfig: groupMatch.wildcardConfig,
       })
     : false;
-
-  const mentionGate = resolveIrcMentionGate({
-    isGroup: message.isGroup,
+  const access = await resolveIrcIngressAccess({
+    accountId: account.accountId,
+    message,
+    config,
+    dmPolicy,
+    groupPolicy,
+    allowFrom: account.config.allowFrom,
+    groupAllowFrom: account.config.groupAllowFrom,
+    groupMatch,
+    allowNameMatching,
+    allowTextCommands,
+    hasControlCommand,
     requireMention,
     wasMentioned,
-    hasControlCommand,
-    allowTextCommands,
-    commandAuthorized,
+    readAllowFromStore: async () => await pairing.readAllowFromStore(),
   });
-  if (mentionGate.shouldSkip) {
-    runtime.log?.(`irc: drop channel ${message.target} (${mentionGate.reason})`);
+  const commandAuthorized = access.commandAccess.authorized;
+
+  if (access.ingress.admission === "pairing-required") {
+    await pairing.issueChallenge({
+      senderId: normalizeLowercaseStringOrEmpty(senderDisplay),
+      senderIdLine: `Your IRC id: ${senderDisplay}`,
+      meta: { name: message.senderNick || undefined },
+      sendPairingReply: async (text) => {
+        await deliverIrcReply({
+          payload: { text },
+          cfg: config,
+          target: message.senderNick,
+          accountId: account.accountId,
+          sendReply: params.sendReply,
+          statusSink,
+        });
+      },
+      onReplyError: (err) => {
+        runtime.error?.(`irc: pairing reply failed for ${senderDisplay}: ${String(err)}`);
+      },
+    });
+    runtime.log?.(`irc: drop DM sender ${senderDisplay} (dmPolicy=${dmPolicy})`);
+    return;
+  }
+  if (access.ingress.admission === "skip") {
+    runtime.log?.(`irc: drop channel ${message.target} (missing-mention)`);
+    return;
+  }
+  if (access.ingress.admission !== "dispatch") {
+    if (
+      message.isGroup &&
+      access.ingress.decisiveGateId === "command" &&
+      access.commandAccess.shouldBlockControlCommand
+    ) {
+      const { logInboundDrop } = await import("openclaw/plugin-sdk/channel-inbound");
+      logInboundDrop({
+        log: (line) => runtime.log?.(line),
+        channel: CHANNEL_ID,
+        reason: "control command (unauthorized)",
+        target: senderDisplay,
+      });
+      return;
+    }
+    if (message.isGroup) {
+      if (access.roomGateReason === "channel_not_allowlisted") {
+        runtime.log?.(`irc: drop channel ${message.target} (not allowlisted)`);
+      } else if (access.roomGateReason === "channel_disabled") {
+        runtime.log?.(`irc: drop channel ${message.target} (disabled)`);
+      } else {
+        runtime.log?.(`irc: drop group sender ${senderDisplay} (policy=${groupPolicy})`);
+      }
+    } else {
+      runtime.log?.(`irc: drop DM sender ${senderDisplay} (dmPolicy=${dmPolicy})`);
+    }
     return;
   }
 
@@ -378,7 +303,3 @@ export async function handleIrcInbound(params: {
     },
   });
 }
-
-export const __testing = {
-  resolveIrcEffectiveAllowlists,
-};

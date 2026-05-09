@@ -9,9 +9,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { listAccountIds, resolveAccount } from "./accounts.js";
 import { SynologyChatChannelConfigSchema } from "./config-schema.js";
 import {
-  authorizeUserForDm,
   authorizeUserForDmWithIngress,
-  checkUserAllowed,
   RateLimiter,
   sanitizeInput,
   validateToken,
@@ -318,34 +316,6 @@ describe("synology-chat security helpers", () => {
     expect(validateToken("short", "muchlongertoken")).toBe(false);
   });
 
-  it("enforces allowlists and DM policy decisions", () => {
-    expect(checkUserAllowed("user1", [])).toBe(false);
-    expect(checkUserAllowed("user1", ["user1", "user2"])).toBe(true);
-    expect(checkUserAllowed("user3", ["user1", "user2"])).toBe(false);
-
-    expect(authorizeUserForDm("user1", "open", [])).toEqual({
-      allowed: false,
-      reason: "not-allowlisted",
-    });
-    expect(authorizeUserForDm("user1", "open", ["*"])).toEqual({ allowed: true });
-    expect(authorizeUserForDm("user1", "open", ["user1"])).toEqual({ allowed: true });
-    expect(authorizeUserForDm("user1", "disabled", ["user1"])).toEqual({
-      allowed: false,
-      reason: "disabled",
-    });
-    expect(authorizeUserForDm("user1", "allowlist", [])).toEqual({
-      allowed: false,
-      reason: "allowlist-empty",
-    });
-    expect(authorizeUserForDm("user9", "allowlist", ["user1"])).toEqual({
-      allowed: false,
-      reason: "not-allowlisted",
-    });
-    expect(authorizeUserForDm("user1", "allowlist", ["user1", "user2"])).toEqual({
-      allowed: true,
-    });
-  });
-
   it("matches DM policy decisions through channel ingress", async () => {
     await expect(
       authorizeUserForDmWithIngress({
@@ -354,7 +324,12 @@ describe("synology-chat security helpers", () => {
         dmPolicy: "open",
         allowedUserIds: [],
       }),
-    ).resolves.toMatchObject({ allowed: false, reason: "not-allowlisted" });
+    ).resolves.toMatchObject({
+      senderAccess: {
+        allowed: false,
+        ingressReasonCode: "dm_policy_not_allowlisted",
+      },
+    });
     await expect(
       authorizeUserForDmWithIngress({
         accountId: "default",
@@ -362,7 +337,7 @@ describe("synology-chat security helpers", () => {
         dmPolicy: "open",
         allowedUserIds: ["*"],
       }),
-    ).resolves.toMatchObject({ allowed: true });
+    ).resolves.toMatchObject({ senderAccess: { allowed: true } });
     await expect(
       authorizeUserForDmWithIngress({
         accountId: "default",
@@ -370,7 +345,12 @@ describe("synology-chat security helpers", () => {
         dmPolicy: "disabled",
         allowedUserIds: ["user1"],
       }),
-    ).resolves.toMatchObject({ allowed: false, reason: "disabled" });
+    ).resolves.toMatchObject({
+      senderAccess: {
+        allowed: false,
+        ingressReasonCode: "dm_policy_disabled",
+      },
+    });
     await expect(
       authorizeUserForDmWithIngress({
         accountId: "default",
@@ -378,7 +358,12 @@ describe("synology-chat security helpers", () => {
         dmPolicy: "allowlist",
         allowedUserIds: [],
       }),
-    ).resolves.toMatchObject({ allowed: false, reason: "allowlist-empty" });
+    ).resolves.toMatchObject({
+      senderAccess: {
+        allowed: false,
+        ingressReasonCode: "dm_policy_not_allowlisted",
+      },
+    });
     await expect(
       authorizeUserForDmWithIngress({
         accountId: "default",
@@ -386,7 +371,12 @@ describe("synology-chat security helpers", () => {
         dmPolicy: "allowlist",
         allowedUserIds: ["user1"],
       }),
-    ).resolves.toMatchObject({ allowed: false, reason: "not-allowlisted" });
+    ).resolves.toMatchObject({
+      senderAccess: {
+        allowed: false,
+        ingressReasonCode: "dm_policy_not_allowlisted",
+      },
+    });
     await expect(
       authorizeUserForDmWithIngress({
         accountId: "default",
@@ -394,7 +384,7 @@ describe("synology-chat security helpers", () => {
         dmPolicy: "allowlist",
         allowedUserIds: ["user1", "user2"],
       }),
-    ).resolves.toMatchObject({ allowed: true });
+    ).resolves.toMatchObject({ senderAccess: { allowed: true } });
   });
 
   it("redacts Synology user IDs and allowlist entries from ingress state/decision", async () => {
@@ -407,7 +397,7 @@ describe("synology-chat security helpers", () => {
 
     const serialized = JSON.stringify({
       state: auth.state,
-      decision: auth.decision,
+      decision: auth.ingress,
     });
     expect(serialized).not.toContain("raw-sensitive-user-id");
   });

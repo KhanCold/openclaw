@@ -50,7 +50,7 @@ export {
   resolveDmGroupAccessWithLists,
   resolveEffectiveAllowFromLists,
   resolveOpenDmAllowlistAccess,
-} from "../security/dm-policy-shared.js";
+} from "../channels/message-access/legacy-policy.js";
 export {
   evaluateGroupRouteAccessForPolicy,
   evaluateSenderGroupAccessForPolicy,

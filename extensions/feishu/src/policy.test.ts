@@ -355,8 +355,8 @@ describe("Feishu channel ingress", () => {
       groupExplicitlyConfigured: true,
     });
 
-    expect(result.decision.admission).toBe("dispatch");
-    expect(JSON.stringify({ state: result.state, decision: result.decision })).not.toContain(
+    expect(result.ingress.admission).toBe("dispatch");
+    expect(JSON.stringify({ state: result.state, decision: result.ingress })).not.toContain(
       "oc_sensitive_group",
     );
   });
@@ -384,15 +384,15 @@ describe("Feishu channel ingress", () => {
       accountId: "default",
       dmPolicy: "allowlist",
       allowFrom: ["accessGroup:operators"],
-      storeAllowFrom: [],
+      readAllowFromStore: async () => [],
       senderOpenId: "ou_sensitive_user",
       senderUserId: "on_sensitive_user",
       conversationId: "ou_sensitive_user",
       mayPair: true,
     });
 
-    expect(result.decision.admission).toBe("dispatch");
-    expect(JSON.stringify({ state: result.state, decision: result.decision })).not.toContain(
+    expect(result.ingress.admission).toBe("dispatch");
+    expect(JSON.stringify({ state: result.state, decision: result.ingress })).not.toContain(
       "ou_sensitive_user",
     );
   });
@@ -412,8 +412,8 @@ describe("Feishu channel ingress", () => {
       hasControlCommand: true,
     });
 
-    expect(result.commandAuthorized).toBe(true);
-    expect(result.decision.admission).toBe("dispatch");
+    expect(result.commandAccess.authorized).toBe(true);
+    expect(result.ingress.admission).toBe("dispatch");
   });
 
   it("uses ingress sender gates for Feishu group sender allowlists", async () => {
@@ -434,7 +434,7 @@ describe("Feishu channel ingress", () => {
       senderOpenId: "ou_blocked",
     });
 
-    expect(allowed.decision.admission).toBe("dispatch");
-    expect(blocked.decision.admission).toBe("drop");
+    expect(allowed.ingress.admission).toBe("dispatch");
+    expect(blocked.ingress.admission).toBe("drop");
   });
 });

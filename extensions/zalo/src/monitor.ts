@@ -432,7 +432,7 @@ async function authorizeZaloMessage(
     readAllowFromStore: pairing.readAllowFromStore,
     commandRuntime: core.channel.commands,
   });
-  const groupAccess = access.groupAccess;
+  const groupAccess = access.senderAccess.groupAccess;
   if (groupAccess) {
     warnMissingProviderGroupPolicyFallbackOnce({
       providerMissingFallbackApplied: groupAccess.providerMissingFallbackApplied,
@@ -458,13 +458,13 @@ async function authorizeZaloMessage(
 
   if (
     !isGroup &&
-    access.access.decision === "block" &&
-    access.access.reasonCode === "dm_policy_disabled"
+    access.senderAccess.decision === "block" &&
+    access.senderAccess.ingressReasonCode === "dm_policy_disabled"
   ) {
     logVerbose(core, runtime, `Blocked zalo DM from ${senderId} (dmPolicy=disabled)`);
     return undefined;
   }
-  if (!isGroup && access.access.decision !== "allow") {
+  if (!isGroup && access.senderAccess.decision !== "allow") {
     if (dmPolicy === "pairing") {
       await pairing.issueChallenge({
         senderId,
@@ -500,7 +500,7 @@ async function authorizeZaloMessage(
 
   return {
     chatId,
-    commandAuthorized: access.commandAuthorized,
+    commandAuthorized: access.commandAccess.requested ? access.commandAccess.authorized : undefined,
     isGroup,
     rawBody,
     senderId,

@@ -205,7 +205,7 @@ export async function resolveTelegramInboundBody(params: {
     modeWhenAccessGroupsOff: "allow",
     includeDmAllowForGroupCommands: false,
   });
-  const commandAuthorized = commandGate.commandAuthorized;
+  const commandAuthorized = commandGate.authorized;
   const historyKey = isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : undefined;
 
   const primaryMedia = resolveTelegramPrimaryMedia(msg);

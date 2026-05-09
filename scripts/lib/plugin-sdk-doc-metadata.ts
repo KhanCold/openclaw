@@ -71,6 +71,9 @@ export const pluginSdkDocMetadata = {
   "channel-ingress": {
     category: "channel",
   },
+  "channel-ingress-runtime": {
+    category: "channel",
+  },
   "channel-reply-pipeline": {
     category: "channel",
   },

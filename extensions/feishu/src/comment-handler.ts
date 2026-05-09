@@ -87,23 +87,19 @@ export async function handleFeishuCommentEvent(
     channel: "feishu",
     accountId: account.accountId,
   });
-  const storeAllowFrom =
-    dmPolicy !== "allowlist" && dmPolicy !== "open"
-      ? await pairing.readAllowFromStore().catch(() => [])
-      : [];
   const dmIngress = await resolveFeishuDmIngressAccess({
     cfg: params.cfg,
     accountId: account.accountId,
     dmPolicy,
     allowFrom: configAllowFrom,
-    storeAllowFrom,
+    readAllowFromStore: pairing.readAllowFromStore,
     senderOpenId: turn.senderId,
     senderUserId: turn.senderUserId,
     conversationId: turn.senderId,
     mayPair: true,
   });
-  if (dmIngress.decision.admission !== "dispatch") {
-    if (dmIngress.decision.admission === "pairing-required") {
+  if (dmIngress.ingress.admission !== "dispatch") {
+    if (dmIngress.ingress.admission === "pairing-required") {
       const client = createFeishuClient(account);
       await pairing.issueChallenge({
         senderId: turn.senderId,

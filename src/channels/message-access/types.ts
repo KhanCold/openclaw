@@ -139,6 +139,8 @@ export type RouteGateState =
 
 export type RouteSenderPolicy = "inherit" | "replace" | "deny-when-empty";
 
+export type RouteSenderAllowlistSource = "effective-dm" | "effective-group";
+
 export type RouteGateFacts = {
   id: string;
   kind: "route" | "routeSender" | "membership" | "ownerAllowlist" | "nestedAllowlist";
@@ -147,10 +149,14 @@ export type RouteGateFacts = {
   precedence: number;
   senderPolicy: RouteSenderPolicy;
   senderAllowFrom?: Array<string | number>;
+  senderAllowFromSource?: RouteSenderAllowlistSource;
   match?: RedactedIngressMatch;
 };
 
-export type ResolvedRouteGateFacts = Omit<RouteGateFacts, "senderAllowFrom"> & {
+export type ResolvedRouteGateFacts = Omit<
+  RouteGateFacts,
+  "senderAllowFrom" | "senderAllowFromSource"
+> & {
   senderAllowlist?: ResolvedIngressAllowlist;
 };
 

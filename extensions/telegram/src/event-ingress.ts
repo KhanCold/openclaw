@@ -1,16 +1,15 @@
 import {
-  decideChannelIngress,
-  resolveChannelIngressState,
   type ChannelIngressEventInput,
   type IngressReasonCode,
 } from "openclaw/plugin-sdk/channel-ingress";
+import { resolveChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import type { DmPolicy } from "openclaw/plugin-sdk/config-types";
 import type { NormalizedAllowFrom } from "./bot-access.js";
 import {
   createTelegramIngressSubject,
   telegramAllowEntries,
   TELEGRAM_CHANNEL_ID,
-  telegramIngressAdapter,
+  telegramIngressIdentity,
 } from "./ingress.js";
 
 export async function resolveTelegramEventIngressAuthorization(params: {
@@ -25,34 +24,32 @@ export async function resolveTelegramEventIngressAuthorization(params: {
   enforceGroupAuthorization: boolean;
   eventKind: Extract<ChannelIngressEventInput["kind"], "reaction" | "button">;
 }): Promise<{ allowed: boolean; reasonCode: IngressReasonCode }> {
-  const state = await resolveChannelIngressState({
+  const result = await resolveChannelMessageIngress({
     channelId: TELEGRAM_CHANNEL_ID,
     accountId: params.accountId,
+    identity: telegramIngressIdentity,
     subject: createTelegramIngressSubject(params.senderId),
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: String(params.chatId),
       ...(params.resolvedThreadId != null ? { threadId: String(params.resolvedThreadId) } : {}),
     },
-    adapter: telegramIngressAdapter,
     event: {
       kind: params.eventKind,
       authMode: "inbound",
       mayPair: false,
     },
-    allowlists: {
-      dm: telegramAllowEntries(params.effectiveDmAllow),
-      group: params.enforceGroupAuthorization
-        ? telegramAllowEntries(params.effectiveGroupAllow)
-        : [],
+    policy: {
+      dmPolicy: params.dmPolicy,
+      groupPolicy: params.enforceGroupAuthorization ? "allowlist" : "open",
     },
-  });
-  const decision = decideChannelIngress(state, {
-    dmPolicy: params.dmPolicy,
-    groupPolicy: params.enforceGroupAuthorization ? "allowlist" : "open",
+    allowFrom: telegramAllowEntries(params.effectiveDmAllow),
+    groupAllowFrom: params.enforceGroupAuthorization
+      ? telegramAllowEntries(params.effectiveGroupAllow)
+      : [],
   });
   return {
-    allowed: decision.decision === "allow",
-    reasonCode: decision.reasonCode,
+    allowed: result.ingress.decision === "allow",
+    reasonCode: result.ingress.reasonCode,
   };
 }

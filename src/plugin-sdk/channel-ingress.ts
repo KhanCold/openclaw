@@ -4,15 +4,21 @@ import {
   findChannelIngressCommandGate,
   findChannelIngressGate,
   findChannelIngressSenderGate,
+  createChannelIngressPluginId,
+  findChannelIngressSenderReasonCode,
+  formatChannelIngressPolicyReason,
+  mapChannelIngressReasonCodeToDmGroupAccessReason,
   mapChannelIngressDecisionToTurnAdmission,
+  projectChannelIngressDmGroupAccess,
+  projectChannelIngressSenderGroupAccess,
   projectIngressAccessFacts,
   resolveChannelIngressState as resolveChannelIngressStateInternal,
   CHANNEL_INGRESS_GATE_SELECTORS,
 } from "../channels/message-access/index.js";
 import type {
   ChannelIngressDecision,
+  ChannelIngressDmGroupAccessProjection,
   ChannelIngressIdentifierKind,
-  ChannelIngressPluginId,
   ChannelIngressPolicyInput,
   ChannelIngressState,
   ChannelIngressStateInput as MessageAccessChannelIngressStateInput,
@@ -23,20 +29,22 @@ import type {
   InternalNormalizedEntry,
   IngressReasonCode,
 } from "../channels/message-access/index.js";
-import type {
-  DmGroupAccessDecision,
-  DmGroupAccessReasonCode,
-} from "../security/dm-policy-shared.js";
 import { normalizeStringEntries } from "../shared/string-normalization.js";
 
 export {
   CHANNEL_INGRESS_GATE_SELECTORS,
+  createChannelIngressPluginId,
   decideChannelIngress,
   decideChannelIngressBundle,
+  findChannelIngressSenderReasonCode,
   findChannelIngressCommandGate,
   findChannelIngressGate,
   findChannelIngressSenderGate,
+  formatChannelIngressPolicyReason,
+  mapChannelIngressReasonCodeToDmGroupAccessReason,
   mapChannelIngressDecisionToTurnAdmission,
+  projectChannelIngressDmGroupAccess,
+  projectChannelIngressSenderGroupAccess,
   projectIngressAccessFacts,
 };
 export type {
@@ -44,6 +52,7 @@ export type {
   AccessGraphGate,
   AccessGroupMembershipFact,
   ChannelIngressDecisionBundle,
+  ChannelIngressDmGroupAccessProjection,
   ChannelIngressGateSelector,
   ChannelIngressAdmission,
   ChannelIngressChannelId,
@@ -53,6 +62,7 @@ export type {
   ChannelIngressNormalizedEntry,
   ChannelIngressPluginId,
   ChannelIngressPolicyInput,
+  ChannelIngressSenderGroupAccessProjection,
   ChannelIngressSideEffectResult,
   ChannelIngressState,
   IngressGateEffect,
@@ -69,6 +79,7 @@ export type {
   ResolvedRouteGateFacts,
   RouteGateFacts,
   RouteGateState,
+  RouteSenderAllowlistSource,
   RouteSenderPolicy,
 } from "../channels/message-access/index.js";
 
@@ -106,18 +117,14 @@ export type CreateChannelIngressMultiIdentifierAdapterParams = {
   isWildcardEntry?: (entry: ChannelIngressAdapterEntry) => boolean;
 };
 
-export type ChannelIngressDmGroupAccessProjection = {
-  decision: DmGroupAccessDecision;
-  reasonCode: DmGroupAccessReasonCode;
-  reason: string;
-};
-
+/** @deprecated Use `resolveChannelMessageIngress` from `openclaw/plugin-sdk/channel-ingress-runtime`. */
 export type ResolveChannelIngressAccessParams = ChannelIngressStateInput & {
   policy: ChannelIngressPolicyInput;
   effectiveAllowFrom?: readonly string[];
   effectiveGroupAllowFrom?: readonly string[];
 };
 
+/** @deprecated Use `resolveChannelMessageIngress` from `openclaw/plugin-sdk/channel-ingress-runtime`. */
 export type ResolvedChannelIngressAccess = {
   state: ChannelIngressState;
   ingress: ChannelIngressDecision;
@@ -155,14 +162,6 @@ function defaultIngressMatchKey(params: {
   value: string;
 }): string {
   return `${params.kind}:${params.value}`;
-}
-
-export function createChannelIngressPluginId(id: string): ChannelIngressPluginId {
-  const trimmed = id.trim();
-  if (!trimmed) {
-    throw new Error("Channel ingress plugin id must be non-empty.");
-  }
-  return trimmed as ChannelIngressPluginId;
 }
 
 export function createChannelIngressSubject(
@@ -276,94 +275,13 @@ export function assertNeverChannelIngressReason(reasonCode: never): never {
   throw new Error(`Unhandled channel ingress reason code: ${String(reasonCode)}`);
 }
 
-export function findChannelIngressSenderReasonCode(
-  decision: ChannelIngressDecision,
-  params: { isGroup: boolean },
-): IngressReasonCode {
-  return findChannelIngressSenderGate(decision, params)?.reasonCode ?? decision.reasonCode;
-}
-
-export function mapChannelIngressReasonCodeToDmGroupAccessReason(params: {
-  reasonCode: IngressReasonCode;
-  isGroup: boolean;
-}): DmGroupAccessReasonCode {
-  switch (params.reasonCode) {
-    case "group_policy_open":
-    case "group_policy_allowed":
-      return "group_policy_allowed";
-    case "group_policy_disabled":
-      return "group_policy_disabled";
-    case "route_sender_empty":
-    case "group_policy_empty_allowlist":
-      return "group_policy_empty_allowlist";
-    case "group_policy_not_allowlisted":
-      return "group_policy_not_allowlisted";
-    case "dm_policy_open":
-      return "dm_policy_open";
-    case "dm_policy_disabled":
-      return "dm_policy_disabled";
-    case "dm_policy_allowlisted":
-      return "dm_policy_allowlisted";
-    case "dm_policy_pairing_required":
-      return "dm_policy_pairing_required";
-    default:
-      return params.isGroup ? "group_policy_not_allowlisted" : "dm_policy_not_allowlisted";
-  }
-}
-
-export function projectChannelIngressDmGroupAccess(params: {
-  ingress: ChannelIngressDecision;
-  isGroup: boolean;
-  dmPolicy: string;
-  groupPolicy: string;
-}): ChannelIngressDmGroupAccessProjection {
-  const reasonCode = mapChannelIngressReasonCodeToDmGroupAccessReason({
-    reasonCode: findChannelIngressSenderReasonCode(params.ingress, { isGroup: params.isGroup }),
-    isGroup: params.isGroup,
-  });
-  const decision: DmGroupAccessDecision =
-    reasonCode === "dm_policy_pairing_required"
-      ? "pairing"
-      : params.ingress.decision === "allow"
-        ? "allow"
-        : "block";
-  const reason = (() => {
-    switch (reasonCode) {
-      case "group_policy_allowed":
-        return `groupPolicy=${params.groupPolicy}`;
-      case "group_policy_disabled":
-        return "groupPolicy=disabled";
-      case "group_policy_empty_allowlist":
-        return "groupPolicy=allowlist (empty allowlist)";
-      case "group_policy_not_allowlisted":
-        return "groupPolicy=allowlist (not allowlisted)";
-      case "dm_policy_open":
-        return "dmPolicy=open";
-      case "dm_policy_disabled":
-        return "dmPolicy=disabled";
-      case "dm_policy_allowlisted":
-        return `dmPolicy=${params.dmPolicy} (allowlisted)`;
-      case "dm_policy_pairing_required":
-        return "dmPolicy=pairing (not allowlisted)";
-      case "dm_policy_not_allowlisted":
-        return `dmPolicy=${params.dmPolicy} (not allowlisted)`;
-    }
-    const exhaustive: never = reasonCode;
-    return exhaustive;
-  })();
-  return {
-    decision,
-    reasonCode,
-    reason,
-  };
-}
-
 export async function resolveChannelIngressState(
   input: ChannelIngressStateInput,
 ): Promise<ChannelIngressState> {
   return await resolveChannelIngressStateInternal(input);
 }
 
+/** @deprecated Use `resolveChannelMessageIngress` from `openclaw/plugin-sdk/channel-ingress-runtime`. */
 export async function resolveChannelIngressAccess(
   params: ResolveChannelIngressAccessParams,
 ): Promise<ResolvedChannelIngressAccess> {

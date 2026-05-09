@@ -42,7 +42,7 @@ async function authorize(params: {
 describe("telegram command ingress authorization", () => {
   it("authorizes direct commands from effective DM allowlist entries", async () => {
     await expect(authorize({ dmAllow: ["200"] })).resolves.toMatchObject({
-      commandAuthorized: true,
+      authorized: true,
     });
   });
 
@@ -53,7 +53,7 @@ describe("telegram command ingress authorization", () => {
         dmAllow: [],
         groupAllow: ["200"],
       }),
-    ).resolves.toMatchObject({ commandAuthorized: true });
+    ).resolves.toMatchObject({ authorized: true });
   });
 
   it("keeps account allowFrom as a group command owner source", async () => {
@@ -63,7 +63,7 @@ describe("telegram command ingress authorization", () => {
         dmAllow: ["200"],
         groupAllow: [],
       }),
-    ).resolves.toMatchObject({ commandAuthorized: true });
+    ).resolves.toMatchObject({ authorized: true });
   });
 
   it("can keep text group commands scoped to group allowlists only", async () => {
@@ -74,7 +74,7 @@ describe("telegram command ingress authorization", () => {
         groupAllow: [],
         includeDmAllowForGroupCommands: false,
       }),
-    ).resolves.toMatchObject({ commandAuthorized: false });
+    ).resolves.toMatchObject({ authorized: false });
   });
 
   it("does not let paired DM store entries authorize group commands when omitted from the DM list", async () => {
@@ -84,24 +84,24 @@ describe("telegram command ingress authorization", () => {
         dmAllow: [],
         groupAllow: [],
       }),
-    ).resolves.toMatchObject({ commandAuthorized: false });
+    ).resolves.toMatchObject({ authorized: false });
   });
 
   it("authorizes explicit command owners without requiring channel allowlists", async () => {
     await expect(authorize({ ownerList: ["200"], senderIsOwner: true })).resolves.toMatchObject({
-      commandAuthorized: true,
+      authorized: true,
     });
   });
 
   it("keeps configured-but-unmatched command owner lists denied", async () => {
     await expect(authorize({ ownerList: ["999"] })).resolves.toMatchObject({
-      commandAuthorized: false,
+      authorized: false,
     });
   });
 
   it("allows command fallback when access-group command gating is disabled and no source is configured", async () => {
     await expect(authorize({ useAccessGroups: false })).resolves.toMatchObject({
-      commandAuthorized: true,
+      authorized: true,
     });
   });
 
@@ -113,7 +113,7 @@ describe("telegram command ingress authorization", () => {
         dmAllow: ["999"],
       }),
     ).resolves.toMatchObject({
-      commandAuthorized: true,
+      authorized: true,
     });
   });
 
@@ -126,7 +126,7 @@ describe("telegram command ingress authorization", () => {
         hasControlCommand: true,
       }),
     ).resolves.toMatchObject({
-      commandAuthorized: false,
+      authorized: false,
       shouldBlockControlCommand: true,
     });
   });

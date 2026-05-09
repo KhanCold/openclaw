@@ -70,10 +70,10 @@ export function createMSTeamsReactionHandler(deps: MSTeamsMessageHandlerDeps) {
 
     if (msteamsCfg) {
       const senderAccess = await resolveMSTeamsSenderAccess({ cfg, activity });
-      if (senderAccess.access.decision !== "allow") {
+      if (senderAccess.senderAccess.decision !== "allow") {
         log.debug?.("dropping reaction (access denied)", {
           sender: senderId,
-          reason: senderAccess.access.reason,
+          reason: senderAccess.senderAccess.reason,
         });
         return;
       }

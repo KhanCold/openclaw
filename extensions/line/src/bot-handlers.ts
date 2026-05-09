@@ -23,7 +23,7 @@ import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { warnMissingProviderGroupPolicyFallbackOnce } from "openclaw/plugin-sdk/runtime-group-policy";
-import { resolveLineIngressAccess } from "./access-policy.js";
+import { resolveLineIngressAccess, type ResolvedLineIngressAccess } from "./access-policy.js";
 import {
   buildLineMessageContext,
   buildLinePostbackContext,
@@ -223,8 +223,7 @@ async function sendLinePairingReply(params: {
 async function shouldProcessLineEvent(
   event: MessageEvent | PostbackEvent,
   context: LineHandlerContext,
-): Promise<{ allowed: boolean; commandAuthorized: boolean }> {
-  const denied = { allowed: false, commandAuthorized: false };
+): Promise<ResolvedLineIngressAccess | null> {
   const { cfg, account } = context;
   const { userId, groupId, roomId, isGroup } = getLineSourceInfo(event.source);
   const senderId = userId ?? "";
@@ -251,56 +250,53 @@ async function shouldProcessLineEvent(
     log: (message) => logVerbose(message),
   });
 
-  if (access.decision === "allow") {
-    return {
-      allowed: true,
-      commandAuthorized: access.commandAuthorized,
-    };
+  if (access.senderAccess.decision === "allow") {
+    return access;
   }
 
   if (isGroup) {
     if (groupConfig?.enabled === false) {
       logVerbose(`Blocked line group ${groupId ?? roomId ?? "unknown"} (group disabled)`);
-      return denied;
+      return null;
     }
     if (groupConfig?.allowFrom !== undefined) {
       if (!senderId) {
         logVerbose("Blocked line group message (group allowFrom override, no sender ID)");
-        return denied;
+        return null;
       }
-      if (access.reasonCode !== "group_policy_allowed") {
+      if (access.senderAccess.ingressReasonCode !== "group_policy_allowed") {
         logVerbose(`Blocked line group sender ${senderId} (group allowFrom override)`);
-        return denied;
+        return null;
       }
     }
-    if (access.reasonCode === "group_policy_disabled") {
+    if (access.senderAccess.ingressReasonCode === "group_policy_disabled") {
       logVerbose("Blocked line group message (groupPolicy: disabled)");
     } else if (!senderId && access.groupPolicy === "allowlist") {
       logVerbose("Blocked line group message (no sender ID, groupPolicy: allowlist)");
-    } else if (access.reasonCode === "group_policy_empty_allowlist") {
+    } else if (access.senderAccess.ingressReasonCode === "group_policy_empty_allowlist") {
       logVerbose("Blocked line group message (groupPolicy: allowlist, no groupAllowFrom)");
     } else {
       logVerbose(`Blocked line group message from ${senderId} (groupPolicy: allowlist)`);
     }
-    return denied;
+    return null;
   }
 
-  if (access.reasonCode === "dm_policy_disabled") {
+  if (access.senderAccess.ingressReasonCode === "dm_policy_disabled") {
     logVerbose("Blocked line sender (dmPolicy: disabled)");
-    return denied;
+    return null;
   }
 
-  if (access.decision === "pairing") {
+  if (access.senderAccess.decision === "pairing") {
     if (!senderId) {
       logVerbose("Blocked line sender (dmPolicy: pairing, no sender ID)");
-      return denied;
+      return null;
     }
     await sendLinePairingReply({
       senderId,
       replyToken: "replyToken" in event ? event.replyToken : undefined,
       context,
     });
-    return denied;
+    return null;
   }
 
   logVerbose(
@@ -308,7 +304,7 @@ async function shouldProcessLineEvent(
       account.config.dmPolicy ?? "pairing"
     })`,
   );
-  return denied;
+  return null;
 }
 
 function getLineMentionees(
@@ -352,7 +348,7 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
   const message = event.message;
 
   const decision = await shouldProcessLineEvent(event, context);
-  if (!decision.allowed) {
+  if (!decision) {
     return;
   }
 
@@ -386,7 +382,7 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
         requireMention,
         allowTextCommands: true,
         hasControlCommand: hasControlCommand(rawText, cfg),
-        commandAuthorized: decision.commandAuthorized,
+        commandAuthorized: decision.commandAccess.authorized,
       },
     });
     if (mentionDecision.shouldSkip) {
@@ -433,7 +429,7 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
     allMedia,
     cfg,
     account,
-    commandAuthorized: decision.commandAuthorized,
+    commandAuthorized: decision.commandAccess.authorized,
     groupHistories: context.groupHistories,
     historyLimit: context.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
   });
@@ -488,7 +484,7 @@ async function handlePostbackEvent(
   logVerbose(`line: received postback: ${data}`);
 
   const decision = await shouldProcessLineEvent(event, context);
-  if (!decision.allowed) {
+  if (!decision) {
     return;
   }
 
@@ -496,7 +492,7 @@ async function handlePostbackEvent(
     event,
     cfg: context.cfg,
     account: context.account,
-    commandAuthorized: decision.commandAuthorized,
+    commandAuthorized: decision.commandAccess.authorized,
   });
   if (!postbackContext) {
     return;

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { ResolvedMattermostAccount } from "./accounts.js";
 import {
   authorizeMattermostCommandInvocation,
-  resolveMattermostEffectiveAllowFromLists,
   resolveMattermostMonitorInboundAccess,
 } from "./monitor-auth.js";
 
@@ -47,37 +46,72 @@ function authorizeGroupCommand(senderId: string) {
 }
 
 describe("mattermost monitor authz", () => {
-  it("keeps DM allowlist merged with pairing-store entries", () => {
-    const resolved = resolveMattermostEffectiveAllowFromLists({
-      dmPolicy: "pairing",
-      allowFrom: ["@trusted-user"],
-      groupAllowFrom: ["@group-owner"],
+  it("keeps DM allowlist merged with pairing-store entries", async () => {
+    const resolved = await resolveMattermostMonitorInboundAccess({
+      account: {
+        ...accountFixture,
+        config: {
+          allowFrom: ["@trusted-user"],
+          groupAllowFrom: ["@group-owner"],
+        },
+      },
+      cfg: {},
+      senderId: "trusted-user",
+      senderName: "Trusted User",
+      channelId: "dm-1",
+      kind: "direct",
+      groupPolicy: "allowlist",
       storeAllowFrom: ["user:attacker"],
+      allowTextCommands: false,
+      hasControlCommand: false,
     });
 
-    expect(resolved.effectiveAllowFrom).toEqual(["trusted-user", "attacker"]);
+    expect(resolved.senderAccess.effectiveAllowFrom).toEqual(["trusted-user", "attacker"]);
   });
 
-  it("uses explicit groupAllowFrom without pairing-store inheritance", () => {
-    const resolved = resolveMattermostEffectiveAllowFromLists({
-      dmPolicy: "pairing",
-      allowFrom: ["@trusted-user"],
-      groupAllowFrom: ["@group-owner"],
+  it("uses explicit groupAllowFrom without pairing-store inheritance", async () => {
+    const resolved = await resolveMattermostMonitorInboundAccess({
+      account: {
+        ...accountFixture,
+        config: {
+          allowFrom: ["@trusted-user"],
+          groupAllowFrom: ["@group-owner"],
+        },
+      },
+      cfg: {},
+      senderId: "group-owner",
+      senderName: "Group Owner",
+      channelId: "chan-1",
+      kind: "channel",
+      groupPolicy: "allowlist",
       storeAllowFrom: ["user:attacker"],
+      allowTextCommands: false,
+      hasControlCommand: false,
     });
 
-    expect(resolved.effectiveGroupAllowFrom).toEqual(["group-owner"]);
+    expect(resolved.senderAccess.effectiveGroupAllowFrom).toEqual(["group-owner"]);
   });
 
-  it("does not inherit pairing-store entries into group allowlist", () => {
-    const resolved = resolveMattermostEffectiveAllowFromLists({
-      dmPolicy: "pairing",
-      allowFrom: ["@trusted-user"],
+  it("falls group allowlist back to allowFrom without pairing-store entries", async () => {
+    const resolved = await resolveMattermostMonitorInboundAccess({
+      account: {
+        ...accountFixture,
+        config: {
+          allowFrom: ["@trusted-user"],
+        },
+      },
+      cfg: {},
+      senderId: "trusted-user",
+      senderName: "Trusted User",
+      channelId: "chan-1",
+      kind: "channel",
+      groupPolicy: "allowlist",
       storeAllowFrom: ["user:attacker"],
+      allowTextCommands: false,
+      hasControlCommand: false,
     });
 
-    expect(resolved.effectiveAllowFrom).toEqual(["trusted-user", "attacker"]);
-    expect(resolved.effectiveGroupAllowFrom).toEqual(["trusted-user"]);
+    expect(resolved.senderAccess.effectiveGroupAllowFrom).toEqual(["trusted-user"]);
   });
 
   it("does not auto-authorize DM commands in open mode without allowlists", async () => {
@@ -103,8 +137,8 @@ describe("mattermost monitor authz", () => {
       hasControlCommand: true,
     });
 
-    expect(access.decision.decision).toBe("block");
-    expect(access.commandAuthorized).toBe(false);
+    expect(access.ingress.decision).toBe("block");
+    expect(access.commandAccess.authorized).toBe(false);
   });
 
   it("denies group control commands when the sender is outside the allowlist", async () => {
@@ -191,7 +225,7 @@ describe("mattermost monitor authz", () => {
       mayPair: false,
     });
 
-    expect(access.decision.decision).toBe("block");
-    expect(access.reasonCode).toBe("event_pairing_not_allowed");
+    expect(access.ingress.decision).toBe("block");
+    expect(access.ingress.reasonCode).toBe("event_pairing_not_allowed");
   });
 });

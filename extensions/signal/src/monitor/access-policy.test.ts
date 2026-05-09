@@ -1,12 +1,6 @@
 import type { AccessGroupsConfig } from "openclaw/plugin-sdk/config-types";
-import { readStoreAllowFromForDmPolicy } from "openclaw/plugin-sdk/security-runtime";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { handleSignalDirectMessageAccess, resolveSignalAccessState } from "./access-policy.js";
-
-vi.mock("openclaw/plugin-sdk/security-runtime", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("openclaw/plugin-sdk/security-runtime")>()),
-  readStoreAllowFromForDmPolicy: vi.fn(async () => []),
-}));
 
 const SIGNAL_GROUP_ID = "signal-group-id";
 const OTHER_SIGNAL_GROUP_ID = "other-signal-group-id";
@@ -16,15 +10,12 @@ const SIGNAL_SENDER = {
   raw: "+15551230000",
 };
 
-beforeEach(() => {
-  vi.mocked(readStoreAllowFromForDmPolicy).mockResolvedValue([]);
-});
-
 async function resolveGroupAccess(params: {
   allowFrom?: string[];
   groupAllowFrom?: string[];
   groupId?: string;
   accessGroups?: AccessGroupsConfig;
+  storeAllowFrom?: string[];
 }) {
   const access = await resolveSignalAccessState({
     accountId: "default",
@@ -35,6 +26,7 @@ async function resolveGroupAccess(params: {
     sender: SIGNAL_SENDER,
     groupId: params.groupId,
     accessGroups: params.accessGroups,
+    readStoreAllowFrom: async () => params.storeAllowFrom ?? [],
   });
   return {
     ...access,
@@ -146,8 +138,6 @@ describe("resolveSignalAccessState", () => {
   });
 
   it("allows paired direct senders from the pairing store", async () => {
-    vi.mocked(readStoreAllowFromForDmPolicy).mockResolvedValue([SIGNAL_SENDER.e164]);
-
     const { dmAccess } = await resolveSignalAccessState({
       accountId: "default",
       dmPolicy: "pairing",
@@ -155,6 +145,7 @@ describe("resolveSignalAccessState", () => {
       allowFrom: [],
       groupAllowFrom: [],
       sender: SIGNAL_SENDER,
+      readStoreAllowFrom: async () => [SIGNAL_SENDER.e164],
     });
 
     expect(dmAccess.decision).toBe("allow");
@@ -162,11 +153,10 @@ describe("resolveSignalAccessState", () => {
   });
 
   it("does not let pairing-store senders satisfy group access", async () => {
-    vi.mocked(readStoreAllowFromForDmPolicy).mockResolvedValue([SIGNAL_SENDER.e164]);
-
     const { groupDecision } = await resolveGroupAccess({
       groupAllowFrom: [],
       groupId: SIGNAL_GROUP_ID,
+      storeAllowFrom: [SIGNAL_SENDER.e164],
     });
 
     expect(groupDecision.decision).toBe("block");
@@ -195,8 +185,8 @@ describe("resolveSignalAccessState", () => {
     });
 
     expect(access.resolveAccessDecision(true).decision).toBe("allow");
-    expect(access.resolveCommandAccess(true)).toEqual({
-      commandAuthorized: false,
+    expect(access.resolveCommandAccess(true)).toMatchObject({
+      authorized: false,
       shouldBlockControlCommand: true,
     });
   });
@@ -213,8 +203,8 @@ describe("resolveSignalAccessState", () => {
       hasControlCommand: true,
     });
 
-    expect(access.resolveCommandAccess(true)).toEqual({
-      commandAuthorized: true,
+    expect(access.resolveCommandAccess(true)).toMatchObject({
+      authorized: true,
       shouldBlockControlCommand: false,
     });
   });

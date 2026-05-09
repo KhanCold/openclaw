@@ -1,11 +1,8 @@
 import {
-  createChannelIngressPluginId,
-  createChannelIngressStringAdapter,
-  createChannelIngressSubject,
-  resolveChannelIngressAccess,
-  type ChannelIngressDecision,
-  type IngressReasonCode,
-} from "openclaw/plugin-sdk/channel-ingress";
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+  type ResolvedChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import {
   resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
@@ -17,10 +14,6 @@ import type {
   OpenClawConfig,
 } from "openclaw/plugin-sdk/config-types";
 import { resolveDefaultGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
-import {
-  readStoreAllowFromForDmPolicy,
-  resolveEffectiveAllowFromLists,
-} from "openclaw/plugin-sdk/security-runtime";
 import { resolveGroupSessionKey } from "openclaw/plugin-sdk/session-store-runtime";
 import { resolveWhatsAppAccount, type ResolvedWhatsAppAccount } from "./accounts.js";
 import { getSelfIdentity, getSenderIdentity } from "./identity.js";
@@ -45,21 +38,12 @@ export type ResolvedWhatsAppInboundPolicy = {
   resolveConversationRequireMention: (conversationId: string) => boolean;
 };
 
-export type ResolvedWhatsAppIngressAccess = {
-  ingress: ChannelIngressDecision;
-  decision: "allow" | "block" | "pairing";
-  reasonCode: IngressReasonCode;
-  reason: string;
-  commandAuthorized?: boolean;
-};
-
-const WHATSAPP_CHANNEL_ID = createChannelIngressPluginId("whatsapp");
-const whatsappIngressAdapter = createChannelIngressStringAdapter({
+const whatsappIngressIdentity = defineStableChannelIngressIdentity({
+  key: "whatsapp-sender-phone",
   kind: "phone",
-  normalizeEntry: normalizeWhatsAppIngressPhone,
-  normalizeSubject: normalizeWhatsAppIngressPhone,
+  normalize: normalizeWhatsAppIngressPhone,
   sensitivity: "pii",
-  resolveEntryId: ({ index }) => `whatsapp-entry-${index + 1}`,
+  entryIdPrefix: "whatsapp-entry",
 });
 
 function normalizeWhatsAppIngressPhone(value: string): string | null {
@@ -89,35 +73,6 @@ function maybeSamePhoneDmAllowFrom(params: {
     return [];
   }
   return [params.dmSenderId];
-}
-
-function reasonFromIngress(params: {
-  reasonCode: IngressReasonCode;
-  dmPolicy: DmPolicy;
-  groupPolicy: GroupPolicy;
-  isGroup: boolean;
-}): string {
-  switch (params.reasonCode) {
-    case "group_policy_open":
-    case "group_policy_allowed":
-      return `groupPolicy=${params.groupPolicy}`;
-    case "group_policy_disabled":
-      return "groupPolicy=disabled";
-    case "group_policy_empty_allowlist":
-      return "groupPolicy=allowlist (empty allowlist)";
-    case "dm_policy_open":
-      return "dmPolicy=open";
-    case "dm_policy_disabled":
-      return "dmPolicy=disabled";
-    case "dm_policy_allowlisted":
-      return `dmPolicy=${params.dmPolicy} (allowlisted)`;
-    case "dm_policy_pairing_required":
-      return "dmPolicy=pairing (not allowlisted)";
-    default:
-      return params.isGroup
-        ? "groupPolicy=allowlist (not allowlisted)"
-        : `dmPolicy=${params.dmPolicy} (not allowlisted)`;
-  }
 }
 
 function isNormalizedSenderAllowed(allowEntries: string[], sender?: string | null): boolean {
@@ -167,10 +122,6 @@ export function resolveWhatsAppInboundPolicy(params: {
     account.groupAllowFrom ??
     (configuredAllowFrom.length > 0 ? configuredAllowFrom : undefined) ??
     [];
-  const { effectiveGroupAllowFrom } = resolveEffectiveAllowFromLists({
-    allowFrom: configuredAllowFrom,
-    groupAllowFrom,
-  });
   const defaultGroupPolicy = resolveDefaultGroupPolicy(params.cfg);
   const { groupPolicy, providerMissingFallbackApplied } = resolveWhatsAppRuntimeGroupPolicy({
     providerConfigPresent: params.cfg.channels?.whatsapp !== undefined,
@@ -202,7 +153,7 @@ export function resolveWhatsAppInboundPolicy(params: {
         cfg: resolvedGroupCfg,
         channel: "whatsapp",
         groupId: resolveGroupConversationId(conversationId),
-        hasGroupAllowFrom: effectiveGroupAllowFrom.length > 0,
+        hasGroupAllowFrom: groupAllowFrom.length > 0,
       }),
     resolveConversationRequireMention: (conversationId) =>
       resolveChannelGroupRequireMention({
@@ -221,80 +172,46 @@ export async function resolveWhatsAppIngressAccess(params: {
   senderId?: string | null;
   dmSenderId?: string | null;
   includeCommand?: boolean;
-}): Promise<ResolvedWhatsAppIngressAccess> {
-  const storeAllowFrom = params.isGroup
-    ? []
-    : await readStoreAllowFromForDmPolicy({
-        provider: "whatsapp",
-        accountId: params.policy.account.accountId,
-        dmPolicy: params.policy.dmPolicy,
-        shouldRead: params.policy.shouldReadStorePairingApprovals,
-      });
+}): Promise<ResolvedChannelMessageIngress> {
   const samePhoneDmAllowFrom = maybeSamePhoneDmAllowFrom({
     isGroup: params.isGroup,
     policy: params.policy,
     dmSenderId: params.dmSenderId,
   });
   const dmAllowFrom = [...params.policy.dmAllowFrom, ...samePhoneDmAllowFrom];
-  const commandOwner = params.isGroup
-    ? params.policy.dmAllowFrom
-    : [...dmAllowFrom, ...storeAllowFrom];
-  const resolved = await resolveChannelIngressAccess({
-    channelId: WHATSAPP_CHANNEL_ID,
+  return await resolveChannelMessageIngress({
+    channelId: "whatsapp",
     accountId: params.policy.account.accountId,
-    subject: createChannelIngressSubject({
-      opaqueId: "whatsapp-sender-phone",
-      kind: "phone",
-      value: params.senderId ?? "",
-      sensitivity: "pii",
-    }),
+    identity: whatsappIngressIdentity,
+    subject: { stableId: params.senderId ?? "" },
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: params.conversationId,
     },
-    adapter: whatsappIngressAdapter,
     accessGroups: params.cfg.accessGroups,
     event: {
       kind: "message",
       authMode: "inbound",
       mayPair: !params.isGroup,
     },
-    allowlists: {
-      dm: dmAllowFrom,
-      group: params.policy.groupAllowFrom,
-      pairingStore: storeAllowFrom,
-      commandOwner,
-      commandGroup: params.policy.groupAllowFrom,
-    },
     policy: {
       dmPolicy: params.policy.dmPolicy,
       groupPolicy: params.policy.groupPolicy,
       groupAllowFromFallbackToAllowFrom: false,
-      ...(params.includeCommand
-        ? {
-            command: {
-              useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
-              allowTextCommands: false,
-              hasControlCommand: true,
-              modeWhenAccessGroupsOff: "allow",
-            },
-          }
-        : {}),
     },
+    allowFrom: dmAllowFrom,
+    groupAllowFrom: params.policy.groupAllowFrom,
+    useDefaultPairingStore: true,
+    command:
+      params.includeCommand === true
+        ? {
+            useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
+            allowTextCommands: false,
+            hasControlCommand: true,
+            modeWhenAccessGroupsOff: "allow",
+          }
+        : undefined,
   });
-  const reasonCode = resolved.senderReasonCode;
-  return {
-    ingress: resolved.ingress,
-    decision: resolved.access.decision,
-    reasonCode,
-    reason: reasonFromIngress({
-      reasonCode,
-      dmPolicy: params.policy.dmPolicy,
-      groupPolicy: params.policy.groupPolicy,
-      isGroup: params.isGroup,
-    }),
-    commandAuthorized: params.includeCommand === true ? resolved.commandAuthorized : undefined,
-  };
 }
 
 export async function resolveWhatsAppCommandAuthorized(params: {
@@ -332,5 +249,5 @@ export async function resolveWhatsAppCommandAuthorized(params: {
     dmSenderId: dmSender,
     includeCommand: true,
   });
-  return access.commandAuthorized === true;
+  return access.commandAccess.authorized;
 }

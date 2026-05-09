@@ -1,16 +1,15 @@
+import { type ChannelIngressEventInput } from "openclaw/plugin-sdk/channel-ingress";
 import {
-  decideChannelIngress,
-  findChannelIngressCommandGate,
-  resolveChannelIngressState,
-  type ChannelIngressEventInput,
-} from "openclaw/plugin-sdk/channel-ingress";
+  resolveChannelMessageIngress,
+  type ResolvedChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import type { DmPolicy, OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import type { NormalizedAllowFrom } from "./bot-access.js";
 import {
   createTelegramIngressSubject,
   telegramAllowEntries,
   TELEGRAM_CHANNEL_ID,
-  telegramIngressAdapter,
+  telegramIngressIdentity,
 } from "./ingress.js";
 
 type TelegramOwnerCommandAccess = {
@@ -45,7 +44,7 @@ export async function resolveTelegramCommandIngressAuthorization(params: {
   hasControlCommand?: boolean;
   modeWhenAccessGroupsOff?: "allow" | "deny" | "configured";
   includeDmAllowForGroupCommands?: boolean;
-}): Promise<{ commandAuthorized: boolean; shouldBlockControlCommand: boolean }> {
+}): Promise<ResolvedChannelMessageIngress["commandAccess"]> {
   const commandOwner = [
     ...(params.isGroup && params.includeDmAllowForGroupCommands === false
       ? []
@@ -55,30 +54,28 @@ export async function resolveTelegramCommandIngressAuthorization(params: {
       senderId: params.senderId,
     }),
   ];
-  const state = await resolveChannelIngressState({
+  const result = await resolveChannelMessageIngress({
     channelId: TELEGRAM_CHANNEL_ID,
     accountId: params.accountId,
+    identity: telegramIngressIdentity,
     subject: createTelegramIngressSubject(params.senderId),
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: String(params.chatId),
       ...(params.resolvedThreadId != null ? { threadId: String(params.resolvedThreadId) } : {}),
     },
-    adapter: telegramIngressAdapter,
     accessGroups: params.cfg.accessGroups,
     event: {
       kind: params.eventKind ?? "native-command",
       authMode: "command",
       mayPair: false,
     },
-    allowlists: {
-      commandOwner,
-      commandGroup: params.isGroup ? telegramAllowEntries(params.effectiveGroupAllow) : [],
+    policy: {
+      dmPolicy: params.dmPolicy,
+      groupPolicy: "allowlist",
     },
-  });
-  const decision = decideChannelIngress(state, {
-    dmPolicy: params.dmPolicy,
-    groupPolicy: "allowlist",
+    allowFrom: commandOwner,
+    groupAllowFrom: params.isGroup ? telegramAllowEntries(params.effectiveGroupAllow) : [],
     command: {
       useAccessGroups: params.useAccessGroups,
       allowTextCommands: params.allowTextCommands ?? false,
@@ -86,10 +83,5 @@ export async function resolveTelegramCommandIngressAuthorization(params: {
       modeWhenAccessGroupsOff: params.modeWhenAccessGroupsOff ?? "configured",
     },
   });
-  const commandGate = findChannelIngressCommandGate(decision);
-  return {
-    commandAuthorized: commandGate?.allowed === true,
-    shouldBlockControlCommand:
-      commandGate?.command?.shouldBlockControlCommand ?? commandGate?.effect === "block-command",
-  };
+  return result.commandAccess;
 }

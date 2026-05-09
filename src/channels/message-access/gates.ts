@@ -44,3 +44,15 @@ export function findChannelIngressCommandGate(
 ): AccessGraphGate | undefined {
   return findChannelIngressGate(decision, CHANNEL_INGRESS_GATE_SELECTORS.command);
 }
+
+export function findChannelIngressEventGate(
+  decision: ChannelIngressDecision,
+): AccessGraphGate | undefined {
+  return findChannelIngressGate(decision, CHANNEL_INGRESS_GATE_SELECTORS.event);
+}
+
+export function findChannelIngressActivationGate(
+  decision: ChannelIngressDecision,
+): AccessGraphGate | undefined {
+  return findChannelIngressGate(decision, CHANNEL_INGRESS_GATE_SELECTORS.activation);
+}

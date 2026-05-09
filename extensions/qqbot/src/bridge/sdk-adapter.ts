@@ -8,14 +8,9 @@
  */
 
 import {
-  createChannelIngressPluginId,
-  createChannelIngressStringAdapter,
-  createChannelIngressSubject,
-  decideChannelIngress,
-  findChannelIngressCommandGate,
-  findChannelIngressSenderGate,
-  resolveChannelIngressState,
-} from "openclaw/plugin-sdk/channel-ingress";
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngress,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import {
   implicitMentionKindWhen,
   resolveInboundMentionDecision,
@@ -44,10 +39,9 @@ import type {
   MentionPolicy,
 } from "../engine/adapter/mention-gate.port.js";
 
-const QQBOT_CHANNEL_ID = createChannelIngressPluginId("qqbot");
-const qqbotIngressAdapter = createChannelIngressStringAdapter({
-  normalizeEntry: normalizeQQBotSenderId,
-  normalizeSubject: normalizeQQBotSenderId,
+const qqbotIngressIdentity = defineStableChannelIngressIdentity({
+  key: "sender-id",
+  normalize: normalizeQQBotSenderId,
   isWildcardEntry: (entry) => normalizeQQBotSenderId(entry) === "*",
 });
 
@@ -167,38 +161,31 @@ export function createSdkAccessAdapter(): AccessPort {
           ? input.groupAllowFrom
           : (input.allowFrom ?? []);
       const normalizedAllowFrom = normalizeQQBotAllowFrom(input.allowFrom);
-      const effectiveAllowFrom =
-        dmPolicy === "open" && normalizedAllowFrom.length === 0 ? ["*"] : normalizedAllowFrom;
       const dmAllowFromForIngress =
         dmPolicy === "open" && normalizedAllowFrom.length === 0 ? ["*"] : (input.allowFrom ?? []);
-      const effectiveGroupAllowFrom = normalizeQQBotAllowFrom(rawGroupAllowFrom);
 
-      const state = await resolveChannelIngressState({
-        channelId: QQBOT_CHANNEL_ID,
+      const resolved = await resolveChannelMessageIngress({
+        channelId: "qqbot",
         accountId: input.accountId,
-        subject: createChannelIngressSubject({
-          opaqueId: "sender-id",
-          value: input.senderId,
-        }),
+        identity: qqbotIngressIdentity,
+        subject: { stableId: input.senderId },
         conversation: {
           kind: input.isGroup ? "group" : "direct",
           id: input.conversationId,
         },
-        adapter: qqbotIngressAdapter,
         accessGroups: (input.cfg as OpenClawConfig).accessGroups,
         event: {
           kind: "message",
           authMode: "inbound",
           mayPair: false,
         },
-        allowlists: {
-          dm: dmAllowFromForIngress,
-          group: rawGroupAllowFrom,
+        policy: {
+          dmPolicy,
+          groupPolicy,
+          groupAllowFromFallbackToAllowFrom: false,
         },
-      });
-      const decision = decideChannelIngress(state, {
-        dmPolicy,
-        groupPolicy,
+        allowFrom: dmAllowFromForIngress,
+        groupAllowFrom: rawGroupAllowFrom,
       });
       const commandAuthorized = await resolveQQBotCommandAuthorized({
         cfg: input.cfg,
@@ -210,12 +197,11 @@ export function createSdkAccessAdapter(): AccessPort {
       });
       return mapQQBotIngressAccess({
         isGroup: input.isGroup,
-        decisionAllowed:
-          findChannelIngressSenderGate(decision, { isGroup: input.isGroup })?.allowed === true,
+        decisionAllowed: resolved.senderAccess.decision === "allow",
         dmPolicy,
         groupPolicy,
-        effectiveAllowFrom,
-        effectiveGroupAllowFrom,
+        effectiveAllowFrom: resolved.senderAccess.effectiveAllowFrom,
+        effectiveGroupAllowFrom: resolved.senderAccess.effectiveGroupAllowFrom,
         commandAuthorized,
       });
     },
@@ -234,39 +220,33 @@ async function resolveQQBotCommandAuthorized(params: {
   allowFrom?: Array<string | number> | null;
 }): Promise<boolean> {
   const rawAllowFrom = params.allowFrom && params.allowFrom.length > 0 ? params.allowFrom : ["*"];
-  const state = await resolveChannelIngressState({
-    channelId: QQBOT_CHANNEL_ID,
+  const resolved = await resolveChannelMessageIngress({
+    channelId: "qqbot",
     accountId: params.accountId,
-    subject: createChannelIngressSubject({
-      opaqueId: "sender-id",
-      value: params.senderId,
-    }),
+    identity: qqbotIngressIdentity,
+    subject: { stableId: params.senderId },
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: params.conversationId,
     },
-    adapter: qqbotIngressAdapter,
     accessGroups: (params.cfg as OpenClawConfig).accessGroups,
     event: {
       kind: "message",
-      authMode: "inbound",
+      authMode: "none",
       mayPair: false,
     },
-    allowlists: {
-      dm: params.isGroup ? [] : ["*"],
-      commandOwner: rawAllowFrom,
+    policy: {
+      dmPolicy: params.isGroup ? "disabled" : "open",
+      groupPolicy: params.isGroup ? "open" : "disabled",
     },
-  });
-  const decision = decideChannelIngress(state, {
-    dmPolicy: params.isGroup ? "disabled" : "open",
-    groupPolicy: params.isGroup ? "open" : "disabled",
+    allowFrom: rawAllowFrom,
     command: {
       useAccessGroups: true,
       allowTextCommands: false,
       hasControlCommand: true,
     },
   });
-  return findChannelIngressCommandGate(decision)?.allowed === true;
+  return resolved.commandAccess.authorized;
 }
 
 async function resolveQQBotSlashCommandAuthorized(params: {
@@ -288,31 +268,26 @@ async function resolveQQBotSlashCommandAuthorized(params: {
   if (explicitAllowFrom.length === 0) {
     return false;
   }
-  const state = await resolveChannelIngressState({
-    channelId: QQBOT_CHANNEL_ID,
+  const resolved = await resolveChannelMessageIngress({
+    channelId: "qqbot",
     accountId: params.accountId,
-    subject: createChannelIngressSubject({
-      opaqueId: "sender-id",
-      value: params.senderId,
-    }),
+    identity: qqbotIngressIdentity,
+    subject: { stableId: params.senderId },
     conversation: {
       kind: params.isGroup ? "group" : "direct",
       id: params.conversationId,
     },
-    adapter: qqbotIngressAdapter,
     accessGroups: (params.cfg as OpenClawConfig).accessGroups,
     event: {
       kind: "slash-command",
       authMode: "none",
       mayPair: false,
     },
-    allowlists: {
-      commandOwner: explicitAllowFrom,
+    policy: {
+      dmPolicy: "allowlist",
+      groupPolicy: "open",
     },
-  });
-  const decision = decideChannelIngress(state, {
-    dmPolicy: "allowlist",
-    groupPolicy: "open",
+    allowFrom: explicitAllowFrom,
     command: {
       useAccessGroups: (params.cfg as OpenClawConfig).commands?.useAccessGroups !== false,
       allowTextCommands: false,
@@ -320,7 +295,7 @@ async function resolveQQBotSlashCommandAuthorized(params: {
       modeWhenAccessGroupsOff: "configured",
     },
   });
-  return findChannelIngressCommandGate(decision)?.allowed === true;
+  return resolved.commandAccess.authorized;
 }
 
 function mapQQBotIngressAccess(params: {

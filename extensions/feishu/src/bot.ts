@@ -635,7 +635,7 @@ export async function handleFeishuMessage(params: {
       groupExplicitlyConfigured,
     });
 
-    if (groupIngress.decision.admission !== "dispatch") {
+    if (groupIngress.ingress.admission !== "dispatch") {
       log(
         `feishu[${account.accountId}]: group ${ctx.chatId} not in groupAllowFrom (groupPolicy=${groupPolicy})`,
       );
@@ -652,7 +652,7 @@ export async function handleFeishuMessage(params: {
         senderOpenId: ctx.senderOpenId,
         senderUserId,
       });
-      if (senderIngress.decision.admission !== "dispatch") {
+      if (senderIngress.ingress.admission !== "dispatch") {
         log(`feishu: sender ${ctx.senderOpenId} not in group ${ctx.chatId} sender allowlist`);
         return;
       }
@@ -672,7 +672,7 @@ export async function handleFeishuMessage(params: {
       requireMention,
       mentionedBot: ctx.mentionedBot,
     });
-    if (activationIngress.decision.admission !== "dispatch") {
+    if (activationIngress.ingress.admission !== "dispatch") {
       log(`feishu[${account.accountId}]: message in group ${ctx.chatId} did not mention bot`);
       // Record to pending history for non-broadcast groups only. For broadcast groups,
       // the mentioned handler's broadcast dispatch writes the turn directly into all
@@ -707,27 +707,21 @@ export async function handleFeishuMessage(params: {
       commandProbeBody,
       cfg,
     );
-    const storeAllowFrom =
-      !isGroup && dmPolicy !== "allowlist" && dmPolicy !== "open"
-        ? await pairing.readAllowFromStore().catch(() => [])
-        : [];
     const dmIngress = isDirect
       ? await resolveFeishuDmIngressAccess({
           cfg,
           accountId: account.accountId,
           dmPolicy,
           allowFrom: configAllowFrom,
-          storeAllowFrom,
+          readAllowFromStore: pairing.readAllowFromStore,
           senderOpenId: ctx.senderOpenId,
           senderUserId,
           conversationId: ctx.senderOpenId,
           mayPair: true,
         })
       : null;
-    const effectiveDmAllowFrom = dmIngress?.effectiveAllowFrom ?? [...configAllowFrom];
-
-    if (isDirect && dmIngress?.decision.admission !== "dispatch") {
-      if (dmIngress?.decision.admission === "pairing-required") {
+    if (isDirect && dmIngress?.ingress.admission !== "dispatch") {
+      if (dmIngress?.ingress.admission === "pairing-required") {
         await pairing.issueChallenge({
           senderId: ctx.senderOpenId,
           senderIdLine: `Your Feishu user id: ${ctx.senderOpenId}`,
@@ -759,7 +753,7 @@ export async function handleFeishuMessage(params: {
 
     const commandAllowFrom = isGroup
       ? (groupConfig?.allowFrom ?? configAllowFrom)
-      : effectiveDmAllowFrom;
+      : (dmIngress?.senderAccess.effectiveAllowFrom ?? configAllowFrom);
 
     // In group chats, the session is scoped to the group, but the *speaker* is the sender.
     // Using a group-scoped From causes the agent to treat different users as the same person.
@@ -973,7 +967,7 @@ export async function handleFeishuMessage(params: {
             useAccessGroups,
             hasControlCommand: true,
           })
-        ).commandAuthorized
+        ).commandAccess.authorized
       : undefined;
 
     // Fetch quoted/replied message content if parentId exists

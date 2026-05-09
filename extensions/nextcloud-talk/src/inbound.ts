@@ -107,7 +107,9 @@ export async function handleNextcloudTalkInbound(params: {
     blockedLabel: GROUP_POLICY_BLOCKED_LABEL.room,
     log: (message) => runtime.log?.(message),
   });
-  const commandAuthorized = access.commandAuthorized;
+  const commandAuthorized = access.commandAccess.authorized;
+  const accessReason =
+    access.ingress.reasonCode === "route_blocked" ? "route blocked" : access.senderAccess.reason;
 
   if (isGroup) {
     if (access.roomGateReason === "room_not_allowlisted") {
@@ -122,13 +124,13 @@ export async function handleNextcloudTalkInbound(params: {
       runtime.log?.(`nextcloud-talk: drop group sender ${senderId} (policy=${access.groupPolicy})`);
       return;
     }
-    if (access.decision !== "allow") {
-      runtime.log?.(`nextcloud-talk: drop group sender ${senderId} (reason=${access.reason})`);
+    if (access.senderAccess.decision !== "allow") {
+      runtime.log?.(`nextcloud-talk: drop group sender ${senderId} (reason=${accessReason})`);
       return;
     }
   } else {
-    if (access.decision !== "allow") {
-      if (access.decision === "pairing") {
+    if (access.senderAccess.decision !== "allow") {
+      if (access.senderAccess.decision === "pairing") {
         await pairing.issueChallenge({
           senderId,
           senderIdLine: `Your Nextcloud user id: ${senderId}`,
@@ -145,12 +147,12 @@ export async function handleNextcloudTalkInbound(params: {
           },
         });
       }
-      runtime.log?.(`nextcloud-talk: drop DM sender ${senderId} (reason=${access.reason})`);
+      runtime.log?.(`nextcloud-talk: drop DM sender ${senderId} (reason=${accessReason})`);
       return;
     }
   }
 
-  if (access.shouldBlockControlCommand) {
+  if (access.commandAccess.shouldBlockControlCommand) {
     logInboundDrop({
       log: (message) => runtime.log?.(message),
       channel: CHANNEL_ID,

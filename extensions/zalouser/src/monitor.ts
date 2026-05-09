@@ -4,7 +4,6 @@ import {
   resolveInboundMentionDecision,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
-import { DM_GROUP_ACCESS_REASON } from "openclaw/plugin-sdk/channel-policy";
 import type { MarkdownTableMode, OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { KeyedAsyncQueue } from "openclaw/plugin-sdk/core";
 import { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
@@ -343,10 +342,6 @@ async function processMessage(
           groupPolicy,
           groupAllowFrom: configGroupAllowFrom,
         });
-  const storeAllowFrom =
-    !isGroup && dmPolicy !== "allowlist" && dmPolicy !== "open"
-      ? await pairing.readAllowFromStore().catch(() => [])
-      : [];
   const accessDecision = await resolveZalouserIngressAccess({
     cfg: config,
     accountId: account.accountId,
@@ -357,13 +352,13 @@ async function processMessage(
     groupPolicy: senderGroupPolicy,
     allowFrom: configAllowFrom,
     groupAllowFrom: configGroupAllowFrom,
-    storeAllowFrom,
+    readAllowFromStore: pairing.readAllowFromStore,
     commandRuntime: core.channel.commands,
   });
-  if (isGroup && accessDecision.decision !== "allow") {
-    if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_EMPTY_ALLOWLIST) {
+  if (isGroup && accessDecision.senderAccess.decision !== "allow") {
+    if (accessDecision.senderAccess.reasonCode === "group_policy_empty_allowlist") {
       logVerbose(core, runtime, "Blocked zalouser group message (no group allowlist)");
-    } else if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_NOT_ALLOWLISTED) {
+    } else if (accessDecision.senderAccess.reasonCode === "group_policy_not_allowlisted") {
       logVerbose(
         core,
         runtime,
@@ -373,8 +368,8 @@ async function processMessage(
     return;
   }
 
-  if (!isGroup && accessDecision.decision !== "allow") {
-    if (accessDecision.decision === "pairing") {
+  if (!isGroup && accessDecision.senderAccess.decision !== "allow") {
+    if (accessDecision.senderAccess.decision === "pairing") {
       await pairing.issueChallenge({
         senderId,
         senderIdLine: `Your Zalo user id: ${senderId}`,
@@ -396,7 +391,7 @@ async function processMessage(
       });
       return;
     }
-    if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.DM_POLICY_DISABLED) {
+    if (accessDecision.senderAccess.reasonCode === "dm_policy_disabled") {
       logVerbose(core, runtime, `Blocked zalouser DM from ${senderId} (dmPolicy=disabled)`);
     } else {
       logVerbose(
@@ -408,7 +403,9 @@ async function processMessage(
     return;
   }
 
-  const commandAuthorized = accessDecision.commandAuthorized;
+  const commandAuthorized = accessDecision.commandAccess.requested
+    ? accessDecision.commandAccess.authorized
+    : undefined;
   const hasControlCommand = core.channel.commands.isControlCommandMessage(commandBody, config);
   if (isGroup && hasControlCommand && commandAuthorized !== true) {
     logVerbose(

@@ -1,20 +1,20 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SlackMonitorContext } from "./context.js";
 
-const readStoreAllowFromForDmPolicyMock = vi.hoisted(() => vi.fn());
+const readChannelIngressStoreAllowFromForDmPolicyMock = vi.hoisted(() => vi.fn());
 let authorizeSlackSystemEventSender: typeof import("./auth.js").authorizeSlackSystemEventSender;
 let clearSlackAllowFromCacheForTest: typeof import("./auth.js").clearSlackAllowFromCacheForTest;
 let resolveSlackEffectiveAllowFrom: typeof import("./auth.js").resolveSlackEffectiveAllowFrom;
 let resolveSlackCommandIngress: typeof import("./auth.js").resolveSlackCommandIngress;
 
-vi.mock("openclaw/plugin-sdk/security-runtime", async () => {
-  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/security-runtime")>(
-    "openclaw/plugin-sdk/security-runtime",
-  );
+vi.mock("openclaw/plugin-sdk/channel-ingress-runtime", async () => {
+  const actual = await vi.importActual<
+    typeof import("openclaw/plugin-sdk/channel-ingress-runtime")
+  >("openclaw/plugin-sdk/channel-ingress-runtime");
   return {
     ...actual,
-    readStoreAllowFromForDmPolicy: (...args: unknown[]) =>
-      readStoreAllowFromForDmPolicyMock(...args),
+    readChannelIngressStoreAllowFromForDmPolicy: (...args: unknown[]) =>
+      readChannelIngressStoreAllowFromForDmPolicyMock(...args),
   };
 });
 
@@ -65,7 +65,7 @@ describe("resolveSlackEffectiveAllowFrom", () => {
   });
 
   beforeEach(() => {
-    readStoreAllowFromForDmPolicyMock.mockReset();
+    readChannelIngressStoreAllowFromForDmPolicyMock.mockReset();
     clearSlackAllowFromCacheForTest();
     if (prevTtl === undefined) {
       delete process.env.OPENCLAW_SLACK_PAIRING_ALLOWFROM_CACHE_TTL_MS;
@@ -75,7 +75,7 @@ describe("resolveSlackEffectiveAllowFrom", () => {
   });
 
   it("falls back to channel config allowFrom when pairing store throws", async () => {
-    readStoreAllowFromForDmPolicyMock.mockRejectedValueOnce(new Error("boom"));
+    readChannelIngressStoreAllowFromForDmPolicyMock.mockRejectedValueOnce(new Error("boom"));
 
     const effective = await resolveSlackEffectiveAllowFrom(makeSlackCtx(["u1"]));
 
@@ -84,7 +84,7 @@ describe("resolveSlackEffectiveAllowFrom", () => {
   });
 
   it("treats malformed non-array pairing-store responses as empty", async () => {
-    readStoreAllowFromForDmPolicyMock.mockReturnValueOnce(undefined);
+    readChannelIngressStoreAllowFromForDmPolicyMock.mockReturnValueOnce(undefined);
 
     const effective = await resolveSlackEffectiveAllowFrom(makeSlackCtx(["u1"]));
 
@@ -93,7 +93,7 @@ describe("resolveSlackEffectiveAllowFrom", () => {
   });
 
   it("memoizes pairing-store allowFrom reads within TTL", async () => {
-    readStoreAllowFromForDmPolicyMock.mockResolvedValue(["u2"]);
+    readChannelIngressStoreAllowFromForDmPolicyMock.mockResolvedValue(["u2"]);
     const ctx = makeSlackCtx(["u1"]);
 
     const first = await resolveSlackEffectiveAllowFrom(ctx, { includePairingStore: true });
@@ -101,18 +101,18 @@ describe("resolveSlackEffectiveAllowFrom", () => {
 
     expect(first.allowFrom).toEqual(["u1", "u2"]);
     expect(second.allowFrom).toEqual(["u1", "u2"]);
-    expect(readStoreAllowFromForDmPolicyMock).toHaveBeenCalledTimes(1);
+    expect(readChannelIngressStoreAllowFromForDmPolicyMock).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes pairing-store allowFrom when cache TTL is zero", async () => {
     process.env.OPENCLAW_SLACK_PAIRING_ALLOWFROM_CACHE_TTL_MS = "0";
-    readStoreAllowFromForDmPolicyMock.mockResolvedValue(["u2"]);
+    readChannelIngressStoreAllowFromForDmPolicyMock.mockResolvedValue(["u2"]);
     const ctx = makeSlackCtx(["u1"]);
 
     await resolveSlackEffectiveAllowFrom(ctx, { includePairingStore: true });
     await resolveSlackEffectiveAllowFrom(ctx, { includePairingStore: true });
 
-    expect(readStoreAllowFromForDmPolicyMock).toHaveBeenCalledTimes(2);
+    expect(readChannelIngressStoreAllowFromForDmPolicyMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -329,9 +329,9 @@ describe("resolveSlackCommandIngress", () => {
       modeWhenAccessGroupsOff: "configured",
     });
 
-    expect(result.decision.decision).toBe("block");
-    expect(result.commandAuthorized).toBe(false);
-    expect(result.shouldBlockControlCommand).toBe(false);
+    expect(result.ingress.decision).toBe("block");
+    expect(result.commandAccess.authorized).toBe(false);
+    expect(result.commandAccess.shouldBlockControlCommand).toBe(false);
   });
 });
 

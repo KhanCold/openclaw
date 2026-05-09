@@ -1,220 +1,102 @@
 import {
-  createChannelIngressPluginId,
-  createChannelIngressMultiIdentifierAdapter,
-  decideChannelIngressBundle,
-  findChannelIngressCommandGate,
-  projectChannelIngressDmGroupAccess,
-  resolveChannelIngressState,
-  type ChannelIngressAdapterEntry,
-  type ChannelIngressDecision,
-  type ChannelIngressIdentifierKind,
-  type ChannelIngressSubject,
-} from "openclaw/plugin-sdk/channel-ingress";
+  defineStableChannelIngressIdentity,
+  resolveChannelMessageIngressBundle,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
 import type { AccessGroupsConfig } from "openclaw/plugin-sdk/config-types";
 import { upsertChannelPairingRequest } from "openclaw/plugin-sdk/conversation-runtime";
-import {
-  type DmGroupAccessDecision,
-  type DmGroupAccessReasonCode,
-  readStoreAllowFromForDmPolicy,
-  resolveEffectiveAllowFromLists,
-} from "openclaw/plugin-sdk/security-runtime";
-import {
-  isSignalSenderAllowed,
-  looksLikeUuid,
-  normalizeSignalAllowRecipient,
-  type SignalSender,
-} from "../identity.js";
+import { looksLikeUuid, normalizeSignalAllowRecipient, type SignalSender } from "../identity.js";
 
 type SignalDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
 type SignalGroupPolicy = "open" | "allowlist" | "disabled";
-type SignalAccessDecision = {
-  decision: DmGroupAccessDecision;
-  reasonCode: DmGroupAccessReasonCode;
-  reason: string;
-  effectiveAllowFrom: string[];
-  effectiveGroupAllowFrom: string[];
-};
 
-const SIGNAL_UUID_KIND = "plugin:signal-uuid" as const satisfies ChannelIngressIdentifierKind;
-const SIGNAL_GROUP_KIND = "plugin:signal-group" as const satisfies ChannelIngressIdentifierKind;
+const SIGNAL_UUID_KIND = "plugin:signal-uuid" as const;
+const SIGNAL_GROUP_KIND = "plugin:signal-group" as const;
 
-function isSignalGroupAllowed(groupId: string | undefined, allowEntries: string[]): boolean {
-  if (!groupId) {
-    return false;
-  }
-  const candidates = new Set([groupId, `group:${groupId}`, `signal:group:${groupId}`]);
-  return allowEntries.some((entry) => candidates.has(entry));
-}
-
-function signalEntryId(params: { index: number; suffix: string }): string {
-  return `entry-${params.index + 1}:${params.suffix}`;
-}
-
-function createSignalAdapterEntry(params: {
-  index: number;
-  kind: ChannelIngressIdentifierKind;
-  value: string;
-  suffix: string;
-  sensitivity?: ChannelIngressAdapterEntry["sensitivity"];
-}): ChannelIngressAdapterEntry {
-  return {
-    opaqueEntryId: signalEntryId(params),
-    kind: params.kind,
-    value: params.value,
-    sensitivity: params.sensitivity,
-  };
-}
-
-function normalizeSignalIngressEntry(entry: string, index: number): ChannelIngressAdapterEntry[] {
+function strippedSignalEntry(
+  entry: string,
+): { trimmed: string; signalStripped: string; lower: string } | null {
   const trimmed = entry.trim();
   if (!trimmed) {
-    return [];
+    return null;
   }
-  if (trimmed === "*") {
-    return [
-      createSignalAdapterEntry({
-        index,
-        kind: "stable-id",
-        value: "*",
-        suffix: "wildcard",
-      }),
-    ];
-  }
-
   const signalStripped = trimmed.replace(/^signal:/i, "").trim();
   const lower = signalStripped.toLowerCase();
+  return { trimmed, signalStripped, lower };
+}
+
+function normalizeSignalGroupEntry(entry: string): string | null {
+  const parsed = strippedSignalEntry(entry);
+  if (!parsed) {
+    return null;
+  }
+  const { trimmed, signalStripped, lower } = parsed;
   if (lower.startsWith("group:")) {
     const groupId = signalStripped.slice("group:".length).trim();
-    return groupId
-      ? [
-          createSignalAdapterEntry({
-            index,
-            kind: SIGNAL_GROUP_KIND,
-            value: groupId,
-            suffix: "group",
-          }),
-        ]
-      : [];
+    return groupId || null;
   }
+  return trimmed;
+}
 
-  const entries: ChannelIngressAdapterEntry[] = [
-    createSignalAdapterEntry({
-      index,
-      kind: SIGNAL_GROUP_KIND,
-      value: trimmed,
-      suffix: "group",
-    }),
-  ];
+function normalizeSignalUuidEntry(entry: string): string | null {
+  const parsed = strippedSignalEntry(entry);
+  if (!parsed) {
+    return null;
+  }
+  const { signalStripped, lower } = parsed;
   if (lower.startsWith("uuid:")) {
     const raw = signalStripped.slice("uuid:".length).trim();
-    if (raw) {
-      entries.push(
-        createSignalAdapterEntry({
-          index,
-          kind: SIGNAL_UUID_KIND,
-          value: raw,
-          suffix: "uuid",
-          sensitivity: "pii",
-        }),
-      );
-    }
-    return entries;
+    return raw || null;
   }
-
-  if (looksLikeUuid(signalStripped)) {
-    entries.push(
-      createSignalAdapterEntry({
-        index,
-        kind: SIGNAL_UUID_KIND,
-        value: signalStripped,
-        suffix: "uuid",
-        sensitivity: "pii",
-      }),
-    );
-    return entries;
-  }
-
-  const normalized = normalizeSignalAllowRecipient(trimmed);
-  if (normalized) {
-    entries.push(
-      createSignalAdapterEntry({
-        index,
-        kind: "phone",
-        value: normalized,
-        suffix: "phone",
-        sensitivity: "pii",
-      }),
-    );
-  }
-  return entries;
+  return looksLikeUuid(signalStripped) ? signalStripped : null;
 }
 
-const signalIngressAdapter = createChannelIngressMultiIdentifierAdapter({
-  normalizeEntry: normalizeSignalIngressEntry,
+function normalizeSignalPhoneEntry(entry: string): string | null {
+  const parsed = strippedSignalEntry(entry);
+  if (!parsed) {
+    return null;
+  }
+  return normalizeSignalAllowRecipient(parsed.trimmed) ?? null;
+}
+
+const signalIngressIdentity = defineStableChannelIngressIdentity({
+  key: "stable",
+  normalizeEntry: () => null,
+  aliases: [
+    {
+      key: "phone",
+      kind: "phone",
+      normalizeEntry: normalizeSignalPhoneEntry,
+      normalizeSubject: (value) => value,
+      sensitivity: "pii",
+    },
+    {
+      key: "uuid",
+      kind: SIGNAL_UUID_KIND,
+      normalizeEntry: normalizeSignalUuidEntry,
+      normalizeSubject: (value) => value,
+      sensitivity: "pii",
+    },
+    {
+      key: "group",
+      kind: SIGNAL_GROUP_KIND,
+      normalizeEntry: normalizeSignalGroupEntry,
+      normalizeSubject: (value) => value,
+    },
+  ],
+  isWildcardEntry: (entry) => entry.trim() === "*",
+  resolveEntryId({ entryIndex, fieldKey }) {
+    return `entry-${entryIndex + 1}:${fieldKey}`;
+  },
 });
 
-function createSignalIngressSubject(params: {
-  sender: SignalSender;
-  groupId?: string;
-}): ChannelIngressSubject {
-  const identifiers: ChannelIngressSubject["identifiers"] = [];
-  if (params.sender.kind === "phone") {
-    identifiers.push({
-      opaqueId: "sender-phone",
-      kind: "phone",
-      value: params.sender.e164,
-      sensitivity: "pii",
-    });
-  } else {
-    identifiers.push({
-      opaqueId: "sender-uuid",
-      kind: SIGNAL_UUID_KIND,
-      value: params.sender.raw,
-      sensitivity: "pii",
-    });
-  }
-  if (params.groupId) {
-    identifiers.push({
-      opaqueId: "signal-group",
-      kind: SIGNAL_GROUP_KIND,
-      value: params.groupId,
-    });
-  }
-  return { identifiers };
-}
-
-function signalDecisionFromIngress(params: {
-  ingress: ChannelIngressDecision;
-  isGroup: boolean;
-  dmPolicy: SignalDmPolicy;
-  groupPolicy: SignalGroupPolicy;
-  effectiveAllowFrom: string[];
-  effectiveGroupAllowFrom: string[];
-}): SignalAccessDecision {
-  const access = projectChannelIngressDmGroupAccess({
-    ingress: params.ingress,
-    isGroup: params.isGroup,
-    dmPolicy: params.dmPolicy,
-    groupPolicy: params.groupPolicy,
-  });
+function signalSubjectInput(params: { sender: SignalSender; groupId?: string }) {
   return {
-    decision: access.decision,
-    reasonCode: access.reasonCode,
-    reason: access.reason,
-    effectiveAllowFrom: params.effectiveAllowFrom,
-    effectiveGroupAllowFrom: params.effectiveGroupAllowFrom,
-  };
-}
-
-function commandAccessFromIngress(ingress: ChannelIngressDecision): {
-  commandAuthorized: boolean;
-  shouldBlockControlCommand: boolean;
-} {
-  const commandGate = findChannelIngressCommandGate(ingress);
-  return {
-    commandAuthorized: commandGate?.allowed === true,
-    shouldBlockControlCommand: commandGate?.command?.shouldBlockControlCommand === true,
+    aliases: {
+      phone: params.sender.kind === "phone" ? params.sender.e164 : undefined,
+      uuid: params.sender.kind === "uuid" ? params.sender.raw : undefined,
+      group: params.groupId,
+    },
   };
 }
 
@@ -229,119 +111,84 @@ export async function resolveSignalAccessState(params: {
   accessGroups?: AccessGroupsConfig;
   hasControlCommand?: boolean;
   useAccessGroups?: boolean;
+  readStoreAllowFrom?: () => Promise<string[]>;
 }) {
-  const storeAllowFrom = await readStoreAllowFromForDmPolicy({
-    provider: "signal",
-    accountId: params.accountId,
-    dmPolicy: params.dmPolicy,
-  });
-  const { effectiveAllowFrom, effectiveGroupAllowFrom } = resolveEffectiveAllowFromLists({
-    allowFrom: params.allowFrom,
-    groupAllowFrom: params.groupAllowFrom,
-    storeAllowFrom,
-    dmPolicy: params.dmPolicy,
-  });
-  const directSubject = createSignalIngressSubject({ sender: params.sender });
-  const groupSubject = createSignalIngressSubject({
-    sender: params.sender,
-    groupId: params.groupId,
-  });
-  const isSenderAllowed = (allowEntries: string[]) =>
-    isSignalSenderAllowed(params.sender, allowEntries);
-  const isSenderOrGroupAllowed = (allowEntries: string[]) =>
-    isSenderAllowed(allowEntries) || isSignalGroupAllowed(params.groupId, allowEntries);
-  const channelId = createChannelIngressPluginId("signal");
-  const [directState, groupState] = await Promise.all([
-    resolveChannelIngressState({
-      channelId,
-      accountId: params.accountId,
-      subject: directSubject,
-      conversation: {
-        kind: "direct",
-        id: params.sender.raw,
+  const command =
+    params.hasControlCommand === true
+      ? {
+          useAccessGroups: params.useAccessGroups !== false,
+          allowTextCommands: true,
+          hasControlCommand: true,
+          directGroupAllowFrom: "effective" as const,
+        }
+      : undefined;
+  const { direct: directResolved, group: groupResolved } = await resolveChannelMessageIngressBundle(
+    {
+      direct: {
+        channelId: "signal",
+        accountId: params.accountId,
+        identity: signalIngressIdentity,
+        subject: signalSubjectInput({ sender: params.sender }),
+        conversation: {
+          kind: "direct",
+          id: params.sender.raw,
+        },
+        accessGroups: params.accessGroups,
+        event: {
+          kind: "message",
+          authMode: "inbound",
+          mayPair: true,
+        },
+        policy: {
+          dmPolicy: params.dmPolicy,
+          groupPolicy: params.groupPolicy,
+          groupAllowFromFallbackToAllowFrom: true,
+        },
+        allowFrom: params.allowFrom,
+        groupAllowFrom: params.groupAllowFrom,
+        readStoreAllowFrom: params.readStoreAllowFrom,
+        useDefaultPairingStore: params.readStoreAllowFrom == null,
+        command,
       },
-      adapter: signalIngressAdapter,
-      accessGroups: params.accessGroups,
-      event: {
-        kind: "message",
-        authMode: "inbound",
-        mayPair: true,
+      group: {
+        channelId: "signal",
+        accountId: params.accountId,
+        identity: signalIngressIdentity,
+        subject: signalSubjectInput({
+          sender: params.sender,
+          groupId: params.groupId,
+        }),
+        conversation: {
+          kind: "group",
+          id: params.groupId ?? "unknown",
+        },
+        accessGroups: params.accessGroups,
+        event: {
+          kind: "message",
+          authMode: "inbound",
+          mayPair: false,
+        },
+        policy: {
+          dmPolicy: params.dmPolicy,
+          groupPolicy: params.groupPolicy,
+          groupAllowFromFallbackToAllowFrom: true,
+        },
+        allowFrom: params.allowFrom,
+        groupAllowFrom: params.groupAllowFrom,
+        command,
       },
-      allowlists: {
-        dm: params.allowFrom,
-        group: params.groupAllowFrom,
-        commandOwner: effectiveAllowFrom,
-        commandGroup: effectiveGroupAllowFrom,
-        pairingStore: storeAllowFrom,
-      },
-    }),
-    resolveChannelIngressState({
-      channelId,
-      accountId: params.accountId,
-      subject: groupSubject,
-      conversation: {
-        kind: "group",
-        id: params.groupId ?? "unknown",
-      },
-      adapter: signalIngressAdapter,
-      accessGroups: params.accessGroups,
-      event: {
-        kind: "message",
-        authMode: "inbound",
-        mayPair: false,
-      },
-      allowlists: {
-        dm: params.allowFrom,
-        group: effectiveGroupAllowFrom,
-        commandOwner: params.allowFrom,
-        commandGroup: effectiveGroupAllowFrom,
-        pairingStore: storeAllowFrom,
-      },
-    }),
-  ]);
-  const basePolicy = {
-    dmPolicy: params.dmPolicy,
-    groupPolicy: params.groupPolicy,
-  };
-  const commandPolicy = {
-    ...basePolicy,
-    command: {
-      useAccessGroups: params.useAccessGroups !== false,
-      allowTextCommands: true,
-      hasControlCommand: params.hasControlCommand === true,
     },
-  };
-  const ingressBundle = decideChannelIngressBundle({
-    directState,
-    groupState,
-    basePolicy,
-    commandPolicy,
-  });
-  const dmAccess = signalDecisionFromIngress({
-    ingress: ingressBundle.dm,
-    isGroup: false,
-    dmPolicy: params.dmPolicy,
-    groupPolicy: params.groupPolicy,
-    effectiveAllowFrom,
-    effectiveGroupAllowFrom,
-  });
-  const groupAccess = signalDecisionFromIngress({
-    ingress: ingressBundle.group,
-    isGroup: true,
-    dmPolicy: params.dmPolicy,
-    groupPolicy: params.groupPolicy,
-    effectiveAllowFrom,
-    effectiveGroupAllowFrom,
-  });
+  );
+  const effectiveGroupAllowFrom = groupResolved.senderAccess.effectiveGroupAllowFrom;
+  const dmAccess = directResolved.senderAccess;
+  const groupAccess = groupResolved.senderAccess;
   const resolveAccessDecision = (isGroup: boolean) => (isGroup ? groupAccess : dmAccess);
   const resolveCommandAccess = (isGroup: boolean) =>
-    commandAccessFromIngress(isGroup ? ingressBundle.groupCommand : ingressBundle.dmCommand);
+    (isGroup ? groupResolved : directResolved).commandAccess;
   return {
     resolveAccessDecision,
     resolveCommandAccess,
-    isGroupAllowed: isSenderOrGroupAllowed,
     dmAccess,
-    effectiveDmAllow: effectiveAllowFrom,
     effectiveGroupAllow: effectiveGroupAllowFrom,
   };
 }

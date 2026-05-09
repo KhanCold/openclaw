@@ -2,6 +2,7 @@ import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.j
 import type { FinalizedMsgContext } from "../../auto-reply/templating.js";
 import type { ContextVisibilityMode } from "../../config/types.base.js";
 import { shouldIncludeSupplementalContext } from "../../security/context-visibility.js";
+import { resolveAccessFactsCommandAuthorized } from "../message-access/access-facts-compat.js";
 import type {
   AccessFacts,
   ConversationFacts,
@@ -44,17 +45,6 @@ function mediaTranscribedIndexes(media: InboundMediaFacts[]): number[] | undefin
     .map((item, index) => (item.transcribed ? index : undefined))
     .filter((index): index is number => index !== undefined);
   return indexes.length > 0 ? indexes : undefined;
-}
-
-function commandAuthorized(access: AccessFacts | undefined): boolean | undefined {
-  const commands = access?.commands;
-  if (!commands) {
-    return undefined;
-  }
-  if (typeof commands.authorized === "boolean") {
-    return commands.authorized;
-  }
-  return commands.authorizers?.some((entry) => entry.allowed);
 }
 
 function keepSupplementalContext(params: {
@@ -177,7 +167,7 @@ export function buildChannelTurnContext(
     Provider: params.provider ?? params.channel,
     Surface: params.surface ?? params.provider ?? params.channel,
     WasMentioned: params.access?.mentions?.wasMentioned,
-    CommandAuthorized: commandAuthorized(params.access),
+    CommandAuthorized: resolveAccessFactsCommandAuthorized(params.access),
     MessageThreadId: params.reply.messageThreadId ?? params.conversation.threadId,
     NativeChannelId: params.reply.nativeChannelId ?? params.conversation.nativeChannelId,
     OriginatingChannel: params.channel,
