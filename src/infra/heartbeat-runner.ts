@@ -990,6 +990,15 @@ async function resolveHeartbeatPreflight(params: {
   let heartbeatFileContent: string | undefined;
   try {
     heartbeatFileContent = await fs.readFile(heartbeatFilePath, "utf-8");
+    const normalizedContent = heartbeatFileContent.trim().toLowerCase();
+    if (normalizedContent === "paused") {
+      return {
+        ...basePreflight,
+        skipReason: "heartbeat-paused",
+        tasks: [],
+        heartbeatFileContent,
+      };
+    }
     const tasks = parseHeartbeatTasks(heartbeatFileContent);
     if (
       isHeartbeatContentEffectivelyEmpty(heartbeatFileContent) &&
