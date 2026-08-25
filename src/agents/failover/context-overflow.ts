@@ -39,6 +39,7 @@ export function isContextOverflowErrorFromTables(errorMessage?: string): boolean
 
   return (
     matchesContextOverflowMessage(errorMessage, "failover-explicit") ||
+    matchesContextOverflowMessage(errorMessage, "assistant-error") ||
     (looksLikeProviderContextOverflowCandidate(errorMessage) &&
       matchesContextOverflowMessage(errorMessage, "provider-fallback"))
   );
