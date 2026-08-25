@@ -226,6 +226,7 @@ export type InboundMediaFacts = {
   path?: string;
   url?: string;
   contentType?: string;
+  fileName?: string;
   kind?: "image" | "video" | "audio" | "document" | "unknown";
   transcribed?: boolean;
   messageId?: string;

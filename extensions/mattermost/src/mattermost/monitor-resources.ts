@@ -20,6 +20,7 @@ export type MattermostMediaKind = "image" | "audio" | "video" | "document" | "un
 export type MattermostMediaInfo = {
   path: string;
   contentType?: string;
+  fileName?: string;
   kind: MattermostMediaKind;
 };
 
@@ -32,7 +33,7 @@ type SaveRemoteMedia = (params: {
   filePathHint?: string;
   maxBytes: number;
   ssrfPolicy?: { allowedHostnames?: string[] };
-}) => Promise<{ path: string; contentType?: string | null }>;
+}) => Promise<{ path: string; contentType?: string | null; fileName?: string }>;
 
 export function createMattermostMonitorResources(params: {
   accountId: string;
@@ -109,6 +110,7 @@ export function createMattermostMonitorResources(params: {
         out.push({
           path: saved.path,
           contentType,
+          fileName: saved.fileName,
           kind: mediaKindFromMime(contentType) ?? "unknown",
         });
       } catch (err) {

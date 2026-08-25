@@ -86,20 +86,20 @@ describe("channel inbound media facts", () => {
     ]);
   });
 
-  it("maps inbound media facts into history media entries", () => {
+  it("builds legacy media payload with file names when provided", () => {
     expect(
-      toHistoryMediaEntries([{ path: "/tmp/image.png", contentType: "image/png" }], {
-        kind: "image",
-        messageId: "msg-1",
-      }),
-    ).toEqual([
-      {
-        path: "/tmp/image.png",
-        url: undefined,
-        contentType: "image/png",
-        kind: "image",
-        messageId: "msg-1",
-      },
-    ]);
+      buildChannelInboundMediaPayload([
+        { path: "/tmp/abc123", contentType: "application/octet-stream", fileName: "jj.txt" },
+        { path: "/tmp/def456", contentType: "text/plain", fileName: "notes.md" },
+      ]),
+    ).toEqual({
+      MediaPath: "/tmp/abc123",
+      MediaUrl: "/tmp/abc123",
+      MediaType: "application/octet-stream",
+      MediaPaths: ["/tmp/abc123", "/tmp/def456"],
+      MediaUrls: ["/tmp/abc123", "/tmp/def456"],
+      MediaTypes: ["application/octet-stream", "text/plain"],
+      MediaFileNames: ["jj.txt", "notes.md"],
+    });
   });
 });

@@ -195,6 +195,7 @@ export type MsgContext = {
   MediaPaths?: string[];
   MediaUrls?: string[];
   MediaTypes?: string[];
+  MediaFileNames?: string[];
   /** Original message modality before transcription or other media normalization. */
   SourceModality?: InboundSourceModality;
   MediaWorkspaceDir?: string;

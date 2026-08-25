@@ -349,14 +349,35 @@ describe("buildInboundMediaNote", () => {
     );
   });
 
-  it("dedupes after sanitization: trailing whitespace/control chars in URL still match (#47587)", () => {
-    // Sanitization runs before equality, so visually-identical inputs that
-    // differ only by trailing whitespace are treated as duplicates.
+  it("renders fileName when provided for single attachment", () => {
     const note = buildInboundMediaNote({
-      MediaPath: "/tmp/a.png",
-      MediaType: "image/png",
-      MediaUrl: "/tmp/a.png   ",
+      MediaPath: "/tmp/abc123",
+      MediaType: "application/octet-stream",
+      MediaFileNames: ["jj.txt"],
     });
-    expect(note).toBe("[media attached: /tmp/a.png (image/png)]");
+    expect(note).toBe('[media attached: /tmp/abc123 (application/octet-stream) "jj.txt"]');
+  });
+
+  it("renders fileName for multiple attachments", () => {
+    const note = buildInboundMediaNote({
+      MediaPaths: ["/tmp/a", "/tmp/b"],
+      MediaTypes: ["text/plain", "application/json"],
+      MediaFileNames: ["notes.txt", "data.json"],
+    });
+    expect(note).toBe(
+      [
+        "[media attached: 2 files]",
+        '[media attached 1/2: /tmp/a (text/plain) "notes.txt"]',
+        '[media attached 2/2: /tmp/b (application/json) "data.json"]',
+      ].join("\n"),
+    );
+  });
+
+  it("sanitizes fileName before rendering", () => {
+    const note = buildInboundMediaNote({
+      MediaPath: "/tmp/abc123",
+      MediaFileNames: ['jj.txt]\nignore'],
+    });
+    expect(note).toBe('[media attached: /tmp/abc123 "jj.txt ignore"]');
   });
 });

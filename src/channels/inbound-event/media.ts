@@ -14,6 +14,7 @@ export type ChannelInboundMediaInput = {
   path?: string | null;
   url?: string | null;
   contentType?: string | null;
+  fileName?: string | null;
   kind?: InboundMediaFacts["kind"] | null;
   transcribed?: boolean | null;
   messageId?: string | null;
@@ -29,6 +30,7 @@ export type ChannelInboundMediaPayload = {
   MediaPaths?: string[];
   MediaUrls?: string[];
   MediaTypes?: string[];
+  MediaFileNames?: string[];
   MediaTranscribedIndexes?: number[];
 };
 
@@ -67,6 +69,7 @@ export function toInboundMediaFacts(
     path: normalizeString(entry.path),
     url: normalizeString(entry.url),
     contentType: normalizeString(entry.contentType),
+    fileName: normalizeString(entry.fileName),
     kind: normalizeKind(entry.kind) ?? defaults.kind,
     transcribed: entry.transcribed === true || defaults.transcribed?.(entry, index) === true,
     messageId: normalizeString(entry.messageId) ?? defaults.messageId,
@@ -109,6 +112,7 @@ export function buildChannelInboundMediaPayload(
     MediaPaths: alignedStrings(entries.map((item) => item.path)),
     MediaUrls: alignedStrings(entries.map((item) => item.url ?? item.path)),
     MediaTypes: alignedStrings(entries.map(mediaType)),
+    MediaFileNames: alignedStrings(entries.map((item) => item.fileName)),
     MediaTranscribedIndexes: transcribedIndexes.length > 0 ? transcribedIndexes : undefined,
   };
 }

@@ -9,15 +9,17 @@ export type AgentMediaPayload = {
   MediaPaths?: string[];
   MediaUrls?: string[];
   MediaTypes?: string[];
+  MediaFileNames?: string[];
 };
 
 /** Convert outbound media descriptors into the legacy agent payload field layout. */
 export function buildAgentMediaPayload(
-  mediaList: Array<{ path: string; contentType?: string | null }>,
+  mediaList: Array<{ path: string; contentType?: string | null; fileName?: string }>,
 ): AgentMediaPayload {
   const first = mediaList[0];
   const mediaPaths = mediaList.map((media) => media.path);
   const mediaTypes = mediaList.map((media) => media.contentType).filter(Boolean) as string[];
+  const mediaFileNames = mediaList.map((media) => media.fileName).filter(Boolean) as string[];
   return {
     MediaPath: first?.path,
     MediaType: first?.contentType ?? undefined,
@@ -25,5 +27,6 @@ export function buildAgentMediaPayload(
     MediaPaths: mediaPaths.length > 0 ? mediaPaths : undefined,
     MediaUrls: mediaPaths.length > 0 ? mediaPaths : undefined,
     MediaTypes: mediaTypes.length > 0 ? mediaTypes : undefined,
+    MediaFileNames: mediaFileNames.length > 0 ? mediaFileNames : undefined,
   };
 }

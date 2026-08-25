@@ -42,6 +42,7 @@ function formatMediaAttachedLine(params: {
   path: string;
   url?: string;
   type?: string;
+  fileName?: string;
   index?: number;
   total?: number;
 }): string {
@@ -52,12 +53,14 @@ function formatMediaAttachedLine(params: {
   const pathValue = sanitizeInlineMediaNoteValue(params.path);
   const typeRaw = sanitizeInlineMediaNoteValue(params.type);
   const typePart = typeRaw ? ` (${typeRaw})` : "";
+  const fileNameRaw = sanitizeInlineMediaNoteValue(params.fileName);
+  const fileNamePart = fileNameRaw ? ` "${fileNameRaw}"` : "";
   const urlRaw = sanitizeInlineMediaNoteValue(params.url);
   // When the channel mirrors the local path into MediaUrl (Telegram album
   // media is the canonical case), rendering ` | ${url}` adds no information
   // and clutters the prompt with `path | path` duplication (issue #47587).
   const urlPart = urlRaw && urlRaw !== pathValue ? ` | ${urlRaw}` : "";
-  return `${prefix}${pathValue}${typePart}${urlPart}]`;
+  return `${prefix}${pathValue}${typePart}${fileNamePart}${urlPart}]`;
 }
 
 // Common audio file extensions for transcription detection
@@ -153,6 +156,10 @@ export function buildInboundMediaNote(ctx: MsgContext): string | undefined {
     Array.isArray(ctx.MediaTypes) && ctx.MediaTypes.length === paths.length
       ? ctx.MediaTypes
       : undefined;
+  const fileNames =
+    Array.isArray(ctx.MediaFileNames) && ctx.MediaFileNames.length === paths.length
+      ? ctx.MediaFileNames
+      : undefined;
   const hasTranscript = Boolean(ctx.Transcript?.trim());
   // Transcript alone does not identify an attachment index; only use it as a fallback
   // when there is a single attachment to avoid stripping unrelated audio files.
@@ -163,6 +170,7 @@ export function buildInboundMediaNote(ctx: MsgContext): string | undefined {
       path: entry ?? "",
       type: types?.[index] ?? ctx.MediaType,
       url: urls?.[index] ?? ctx.MediaUrl,
+      fileName: fileNames?.[index],
       index,
     }))
     .filter((entry) => {
@@ -193,6 +201,7 @@ export function buildInboundMediaNote(ctx: MsgContext): string | undefined {
       path: entries[0]?.path ?? "",
       type: entries[0]?.type,
       url: entries[0]?.url,
+      fileName: entries[0]?.fileName,
     });
   }
 
@@ -206,6 +215,7 @@ export function buildInboundMediaNote(ctx: MsgContext): string | undefined {
         total: count,
         type: entry.type,
         url: entry.url,
+        fileName: entry.fileName,
       }),
     );
   }
