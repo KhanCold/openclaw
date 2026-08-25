@@ -411,8 +411,11 @@ function failTurn(session: ClaudeLiveSession, error: unknown): void {
     return;
   }
   const errorKind = error instanceof Error ? error.name : typeof error;
+  const runId = turn.diagnosticRefs?.runId;
   cliBackendLog.warn(
-    `claude live session turn failed: provider=${session.providerId} model=${session.modelId} durationMs=${Date.now() - turn.startedAtMs} error=${errorKind}`,
+    `claude live session turn failed: provider=${session.providerId} model=${session.modelId} ` +
+    `durationMs=${Date.now() - turn.startedAtMs}${runId ? ` runId=${runId}` : ""} ` +
+    `error=${errorKind} detail=${formatErrorMessage(error)}`,
   );
   failActiveClaudeLiveTools(turn, error);
   clearTurnTimers(turn);
