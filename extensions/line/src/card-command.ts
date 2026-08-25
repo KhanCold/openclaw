@@ -51,6 +51,45 @@ function buildLineFlexReply(
 }
 
 /**
+ * Split action string by comma, but protect commas inside URLs.
+ * URLs in data segments (after "|") may contain commas; we merge
+ * orphaned continuation parts back into the preceding action.
+ */
+function splitActions(actionsStr: string): string[] {
+  const rawParts = actionsStr.split(",").map((s) => s.trim());
+  const parts: string[] = [];
+
+  for (let i = 0; i < rawParts.length; i++) {
+    const part = rawParts[i];
+
+    if (parts.length === 0) {
+      parts.push(part);
+      continue;
+    }
+
+    const lastPart = parts[parts.length - 1];
+    const lastPipeIdx = lastPart.indexOf("|");
+
+    if (lastPipeIdx !== -1) {
+      const lastData = lastPart.slice(lastPipeIdx + 1).trim();
+      // If the previous part's data starts with http:// or https:// and
+      // the current part has no "|" (i.e. it's a continuation of the URL)
+      if (
+        (lastData.startsWith("http://") || lastData.startsWith("https://")) &&
+        !part.includes("|")
+      ) {
+        parts[parts.length - 1] = `${lastPart},${part}`;
+        continue;
+      }
+    }
+
+    parts.push(part);
+  }
+
+  return parts;
+}
+
+/**
  * Parse action string format: "Label|data,Label2|data2"
  * Data can be a URL (uri action) or plain text (message action) or key=value (postback)
  */
@@ -61,7 +100,7 @@ function parseActions(actionsStr: string | undefined): CardAction[] {
 
   const results: CardAction[] = [];
 
-  for (const part of actionsStr.split(",")) {
+  for (const part of splitActions(actionsStr)) {
     const [label, data] = part
       .trim()
       .split("|")
