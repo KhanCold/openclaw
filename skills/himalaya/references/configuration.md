@@ -2,6 +2,8 @@
 
 Configuration file location: `~/.config/himalaya/config.toml`
 
+> **Compatibility:** This guide follows the **Himalaya v2.1.0+** config schema. If you are on an older version, run `himalaya --version` and upgrade if needed.
+
 ## Minimal IMAP + SMTP Setup
 
 ```toml
@@ -11,43 +13,42 @@ display-name = "Your Name"
 default = true
 
 # IMAP backend for reading emails
-backend.type = "imap"
-backend.host = "imap.example.com"
-backend.port = 993
-backend.encryption.type = "tls"
-backend.login = "user@example.com"
-backend.auth.type = "password"
-backend.auth.raw = "your-password"
+imap.server = "imaps://imap.example.com:993"
+imap.sasl.plain.username = "user@example.com"
+imap.sasl.plain.password.raw = "your-password"
 
 # SMTP backend for sending emails
-message.send.backend.type = "smtp"
-message.send.backend.host = "smtp.example.com"
-message.send.backend.port = 587
-message.send.backend.encryption.type = "start-tls"
-message.send.backend.login = "user@example.com"
-message.send.backend.auth.type = "password"
-message.send.backend.auth.raw = "your-password"
+smtp.server = "smtp://smtp.example.com:587"
+smtp.starttls = true
+smtp.sasl.plain.username = "user@example.com"
+smtp.sasl.plain.password.raw = "your-password"
 ```
+
+**Schema notes (v2.1.0):**
+- `imap.server` / `smtp.server` are URLs: `imaps://` (implicit TLS), `imap://` (cleartext, optionally upgraded via STARTTLS), `smtps://` (implicit TLS), `smtp://` (STARTTLS).
+- Authentication is under `*.sasl.plain.*`. Other SASL mechanisms (`oauthbearer`, `xoauth2`, `scram-sha-256`) are also supported.
 
 ## Password Options
 
 ### Raw password (testing only, not recommended)
 
 ```toml
-backend.auth.raw = "your-password"
+imap.sasl.plain.password.raw = "your-password"
+smtp.sasl.plain.password.raw = "your-password"
 ```
 
 ### Password from command (recommended)
 
 ```toml
-backend.auth.cmd = "pass show email/imap"
-# backend.auth.cmd = "security find-generic-password -a user@example.com -s imap -w"
+imap.sasl.plain.password.command = "pass show email/imap"
+smtp.sasl.plain.password.command = "pass show email/smtp"
+# imap.sasl.plain.password.command = "security find-generic-password -a user@example.com -s imap -w"
 ```
 
 ### System keyring (requires keyring feature)
 
 ```toml
-backend.auth.keyring = "imap-example"
+imap.sasl.plain.password.keyring = "imap-example"
 ```
 
 Then run `himalaya account configure <account>` to store the password.
@@ -60,21 +61,14 @@ email = "you@gmail.com"
 display-name = "Your Name"
 default = true
 
-backend.type = "imap"
-backend.host = "imap.gmail.com"
-backend.port = 993
-backend.encryption.type = "tls"
-backend.login = "you@gmail.com"
-backend.auth.type = "password"
-backend.auth.cmd = "pass show google/app-password"
+imap.server = "imaps://imap.gmail.com:993"
+imap.sasl.plain.username = "you@gmail.com"
+imap.sasl.plain.password.command = "pass show google/app-password"
 
-message.send.backend.type = "smtp"
-message.send.backend.host = "smtp.gmail.com"
-message.send.backend.port = 587
-message.send.backend.encryption.type = "start-tls"
-message.send.backend.login = "you@gmail.com"
-message.send.backend.auth.type = "password"
-message.send.backend.auth.cmd = "pass show google/app-password"
+smtp.server = "smtp://smtp.gmail.com:587"
+smtp.starttls = true
+smtp.sasl.plain.username = "you@gmail.com"
+smtp.sasl.plain.password.command = "pass show google/app-password"
 ```
 
 **Note:** Gmail requires an App Password if 2FA is enabled.
@@ -86,21 +80,14 @@ message.send.backend.auth.cmd = "pass show google/app-password"
 email = "you@icloud.com"
 display-name = "Your Name"
 
-backend.type = "imap"
-backend.host = "imap.mail.me.com"
-backend.port = 993
-backend.encryption.type = "tls"
-backend.login = "you@icloud.com"
-backend.auth.type = "password"
-backend.auth.cmd = "pass show icloud/app-password"
+imap.server = "imaps://imap.mail.me.com:993"
+imap.sasl.plain.username = "you@icloud.com"
+imap.sasl.plain.password.command = "pass show icloud/app-password"
 
-message.send.backend.type = "smtp"
-message.send.backend.host = "smtp.mail.me.com"
-message.send.backend.port = 587
-message.send.backend.encryption.type = "start-tls"
-message.send.backend.login = "you@icloud.com"
-message.send.backend.auth.type = "password"
-message.send.backend.auth.cmd = "pass show icloud/app-password"
+smtp.server = "smtp://smtp.mail.me.com:587"
+smtp.starttls = true
+smtp.sasl.plain.username = "you@icloud.com"
+smtp.sasl.plain.password.command = "pass show icloud/app-password"
 ```
 
 **Note:** Generate an app-specific password at appleid.apple.com
@@ -110,11 +97,11 @@ message.send.backend.auth.cmd = "pass show icloud/app-password"
 Map custom folder names:
 
 ```toml
-[accounts.default.folder.alias]
-inbox = "INBOX"
-sent = "Sent"
-drafts = "Drafts"
-trash = "Trash"
+[accounts.default]
+mailbox.alias.inbox = "INBOX"
+mailbox.alias.sent = "Sent"
+mailbox.alias.drafts = "Drafts"
+mailbox.alias.trash = "Trash"
 ```
 
 ## Multiple Accounts
@@ -142,21 +129,27 @@ himalaya --account work envelope list
 [accounts.local]
 email = "user@example.com"
 
-backend.type = "notmuch"
-backend.db-path = "~/.mail/.notmuch"
+notmuch.db-path = "~/.mail/.notmuch"
 ```
 
 ## OAuth2 Authentication (for providers that support it)
 
 ```toml
-backend.auth.type = "oauth2"
-backend.auth.client-id = "your-client-id"
-backend.auth.client-secret.cmd = "pass show oauth/client-secret"
-backend.auth.access-token.cmd = "pass show oauth/access-token"
-backend.auth.refresh-token.cmd = "pass show oauth/refresh-token"
-backend.auth.auth-url = "https://provider.com/oauth/authorize"
-backend.auth.token-url = "https://provider.com/oauth/token"
+[accounts.gmail-oauth]
+email = "you@gmail.com"
+
+imap.server = "imaps://imap.gmail.com:993"
+imap.sasl.xoauth2.username = "you@gmail.com"
+imap.sasl.xoauth2.token.raw = "your-access-token"
+# Or use a command: imap.sasl.xoauth2.token.command = ["pass", "show", "gmail/xoauth2-token"]
+
+smtp.server = "smtp://smtp.gmail.com:587"
+smtp.starttls = true
+smtp.sasl.xoauth2.username = "you@gmail.com"
+smtp.sasl.xoauth2.token.raw = "your-access-token"
 ```
+
+**Note:** For XOAUTH2 you need a valid access token; token refresh is the caller's responsibility. The `oauth2` auth type from pre-2.1.0 has been replaced by the SASL mechanism tables above.
 
 ## Additional Options
 
