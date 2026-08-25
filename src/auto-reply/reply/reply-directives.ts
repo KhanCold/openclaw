@@ -1,7 +1,11 @@
 /** Parses inline reply directives such as media, reply targets, audio, and silence. */
 import { splitMediaFromOutput } from "../../media/parse.js";
-import { parseInlineDirectives } from "../../utils/directive-tags.js";
+import { parseInlineDirectives, replaceOutsideCodeRegions } from "../../utils/directive-tags.js";
 import { isSilentReplyPayloadText, SILENT_REPLY_TOKEN } from "../tokens.js";
+
+// Matches malformed reply directives missing one or both closing brackets.
+// ID stops at whitespace so trailing prose (e.g. "... msg_123 there") is preserved.
+const MALFORMED_REPLY_TAG_RE = /\[\[\s*(?:reply_to_current(?!\w)|reply_to\s*:\s*[^\]\n\s]+)\]?/gi;
 
 /** Parsed outbound reply directives and media extracted from model text. */
 export type ReplyDirectiveParseResult = {
@@ -42,6 +46,16 @@ export function parseReplyDirectives(
   if (replyParsed.hasReplyTag) {
     text = replyParsed.text;
   }
+  // parseInlineDirectives only strips well-formed tags; clean up malformed ones too.
+  text = replaceOutsideCodeRegions(text, MALFORMED_REPLY_TAG_RE, (match, _captures, offset, source) => {
+    const before = source[offset - 1];
+    const after = source[offset + match.length];
+    // Collapse adjacent whitespace so "Hi [[tag there" becomes "Hi there", not "Hi  there".
+    if (before && after && /\s/u.test(before) && /\s/u.test(after)) {
+      return " ";
+    }
+    return "";
+  });
 
   const silentToken = options.silentToken ?? SILENT_REPLY_TOKEN;
   const isSilent = isSilentReplyPayloadText(text, silentToken);

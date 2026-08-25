@@ -25,8 +25,15 @@ type InlineDirectiveParseOptions = {
 // delivery intent; persisted transcripts already carry openclawDelivery facts).
 const AUDIO_TAG_RE = /\[\[\s*audio_as_voice\s*\]\]/gi;
 const REPLY_TAG_RE = /\[\[\s*(?:reply_to_current|reply_to\s*:\s*([^\]\n]+))\s*\]\]/gi;
+// Matches malformed reply directives that are missing one or both closing brackets.
+// These can leak to users when the model emits an incomplete tag like [[reply_to_current].
+// ID match stops at whitespace so trailing text (e.g. "... msg_123 there") is preserved.
+const MALFORMED_REPLY_TAG_RE = /\[\[\s*(?:reply_to_current(?!\w)|reply_to\s*:\s*[^\]\n\s]+)\]?/gi;
 const INLINE_DIRECTIVE_TAG_WITH_PADDING_RE =
   /\s*(?:\[\[\s*audio_as_voice\s*\]\]|\[\[\s*(?:reply_to_current|reply_to\s*:\s*[^\]\n]+)\s*\]\])\s*/gi;
+// Malformed variant of the above, with surrounding whitespace handling for delivery.
+const MALFORMED_INLINE_DIRECTIVE_TAG_RE =
+  /\s*\[\[\s*(?:reply_to_current(?!\w)|reply_to\s*:\s*[^\]\n\s]+)\]?\s*/gi;
 const MAX_REPLY_DIRECTIVE_ID_LENGTH = 256;
 const NO_INLINE_DIRECTIVES = {
   audioAsVoice: false,
@@ -111,7 +118,8 @@ export function stripInlineDirectiveTagsForDisplay(text: string): StripInlineDir
     return { text, changed: false };
   }
   const withoutAudio = replaceOutsideCodeRegions(text, AUDIO_TAG_RE, () => "");
-  const stripped = replaceOutsideCodeRegions(withoutAudio, REPLY_TAG_RE, () => "");
+  const withoutReply = replaceOutsideCodeRegions(withoutAudio, REPLY_TAG_RE, () => "");
+  const stripped = replaceOutsideCodeRegions(withoutReply, MALFORMED_REPLY_TAG_RE, () => "");
   return {
     text: stripped,
     changed: stripped !== text,
@@ -156,7 +164,9 @@ export function stripInlineDirectiveTagsForDelivery(text: string): StripInlineDi
   if (!text) {
     return { text, changed: false };
   }
-  const stripped = replaceOutsideCodeRegions(text, INLINE_DIRECTIVE_TAG_WITH_PADDING_RE, () => " ");
+  // Process well-formed directives first, then malformed ones that were missed.
+  const withoutWellFormed = replaceOutsideCodeRegions(text, INLINE_DIRECTIVE_TAG_WITH_PADDING_RE, () => " ");
+  const stripped = replaceOutsideCodeRegions(withoutWellFormed, MALFORMED_INLINE_DIRECTIVE_TAG_RE, () => " ");
   const changed = stripped !== text;
   return {
     text: changed ? stripped.trim() : text,
