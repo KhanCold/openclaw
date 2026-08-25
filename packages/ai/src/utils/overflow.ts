@@ -95,6 +95,7 @@ const FAILOVER_EXPLICIT_OVERFLOW_PATTERNS = [
   /context_window_exceeded/i,
   // FIXED(refactor-06): PR 2 removed the embedded-429 false positive; this is provider overflow.
   /input length [\d,]+\s+tokens? exceeds the model limit/i,
+  /input \(\d+ tokens\) is longer than the model'?s context length \(\d+ tokens\)/i, // SGLang B1 / Together AI
   /上下文过长|上下文超出|上下文长度超|超出最大上下文|请压缩上下文/,
 ];
 
