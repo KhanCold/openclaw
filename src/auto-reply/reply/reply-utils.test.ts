@@ -1649,4 +1649,32 @@ describe("extractShortModelName", () => {
     }
   });
 });
+
+describe("parseReplyDirectives malformed tag cleanup", () => {
+  it("strips malformed reply_to_current missing closing bracket", () => {
+    const result = parseReplyDirectives("Hello [[reply_to_current world");
+    expect(result.text).toBe("Hello world");
+    expect(result.replyToCurrent).toBeUndefined();
+    expect(result.replyToTag).toBe(false);
+  });
+
+  it("strips malformed reply_to with missing bracket", () => {
+    const result = parseReplyDirectives("Hi [[reply_to: msg_123 there");
+    expect(result.text).toBe("Hi there");
+    expect(result.replyToId).toBeUndefined();
+    expect(result.replyToTag).toBe(false);
+  });
+
+  it("does not strip literal text that starts with reply_to_currently", () => {
+    const result = parseReplyDirectives("reply_to_currently is not a directive");
+    expect(result.text).toBe("reply_to_currently is not a directive");
+  });
+
+  it("preserves well-formed reply_to_current directive", () => {
+    const result = parseReplyDirectives("Hello [[reply_to_current]] world");
+    expect(result.text).toBe("Hello world");
+    expect(result.replyToCurrent).toBe(true);
+    expect(result.replyToTag).toBe(true);
+  });
+});
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

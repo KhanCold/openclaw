@@ -46,6 +46,25 @@ describe("stripInlineDirectiveTagsForDisplay", () => {
     expect(result.changed).toBe(false);
     expect(result.text).toBe(input);
   });
+
+  test("strips malformed reply directives missing one or both closing brackets", () => {
+    expect(stripInlineDirectiveTagsForDisplay("[[reply_to_current] leaked").text).toBe(" leaked");
+    expect(stripInlineDirectiveTagsForDisplay("[[reply_to_current leaked").text).toBe(" leaked");
+    expect(stripInlineDirectiveTagsForDisplay("[[reply_to: 123] leaked").text).toBe(" leaked");
+    expect(stripInlineDirectiveTagsForDisplay("[[reply_to: leaked").text).toBe(" leaked");
+  });
+
+  test("does not strip literal text that starts with reply_to_current", () => {
+    expect(stripInlineDirectiveTagsForDisplay("reply_to_currently is fine").text).toBe("reply_to_currently is fine");
+    expect(stripInlineDirectiveTagsForDisplay("[[reply_to_currently]] is fine").text).toBe("[[reply_to_currently]] is fine");
+  });
+
+  test("still strips well-formed reply directives after malformed fix", () => {
+    const input = "[[reply_to_current]] ok [[reply_to:abc]]";
+    const result = stripInlineDirectiveTagsForDisplay(input);
+    expect(result.changed).toBe(true);
+    expect(result.text).toBe(" ok ");
+  });
 });
 
 describe("stripInlineDirectiveTagsForDelivery", () => {
@@ -68,6 +87,25 @@ describe("stripInlineDirectiveTagsForDelivery", () => {
     const result = stripInlineDirectiveTagsForDelivery(input);
     expect(result.changed).toBe(false);
     expect(result.text).toBe(input);
+  });
+
+  test("strips malformed reply directives missing one or both closing brackets", () => {
+    expect(stripInlineDirectiveTagsForDelivery("[[reply_to_current] leaked").text).toBe("leaked");
+    expect(stripInlineDirectiveTagsForDelivery("[[reply_to_current leaked").text).toBe("leaked");
+    expect(stripInlineDirectiveTagsForDelivery("[[reply_to: 123] leaked").text).toBe("leaked");
+    expect(stripInlineDirectiveTagsForDelivery("[[reply_to: leaked").text).toBe("");
+  });
+
+  test("does not strip literal text that starts with reply_to_current", () => {
+    expect(stripInlineDirectiveTagsForDelivery("reply_to_currently is fine").text).toBe("reply_to_currently is fine");
+    expect(stripInlineDirectiveTagsForDelivery("[[reply_to_currently]] is fine").text).toBe("[[reply_to_currently]] is fine");
+  });
+
+  test("still strips well-formed reply directives after malformed fix", () => {
+    const input = "hello [[reply_to_current]] world [[audio_as_voice]]";
+    const result = stripInlineDirectiveTagsForDelivery(input);
+    expect(result.changed).toBe(true);
+    expect(result.text).toBe("hello world");
   });
 });
 

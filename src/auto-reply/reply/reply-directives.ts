@@ -3,6 +3,9 @@ import { splitMediaFromOutput } from "../../media/parse.js";
 import { parseInlineDirectives } from "../../utils/directive-tags.js";
 import { isSilentReplyPayloadText, SILENT_REPLY_TOKEN } from "../tokens.js";
 
+// Matches malformed reply directives missing one or both closing brackets.
+const MALFORMED_REPLY_TAG_RE = /\[\[\s*(?:reply_to_current(?!\w)|reply_to\s*:\s*[^\]\n]+)\]?/gi;
+
 /** Parsed outbound reply directives and media extracted from model text. */
 export type ReplyDirectiveParseResult = {
   text: string;
@@ -42,6 +45,8 @@ export function parseReplyDirectives(
   if (replyParsed.hasReplyTag) {
     text = replyParsed.text;
   }
+  // parseInlineDirectives only strips well-formed tags; clean up malformed ones too.
+  text = text.replace(MALFORMED_REPLY_TAG_RE, "");
 
   const silentToken = options.silentToken ?? SILENT_REPLY_TOKEN;
   const isSilent = isSilentReplyPayloadText(text, silentToken);
