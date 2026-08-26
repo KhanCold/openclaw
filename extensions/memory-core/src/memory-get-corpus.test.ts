@@ -190,7 +190,6 @@ describe("memory_get corpus outcomes", () => {
           { corpus: "memory", outcome: "unavailable", error: "memory unavailable" },
           { corpus: "wiki", outcome: "not-registered" },
         ],
-        // With corpus=all, wiki not-registered is not surfaced as a warning (#129866).
         warning: "Memory corpus unavailable: memory unavailable",
         error: "memory unavailable",
       },

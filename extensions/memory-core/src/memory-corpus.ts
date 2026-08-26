@@ -98,30 +98,18 @@ export async function runMemoryCorpusDeadline<T>(params: {
 export function composeMemoryCorpusMetadata(
   attempts: readonly MemoryCorpusAttempt<unknown>[],
   extraWarnings: readonly string[] = [],
-  requestedCorpus?: string,
 ) {
   const ordered = attempts.toSorted(
     (left, right) => Number(left.corpus === "wiki") - Number(right.corpus === "wiki"),
   );
   const warnings = ordered.flatMap((attempt) => {
-    if (attempt.outcome === "ok") {
-      return [];
-    }
-    // When corpus=all expands to an optional wiki that is not registered,
-    // do not treat it as a warning agents must surface (#129866).
-    if (
-      attempt.outcome === "not-registered" &&
-      attempt.corpus === "wiki" &&
-      requestedCorpus === "all"
-    ) {
-      return [];
-    }
     const label = attempt.corpus === "memory" ? "Memory" : "Wiki";
-    return [
-      attempt.outcome === "not-registered"
-        ? `${label} corpus is not registered; results do not cover that requested corpus.`
-        : `${label} corpus unavailable: ${attempt.error}`,
-    ];
+    if (attempt.outcome === "unavailable") {
+      return [`${label} corpus unavailable: ${attempt.error}`];
+    }
+    return attempt.outcome === "not-registered" && ordered.length === 1
+      ? [`${label} corpus is not registered; results do not cover that requested corpus.`]
+      : [];
   });
   warnings.push(...extraWarnings);
   const errors = ordered.flatMap((attempt) =>

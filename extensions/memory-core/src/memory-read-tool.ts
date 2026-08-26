@@ -47,7 +47,7 @@ export async function executeWikiMemoryReadResult(params: MemoryReadRequest) {
         (wiki.outcome === "ok"
           ? { status: "not_found" as const, path: params.relPath, text: "" as const }
           : { path: params.relPath, text: "" });
-      return jsonResult({ ...result, ...composeMemoryCorpusMetadata([wiki], [], "wiki") });
+      return jsonResult({ ...result, ...composeMemoryCorpusMetadata([wiki]) });
     },
   });
 }
@@ -89,7 +89,7 @@ export async function executeMemoryReadResult(
             (memory.outcome === "ok" || wiki.outcome === "ok"
               ? { status: "not_found" as const, path: params.relPath, text: "" as const }
               : { path: params.relPath, text: "", disabled: true }));
-      return jsonResult({ ...result, ...composeMemoryCorpusMetadata([memory, wiki], [], params.requestedCorpus) });
+      return jsonResult({ ...result, ...composeMemoryCorpusMetadata([memory, wiki]) });
     },
   });
 }

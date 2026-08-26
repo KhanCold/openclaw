@@ -502,7 +502,6 @@ export function createMemorySearchTool(options: MemoryToolOptions) {
               const metadata = composeMemoryCorpusMetadata(
                 attempts,
                 staleness?.warning ? [staleness.warning] : [],
-                requestedCorpus,
               );
               const elapsed = Math.max(0, Date.now() - toolStartedAt);
               const debug = memoryValue?.debug
