@@ -17,9 +17,7 @@ describe("createEmbeddedStateSignalBridge", () => {
       on: (signal: string, handler: () => void) => {
         handlers.set(signal, handler);
       },
-      off: (signal: string, handler: () => void) => {
-        handlers.delete(signal);
-      },
+      off: () => {},
     };
     const bridge = createEmbeddedStateSignalBridge(mockProcess as never);
     expect(bridge.signal.aborted).toBe(false);
@@ -34,9 +32,7 @@ describe("createEmbeddedStateSignalBridge", () => {
       on: (signal: string, handler: () => void) => {
         handlers.set(signal, handler);
       },
-      off: (signal: string, handler: () => void) => {
-        handlers.delete(signal);
-      },
+      off: () => {},
     };
     const bridge = createEmbeddedStateSignalBridge(mockProcess as never);
     handlers.get("SIGTERM")?.();
@@ -46,6 +42,30 @@ describe("createEmbeddedStateSignalBridge", () => {
 
   it("removes handlers on dispose", () => {
     const handlers = new Map<string, () => void>();
+    const offCalls: Array<{ signal: string; matched: boolean }> = [];
+    const mockProcess = {
+      on: (signal: string, handler: () => void) => {
+        handlers.set(signal, handler);
+      },
+      off: (signal: string, handler: () => void) => {
+        const matched = handlers.get(signal) === handler;
+        offCalls.push({ signal, matched });
+        if (matched) {
+          handlers.delete(signal);
+        }
+      },
+    };
+    const bridge = createEmbeddedStateSignalBridge(mockProcess as never);
+    bridge.dispose();
+    expect(offCalls).toHaveLength(2);
+    expect(offCalls.every((c) => c.matched)).toBe(true);
+    expect(offCalls.map((c) => c.signal)).toContain("SIGINT");
+    expect(offCalls.map((c) => c.signal)).toContain("SIGTERM");
+    expect(handlers.size).toBe(0);
+  });
+
+  it("does not double-abort", () => {
+    const handlers = new Map<string, () => void>();
     const offCalls: string[] = [];
     const mockProcess = {
       on: (signal: string, handler: () => void) => {
@@ -53,29 +73,20 @@ describe("createEmbeddedStateSignalBridge", () => {
       },
       off: (signal: string) => {
         offCalls.push(signal);
-        handlers.delete(signal);
       },
     };
     const bridge = createEmbeddedStateSignalBridge(mockProcess as never);
-    bridge.dispose();
-    expect(offCalls).toContain("SIGINT");
-    expect(offCalls).toContain("SIGTERM");
-    expect(handlers.size).toBe(0);
-  });
+    const abortEventCount = { value: 0 };
+    bridge.signal.addEventListener("abort", () => {
+      abortEventCount.value++;
+    });
 
-  it("does not double-abort", () => {
-    const handlers = new Map<string, () => void>();
-    const mockProcess = {
-      on: (signal: string, handler: () => void) => {
-        handlers.set(signal, handler);
-      },
-      off: () => {},
-    };
-    const bridge = createEmbeddedStateSignalBridge(mockProcess as never);
-    const abortSpy = vi.spyOn(bridge.signal, "aborted", "get");
     handlers.get("SIGINT")?.();
     handlers.get("SIGINT")?.(); // Second call should be no-op
+
     expect(bridge.signal.aborted).toBe(true);
+    expect(abortEventCount.value).toBe(1); // Abort event fired exactly once
+    expect(offCalls).toHaveLength(2); // dispose() called once (SIGINT + SIGTERM)
   });
 
   it("getReceivedSignal returns undefined before signal", () => {
