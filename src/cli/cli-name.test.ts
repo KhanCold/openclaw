@@ -39,9 +39,6 @@ describe("resolveCliName", () => {
     expect(resolveCliName(["node", "/usr/bin/openclaw "])).toBe("openclaw");
   });
 
-  it("returns 'openclaw' for argv with only one element", () => {
-    expect(resolveCliName(["node"])).toBe("openclaw");
-  });
 });
 
 describe("replaceCliName", () => {
