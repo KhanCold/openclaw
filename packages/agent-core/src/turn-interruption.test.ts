@@ -1,5 +1,6 @@
 // Tests for agent turn interruption and failure message helpers.
 import { describe, expect, it } from "vitest";
+import type { Model } from "@openclaw/llm-core";
 import {
   appendInterruptedTurnMessage,
   createFailureMessage,
@@ -8,10 +9,17 @@ import {
   normalizeCoreContextMessages,
 } from "./turn-interruption.js";
 
-const mockModel = {
+const mockModel: Model = {
   api: "test-api" as const,
   provider: "test-provider",
   id: "test-model",
+  name: "Test Model",
+  baseUrl: "https://example.test",
+  reasoning: false,
+  input: ["text"] as const,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 1000,
+  maxTokens: 1000,
 };
 
 describe("createFailureMessage", () => {
