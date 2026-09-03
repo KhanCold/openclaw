@@ -29,8 +29,8 @@ describe("collectConfiguredProviderSelectionIds", () => {
     const result = collectConfiguredProviderSelectionIds({
       models: {
         providers: {
-          openai: {},
-          google: {},
+          openai: { baseUrl: "https://api.openai.com" },
+          google: { baseUrl: "https://generativelanguage.googleapis.com" },
         },
       },
     });
@@ -65,17 +65,15 @@ describe("collectConfiguredProviderSelectionIds", () => {
     expect([...result]).toContain("anthropic");
   });
 
-  it("collects provider ids from configured model refs", () => {
+  it("collects provider ids from non-channel configured model refs", () => {
     const result = collectConfiguredProviderSelectionIds({
-      models: {
-        providers: {
-          openai: {
-            list: [{ id: "gpt-4", default: true }],
-          },
+      agents: {
+        defaults: {
+          model: "anthropic/claude-3",
         },
       },
     });
-    expect([...result]).toContain("openai");
+    expect([...result]).toContain("anthropic");
   });
 
   it("collects media provider ids", () => {
@@ -109,7 +107,7 @@ describe("collectConfiguredProviderSelectionIds", () => {
       },
       models: {
         providers: {
-          openai: {},
+          openai: { baseUrl: "https://api.openai.com" },
         },
       },
     });
@@ -139,7 +137,7 @@ describe("collectConfiguredProviderSelectionIds", () => {
         },
       },
     });
-    // Should not extract provider from refs without slash
+    // Channel key "openai" is collected directly; model ref without slash does not add extra prefix
     const ids = [...result];
     expect(ids).toContain("openai");
   });
