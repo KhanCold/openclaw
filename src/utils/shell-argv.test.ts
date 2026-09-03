@@ -34,7 +34,11 @@ describe("hasTopLevelShellControlOperator", () => {
   });
 
   it("handles double quote escapes", () => {
-    expect(hasTopLevelShellControlOperator('echo "hello\\"world; echo bye')).toBe(true);
+    // \" inside double quotes is a literal quote, does NOT close the quote
+    // so the semicolon remains inside the quoted string
+    expect(hasTopLevelShellControlOperator('echo "hello\\"world; echo bye')).toBe(false);
+    // \\n inside double quotes: \ is not a recognized escape (n is not in DOUBLE_QUOTE_ESCAPES)
+    // so the backslash is preserved literally and the quote continues
     expect(hasTopLevelShellControlOperator('echo "hello\\nworld"')).toBe(false);
   });
 
@@ -78,7 +82,10 @@ describe("splitShellArgs", () => {
   });
 
   it("handles double quote escapes", () => {
-    expect(splitShellArgs('"hello\\nworld"')).toEqual(["hello\nworld"]);
+    // In double quotes, only \\, \", \$, \`, \\n, \\r consume the backslash
+    // \\n is NOT a recognized escape (n not in DOUBLE_QUOTE_ESCAPES), so both chars preserved
+    expect(splitShellArgs('"hello\\nworld"')).toEqual(["hello\\nworld"]);
+    // \\\\ inside double quotes: \\ IS a recognized escape, so it becomes single \
     expect(splitShellArgs('"hello\\\\world"')).toEqual(["hello\\world"]);
   });
 
@@ -116,8 +123,10 @@ describe("splitShellArgs", () => {
     ]);
   });
 
-  it("preserves hash inside tokens", () => {
-    expect(splitShellArgs("echo #hashtag")).toEqual(["echo", "#hashtag"]);
+  it("treats hash at word start as comment", () => {
+    // In POSIX shells, # starts a comment only when it begins a word
+    // "echo #hashtag" → after "echo", buf is empty (pushed by space), so # begins a word → comment
+    expect(splitShellArgs("echo #hashtag")).toEqual(["echo"]);
   });
 
   it("preserves hash inside quotes", () => {
