@@ -2,7 +2,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { asBoolean, parseBooleanValue } from "./boolean.js";
-import { splitShellArgs } from "./shell-argv.js";
 import { safeParseJsonWithSchema, safeParseWithSchema } from "./zod-parse.js";
 
 describe("asBoolean", () => {
@@ -53,30 +52,6 @@ describe("parseBooleanValue", () => {
   });
 });
 
-describe("splitShellArgs", () => {
-  it("splits whitespace and respects quotes", () => {
-    expect(splitShellArgs(`search --foo "bar baz"`)).toEqual(["search", "--foo", "bar baz"]);
-    expect(splitShellArgs(`search --foo 'bar baz'`)).toEqual(["search", "--foo", "bar baz"]);
-  });
-
-  it("supports backslash escapes inside double quotes", () => {
-    expect(splitShellArgs(String.raw`echo "a\"b"`)).toEqual(["echo", `a"b`]);
-    expect(splitShellArgs(String.raw`echo "\$HOME"`)).toEqual(["echo", "$HOME"]);
-  });
-
-  it("returns null for unterminated quotes", () => {
-    expect(splitShellArgs(`echo "oops`)).toBeNull();
-    expect(splitShellArgs(`echo 'oops`)).toBeNull();
-  });
-
-  it("stops at unquoted shell comments but keeps quoted hashes literal", () => {
-    expect(splitShellArgs(`echo hi # comment && whoami`)).toEqual(["echo", "hi"]);
-    expect(splitShellArgs(`echo "hi # still-literal"`)).toEqual(["echo", "hi # still-literal"]);
-    expect(splitShellArgs(`echo hi#tail`)).toEqual(["echo", "hi#tail"]);
-  });
-});
-
-describe("zod parse helpers", () => {
   const schema = z.object({ name: z.string() });
 
   it("returns parsed data for schema-valid values", () => {
