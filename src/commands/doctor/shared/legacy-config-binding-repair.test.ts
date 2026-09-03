@@ -61,7 +61,7 @@ describe("pruneBindingsForMissingAgents", () => {
   it("preserves bindings with default agent id", () => {
     const cfg = {
       agents: { list: [{ id: "agent-a" }] },
-      bindings: [{ agentId: "agent-a" }, { agentId: "default" }],
+      bindings: [{ agentId: "agent-a" }, { agentId: "main" }],
     } as never;
     const changes: string[] = [];
     const result = pruneBindingsForMissingAgents(cfg, changes);
