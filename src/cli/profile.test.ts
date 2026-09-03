@@ -664,6 +664,26 @@ describe("formatCliCommand", () => {
     ).toBe("openclaw --container demo doctor");
   });
 
+  it("does not duplicate an existing --container flag", () => {
+    expect(
+      formatCliCommand("openclaw --container other doctor", {
+        OPENCLAW_CONTAINER_HINT: "demo",
+      }),
+    ).toBe("openclaw --container other doctor");
+  });
+
+  it("trims whitespace from container hint", () => {
+    expect(
+      formatCliCommand("openclaw doctor", { OPENCLAW_CONTAINER_HINT: "  mycontainer  " }),
+    ).toBe("openclaw --container mycontainer doctor");
+  });
+
+  it("leaves non-openclaw commands unchanged", () => {
+    expect(formatCliCommand("echo hello", { OPENCLAW_CONTAINER_HINT: "demo" })).toBe(
+      "echo hello",
+    );
+  });
+
   it.each([
     "openclaw update",
     "pnpm openclaw update --channel beta",
