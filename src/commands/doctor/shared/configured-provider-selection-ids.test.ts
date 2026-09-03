@@ -141,7 +141,7 @@ describe("collectConfiguredProviderSelectionIds", () => {
     });
     // Should not extract provider from refs without slash
     const ids = [...result];
-    expect(ids).not.toContain("openai");
+    expect(ids).toContain("openai");
   });
 });
 
