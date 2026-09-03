@@ -179,17 +179,22 @@ describe("writeTarArchiveWithRetry", () => {
   });
 
   it("uses default sleep when not provided", async () => {
+    vi.useFakeTimers();
     const runTar = vi
       .fn()
       .mockRejectedValueOnce(Object.assign(new Error("EOF"), { code: "EOF" }))
       .mockResolvedValueOnce("ok");
 
     // Don't pass sleepMs; should use default sleep import
-    const result = await writeTarArchiveWithRetry({
+    const promise = writeTarArchiveWithRetry({
       tempArchivePath: "/tmp/backup.tar",
       runTar,
     });
 
+    await vi.advanceTimersByTimeAsync(10000);
+    const result = await promise;
+
     expect(result).toBe("ok");
+    vi.useRealTimers();
   });
 });
