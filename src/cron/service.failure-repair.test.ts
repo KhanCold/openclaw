@@ -245,7 +245,7 @@ describe("CronService failure repair", () => {
         name: "cron execution watchdog timeout",
         result: {
           error: "cron: job execution timed out",
-          errorClassification: { kind: "reason", reason: "timeout" },
+          errorClassification: { kind: "reason", reason: "timeout" } as const,
         },
         expected: ["failure-repair"],
       },

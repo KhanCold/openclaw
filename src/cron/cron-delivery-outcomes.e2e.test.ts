@@ -84,7 +84,11 @@ function historyEntry(storePath: string, jobId: string) {
     limit: 1,
   });
   expect(history.total).toBe(1);
-  return history.entries[0];
+  const entry = history.entries[0];
+  if (!entry) {
+    throw new Error(`Expected cron run history for job ${jobId}`);
+  }
+  return entry;
 }
 
 async function persistedJob(storePath: string, jobId: string) {
@@ -113,13 +117,17 @@ describe("cron delivery outcomes", { concurrent: false }, () => {
                     "heartbeat failed: MatrixError: [500] M_UNKNOWN: Internal server error occurred",
                 };
               }
+              if (!abortSignal) {
+                throw new Error("expected cron watchdog abort signal");
+              }
               onExecutionStarted?.();
               notifyWatchdogExecutionStarted();
-              await new Promise<never>((_resolve, reject) => {
-                abortSignal.addEventListener("abort", () => reject(abortSignal.reason), {
+              await new Promise<void>((resolve) => {
+                abortSignal.addEventListener("abort", () => resolve(), {
                   once: true,
                 });
               });
+              return { status: "error", error: "cron watchdog aborted the runner" };
             },
           );
           const cron = new CronService({
@@ -187,7 +195,11 @@ describe("cron delivery outcomes", { concurrent: false }, () => {
             }
             expect(cron.getJob(watchdogJob.id)?.state.lastErrorReason).toBe("timeout");
             expect(historyEntry(storePath, watchdogJob.id).errorReason).toBe("timeout");
-            expect(receiver.requests[1]?.body.message).toContain("Cause: timeout");
+            const watchdogAlert = receiver.requests[1];
+            if (!watchdogAlert) {
+              throw new Error("Expected cron watchdog failure alert");
+            }
+            expect(watchdogAlert.body.message).toContain("Cause: timeout");
           } finally {
             cron.stop();
           }
