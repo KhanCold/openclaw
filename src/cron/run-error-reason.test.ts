@@ -22,5 +22,4 @@ describe("resolveCronRunErrorReason", () => {
   it("preserves provider error classification for other cron failures", () => {
     expect(resolveCronRunErrorReason("internal_error from provider", "anthropic")).toBe("timeout");
   });
-
 });
