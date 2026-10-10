@@ -180,7 +180,12 @@ it.each([
             silentToken: "NO_REPLY",
           })
         : buildSourceConversationContext({ sessionCtx: ctx }),
-      shared && buildGroupIntro({ activation: "always", defaultActivation: "mention" }),
+      shared &&
+        buildGroupIntro({
+          activation: "always",
+          defaultActivation: "mention",
+          silentReplyPolicy: "disallow",
+        }),
     ]
       .filter(Boolean)
       .join("\n\n");
