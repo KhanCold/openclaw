@@ -124,7 +124,7 @@ export function buildGroupChatContext(params: {
   }
   lines.push(
     params.silentReplyPolicy === "disallow"
-      ? "Be a good group participant: reply briefly to every admitted message, prioritizing those directly addressed to you or where you can add clear value. Emoji reactions are welcome when available."
+      ? "For required conversational requests, reply briefly even when another participant is addressed; do not speak on their behalf. For optional ambient events and synthetic continuations, follow the current-turn guidance."
       : "Be a good group participant: mostly lurk and follow the conversation; reply only when directly addressed or you can add clear value. Emoji reactions are welcome when available.",
   );
   const channelId = normalizeChatChannelId(provider) ?? provider ?? "";
@@ -136,7 +136,7 @@ export function buildGroupChatContext(params: {
   );
   lines.push(
     params.silentReplyPolicy === "disallow"
-      ? "If a message is addressed to someone else, keep any reply brief and do not speak on their behalf."
+      ? "Emoji reactions are welcome when available."
       : "If addressed to someone else, stay silent unless invited or correcting key facts.",
   );
   if (provider === "discord") {
@@ -201,7 +201,7 @@ export function buildGroupIntro(params: {
   if (activation === "always") {
     const responseGuidance =
       params.silentReplyPolicy === "disallow"
-        ? "You see every message; answer each admitted message briefly."
+        ? "You see every message; answer required conversational requests briefly, and follow current-turn guidance for optional ambient events or synthetic continuations."
         : "You see every message; most need no response.";
     return `Activation: always-on (you receive every group message). ${responseGuidance} When you do reply, address the specific sender noted in the message context.`;
   }

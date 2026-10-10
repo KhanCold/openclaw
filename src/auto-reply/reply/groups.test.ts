@@ -124,9 +124,11 @@ describe("group runtime loading", () => {
     });
 
     expect(context).not.toContain("stay silent");
-    expect(context).toContain("reply briefly");
+    expect(context).toContain("required conversational requests");
+    expect(context).toContain("optional ambient events and synthetic continuations");
     expect(intro).not.toContain("most need no response");
-    expect(intro).toContain("answer each admitted message");
+    expect(intro).toContain("answer required conversational requests briefly");
+    expect(intro).toContain("optional ambient events or synthetic continuations");
   });
 
   it("builds direct chat context without silent-token guidance", () => {
