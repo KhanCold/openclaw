@@ -111,6 +111,24 @@ describe("group runtime loading", () => {
     vi.doUnmock("./groups.runtime.js");
   });
 
+  it("does not tell required group replies to stay silent", () => {
+    const context = groups.buildGroupChatContext({
+      sessionCtx: { ChatType: "group", Provider: "mattermost" },
+      silentReplyPolicy: "disallow",
+      silentToken: "NO_REPLY",
+    });
+    const intro = groups.buildGroupIntro({
+      activation: "always",
+      defaultActivation: "mention",
+      silentReplyPolicy: "disallow",
+    } as Parameters<typeof groups.buildGroupIntro>[0]);
+
+    expect(context).not.toContain("stay silent");
+    expect(context).toContain("reply briefly");
+    expect(intro).not.toContain("most need no response");
+    expect(intro).toContain("answer each admitted message");
+  });
+
   it("builds direct chat context without silent-token guidance", () => {
     expect(
       groups.buildSourceConversationContext({
