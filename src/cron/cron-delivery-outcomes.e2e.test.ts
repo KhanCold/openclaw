@@ -100,8 +100,12 @@ describe("cron delivery outcomes", { concurrent: false }, () => {
         async (state) => {
           const storePath = state.path("cron", "jobs.json");
           let execution: "channel-failure" | "watchdog-timeout" = "channel-failure";
+          let notifyWatchdogExecutionStarted!: () => void;
+          const watchdogExecutionStarted = new Promise<void>((resolve) => {
+            notifyWatchdogExecutionStarted = resolve;
+          });
           const runIsolatedAgentJob = vi.fn<CronServiceDeps["runIsolatedAgentJob"]>(
-            async ({ abortSignal }) => {
+            async ({ abortSignal, onExecutionStarted }) => {
               if (execution === "channel-failure") {
                 return {
                   status: "error",
@@ -109,6 +113,8 @@ describe("cron delivery outcomes", { concurrent: false }, () => {
                     "heartbeat failed: MatrixError: [500] M_UNKNOWN: Internal server error occurred",
                 };
               }
+              onExecutionStarted?.();
+              notifyWatchdogExecutionStarted();
               await new Promise<never>((_resolve, reject) => {
                 abortSignal.addEventListener("abort", () => reject(abortSignal.reason), {
                   once: true,
@@ -169,11 +175,16 @@ describe("cron delivery outcomes", { concurrent: false }, () => {
 
             execution = "watchdog-timeout";
             const watchdogJob = await createJob("providerless cron watchdog timeout", 0.05);
-            await expect(cron.run(watchdogJob.id, "force")).resolves.toEqual({
-              ok: true,
-              ran: true,
-            });
-            await vi.waitFor(() => expect(receiver.requests).toHaveLength(2));
+            vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+            try {
+              const watchdogRun = cron.run(watchdogJob.id, "force");
+              await watchdogExecutionStarted;
+              await vi.advanceTimersByTimeAsync(50);
+              await expect(watchdogRun).resolves.toEqual({ ok: true, ran: true });
+              await vi.waitFor(() => expect(receiver.requests).toHaveLength(2));
+            } finally {
+              vi.useRealTimers();
+            }
             expect(cron.getJob(watchdogJob.id)?.state.lastErrorReason).toBe("timeout");
             expect(historyEntry(storePath, watchdogJob.id).errorReason).toBe("timeout");
             expect(receiver.requests[1]?.body.message).toContain("Cause: timeout");
