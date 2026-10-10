@@ -243,7 +243,10 @@ describe("CronService failure repair", () => {
       },
       {
         name: "cron execution watchdog timeout",
-        result: { error: "cron: job execution timed out", provider: "anthropic" },
+        result: {
+          error: "cron: job execution timed out",
+          errorClassification: { kind: "reason", reason: "timeout" },
+        },
         expected: ["failure-repair"],
       },
       {
