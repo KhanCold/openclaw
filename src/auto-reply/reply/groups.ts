@@ -123,7 +123,9 @@ export function buildGroupChatContext(params: {
     );
   }
   lines.push(
-    "Be a good group participant: mostly lurk and follow the conversation; reply only when directly addressed or you can add clear value. Emoji reactions are welcome when available.",
+    params.silentReplyPolicy === "disallow"
+      ? "Be a good group participant: reply briefly to every admitted message, prioritizing those directly addressed to you or where you can add clear value. Emoji reactions are welcome when available."
+      : "Be a good group participant: mostly lurk and follow the conversation; reply only when directly addressed or you can add clear value. Emoji reactions are welcome when available.",
   );
   const channelId = normalizeChatChannelId(provider) ?? provider ?? "";
   const tableMode = getLoadedChannelPluginForRead(channelId)?.messaging?.defaultMarkdownTableMode;
@@ -132,7 +134,11 @@ export function buildGroupChatContext(params: {
   lines.push(
     `Write like a human.${tableGuidance} Minimize empty lines and use normal chat conventions, not document-style spacing. Don't type literal \\n sequences; use real line breaks sparingly.`,
   );
-  lines.push("If addressed to someone else, stay silent unless invited or correcting key facts.");
+  lines.push(
+    params.silentReplyPolicy === "disallow"
+      ? "If a message is addressed to someone else, keep any reply brief and do not speak on their behalf."
+      : "If addressed to someone else, stay silent unless invited or correcting key facts.",
+  );
   if (provider === "discord") {
     lines.push("Discord: wrap bare URLs like <https://example.com> to suppress embeds.");
   }
@@ -189,10 +195,15 @@ export function buildSourceConversationContext(
 export function buildGroupIntro(params: {
   activation?: PreparedReplyConversation["activation"];
   defaultActivation: "always" | "mention";
+  silentReplyPolicy?: SilentReplyPolicy;
 }): string {
   const activation = normalizeGroupActivation(params.activation) ?? params.defaultActivation;
   if (activation === "always") {
-    return "Activation: always-on (you receive every group message). You see every message; most need no response. When you do reply, address the specific sender noted in the message context.";
+    const responseGuidance =
+      params.silentReplyPolicy === "disallow"
+        ? "You see every message; answer each admitted message briefly."
+        : "You see every message; most need no response.";
+    return `Activation: always-on (you receive every group message). ${responseGuidance} When you do reply, address the specific sender noted in the message context.`;
   }
   return "Activation: trigger-only (you are invoked only when explicitly mentioned; recent context may be included). Address the specific sender noted in the message context.";
 }

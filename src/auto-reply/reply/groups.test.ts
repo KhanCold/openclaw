@@ -121,7 +121,7 @@ describe("group runtime loading", () => {
       activation: "always",
       defaultActivation: "mention",
       silentReplyPolicy: "disallow",
-    } as Parameters<typeof groups.buildGroupIntro>[0]);
+    });
 
     expect(context).not.toContain("stay silent");
     expect(context).toContain("reply briefly");
