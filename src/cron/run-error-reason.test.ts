@@ -20,6 +20,14 @@ describe("resolveCronRunErrorReason", () => {
   });
 
   it("preserves provider error classification for other cron failures", () => {
-    expect(resolveCronRunErrorReason("internal_error from provider")).toBe("timeout");
+    expect(resolveCronRunErrorReason("internal_error from provider", "anthropic")).toBe("timeout");
+  });
+
+  it("does not infer a model timeout from an unscoped heartbeat delivery error", () => {
+    expect(
+      resolveCronRunErrorReason(
+        "heartbeat failed: MatrixError: [500] M_UNKNOWN: Internal server error occurred",
+      ),
+    ).toBeUndefined();
   });
 });
