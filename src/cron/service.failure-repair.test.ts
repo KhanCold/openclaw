@@ -235,12 +235,15 @@ describe("CronService failure repair", () => {
     it.each([
       {
         name: "provider ECONNREFUSED (classified as timeout)",
-        result: { error: "fetch failed: connect ECONNREFUSED 127.0.0.1:443" },
+        result: {
+          error: "fetch failed: connect ECONNREFUSED 127.0.0.1:443",
+          provider: "anthropic",
+        },
         expected: [],
       },
       {
         name: "cron execution watchdog timeout",
-        result: { error: "cron: job execution timed out" },
+        result: { error: "cron: job execution timed out", provider: "anthropic" },
         expected: ["failure-repair"],
       },
       {
