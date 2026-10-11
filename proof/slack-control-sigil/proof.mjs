@@ -42,6 +42,23 @@ const safeDiagnostic = (text) => text
   .replace(/((?:authorization|api[_-]?key|access[_-]?token|password)\s*[=:]\s*)[^\s,;]+/gi, '$1[REDACTED]');
 const flushOutput = () => Promise.all([process.stdout, process.stderr]
   .map((stream) => new Promise((resolve) => stream.write('', resolve))));
+function slackMrkdwnFields(input) {
+  const blocks = typeof input.blocks === 'string' ? JSON.parse(input.blocks) : input.blocks;
+  if (!Array.isArray(blocks) || blocks.length === 0) {
+    return input.mrkdwn === false || input.mrkdwn === 'false' ? [] : [{ surface: 'text', text: input.text || '' }];
+  }
+  const fields = [];
+  const add = (value, surface) => {
+    if (value?.type === 'mrkdwn' && typeof value.text === 'string') fields.push({ surface, text: value.text });
+  };
+  for (const [index, block] of blocks.entries()) {
+    add(block.text, `blocks[${index}].text`);
+    for (const key of ['fields', 'elements']) {
+      if (Array.isArray(block[key])) block[key].forEach((value, item) => add(value, `blocks[${index}].${key}[${item}]`));
+    }
+  }
+  return fields;
+}
 
 async function run(command, args, options = {}) {
   const { timeout = 120_000, label = command, quietFailure = false, ...spawnOptions } = options;
@@ -218,7 +235,7 @@ async function inside(role, sha) {
       case 'conversations.members': return json(res, { ok: true, members: ['U0123PROOF', 'U0PROOFBOT'], response_metadata: { next_cursor: '' } });
       case 'chat.postMessage': case 'chat.update': {
         const ts = input.ts || `1770000000.${String(captures.length + 1).padStart(6, '0')}`;
-        captures.push({ method, channel, text: input.text || '', ts });
+        captures.push({ method, channel, text: input.text || '', mrkdwnFields: slackMrkdwnFields(input), ts });
         return json(res, { ok: true, channel, ts, message: { text: input.text, ts } });
       }
       case 'chat.delete': case 'reactions.add': case 'reactions.remove':
@@ -271,7 +288,7 @@ async function inside(role, sha) {
       models: { mode: 'merge', providers: { openai: { baseUrl: `http://127.0.0.1:${model.port}/v1`, apiKey: { source: 'env', provider: 'default', id: 'OPENAI_API_KEY' }, api: 'openai-responses', agentRuntime: { id: 'openclaw' }, request: { allowPrivateNetwork: true }, models: [{ id: 'gpt-5.6-luna', name: 'gpt-5.6-luna', api: 'openai-responses', agentRuntime: { id: 'openclaw' }, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, contextTokens: 96000, maxTokens: 4096 }] } } },
       agents: { defaults: { workspace: `${root}/workspace`, model: { primary: 'openai/gpt-5.6-luna' }, models: { 'openai/gpt-5.6-luna': { agentRuntime: { id: 'openclaw' }, params: { transport: 'sse', openaiWsWarmup: false } } } } },
       plugins: { enabled: true, allow: ['openai', 'slack'], entries: { slack: { enabled: true }, openai: { enabled: true } } },
-      channels: { slack: { enabled: true, mode: 'http', botToken: 'xoxb-synthetic-local-proof', signingSecret, dmPolicy: 'open', allowFrom: ['*'], streaming: { mode: 'progress', progress: { style: 'compact', commentary: true, toolProgress: false } } } },
+      channels: { slack: { enabled: true, mode: 'http', botToken: 'xoxb-synthetic-local-proof', signingSecret, dmPolicy: 'open', allowFrom: ['*'], streaming: { mode: 'progress', progress: { style: 'compact', maxLineChars: 1000, commentary: true, toolProgress: false } } } },
     };
     await fs.mkdir(`${root}/workspace`);
     await fs.writeFile(`${root}/config.json`, JSON.stringify(config));
@@ -300,10 +317,16 @@ async function inside(role, sha) {
     // control remains diagnosable. This is evidence, never a completed verdict.
     emit({ proofRecord: true, result: 'captured-boundary', role, sha,
       captures: captures.filter((item) => /PROOF(?:REPLY|PROGRESS|FINAL)/.test(item.text))
-        .slice(0, 20).map((item) => ({ ...item, text: item.text.slice(0, 10_000) })) });
+        .slice(0, 20).map((item) => ({ ...item, text: item.text.slice(0, 10_000),
+          mrkdwnFields: item.mrkdwnFields.slice(0, 20).map((field) => ({ ...field, text: field.text.slice(0, 10_000) })) })) });
     const selected = [];
     for (const [marker, progress, channel] of [['PROOFREPLY', false, 'C0123456789'], ['PROOFPROGRESS', true, 'D0123456789'], ['PROOFFINAL', false, 'D0123456789']]) {
-      const matching = captures.filter((item) => item.text.includes(marker));
+      // A progress card's top-level text is an accessibility fallback. Assert
+      // actual mrkdwn text objects when blocks exist, and top-level mrkdwn only
+      // for ordinary text messages. Plain-text fields cannot prove parsing.
+      const matching = captures.flatMap((item) => item.mrkdwnFields
+        .filter((field) => field.text.includes(marker))
+        .map((field) => ({ method: item.method, channel: item.channel, ts: item.ts, ...field })));
       assert(matching.length > 0, `Missing ${marker}`);
       if (!progress) assert(matching.some((item) => item.method === 'chat.postMessage'), 'Final output was not posted');
       for (const capture of matching) {
