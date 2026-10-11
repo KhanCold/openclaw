@@ -228,6 +228,27 @@ async function inside(role, sha) {
     modelRequestCount += 1;
     if (modelRequests.length < 32) modelRequests.push(modelRouteDiagnostic(req));
     if (req.method === 'GET' && req.url === '/v1/models') return json(res, { object: 'list', data: [{ id: 'gpt-5.6-luna', object: 'model' }] });
+    // The frozen official OpenAI memory provider POSTs string batches to this
+    // endpoint. This external fixture returns deterministic vectors only; it
+    // does not intercept the real provider, memory runtime or Slack pipeline.
+    if (req.method === 'POST' && req.url === '/v1/embeddings') {
+      try {
+        const input = JSON.parse(await body(req));
+        assert.equal(input.model, 'text-embedding-3-small');
+        assert(Array.isArray(input.input) && input.input.length > 0 && input.input.length <= 64);
+        assert(input.input.every((text) => typeof text === 'string' && text.length <= 100_000));
+        assert(Object.keys(input).every((key) => ['model', 'input', 'dimensions'].includes(key)));
+        const dimensions = input.dimensions ?? 1536;
+        assert(Number.isInteger(dimensions) && dimensions > 0 && dimensions <= 1536);
+        return json(res, { object: 'list', model: input.model,
+          data: input.input.map((_, index) => ({ object: 'embedding', index,
+            embedding: Array.from({ length: dimensions }, (_, i) => i === 0 ? 1 : 0) })),
+          usage: { prompt_tokens: 1, total_tokens: 1 } });
+      } catch {
+        unexpected.push('embedding-request-schema');
+        res.writeHead(400); return res.end('unsupported embedding fixture request');
+      }
+    }
     if (req.method !== 'POST' || req.url !== '/v1/responses') { unexpected.push('model-route'); res.writeHead(404); return res.end(); }
     const input = JSON.parse(await body(req));
     modelStages.push(stage);
@@ -292,7 +313,7 @@ async function inside(role, sha) {
       }
       selected.push(...matching);
     }
-    emit({ proofRecord: true, result: 'completed', role, sha, verdict: role === 'base' ? 'baseline-defect-observed' : 'candidate-pass', toolRequested, toolCompleted, modelStages, captures: selected, claim: 'serialized Slack Web API payloads; not live Slack rendering or notifications' });
+    emit({ proofRecord: true, result: 'completed', role, sha, verdict: role === 'base' ? 'baseline-defect-observed' : 'candidate-pass', toolRequested, toolCompleted, modelStages, modelRequestCount, modelRequests, captures: selected, claim: 'serialized Slack Web API payloads; not live Slack rendering or notifications' });
   } catch (error) {
     // Do not print config, request headers, model inputs, or raw Gateway logs.
     emit({ proofRecord: true, result: 'failed', role, sha, error: String(error.message), stage, toolRequested, toolCompleted, modelRequestCount, modelRequests, captureMethods: captures.map((item) => item.method), unexpected, gatewayLogBytes: Buffer.concat(logs).length, gatewayLogSha256: hash(Buffer.concat(logs)) });
