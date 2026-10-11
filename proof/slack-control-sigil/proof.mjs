@@ -20,6 +20,17 @@ const SELF = fileURLToPath(import.meta.url);
 const FIXTURE = '[Hash](#installation) [User](@U0123ABCD) [Broadcast](!channel) [Here](!here) [Docs](https://example.invalid/docs) native <@U0456EFGH> <#C0456EFGH> <!here>.';
 const PNPM = '/workspace/.proof-tools/package/bin/pnpm.mjs';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const modelRouteDiagnostic = (req) => {
+  // Only named protocol endpoints may appear in logs. Never print query strings,
+  // arbitrary URL segments, request headers or request bodies.
+  const pathname = new URL(req.url, 'http://fixture.invalid').pathname;
+  const knownPaths = ['/v1/responses', '/v1/models', '/v1/embeddings',
+    '/v1/chat/completions', '/v1/responses/compact', '/responses', '/models',
+    '/embeddings', '/chat/completions', '/responses/compact', '/'];
+  return { method: ['GET', 'POST', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? req.method : 'OTHER',
+    path: knownPaths.includes(pathname) ? pathname : '<unrecognized-path>',
+    ...(knownPaths.includes(pathname) ? {} : { pathSha256: hash(pathname), pathLength: pathname.length }) };
+};
 // Escape runner command delimiters in the serialized bytes, including nested
 // diagnostic strings. JSON consumers still recover the original payload text.
 const emit = (value) => console.log(JSON.stringify(value)
@@ -188,8 +199,8 @@ async function inside(role, sha) {
   assert.equal(process.cwd(), '/workspace');
   assert.equal(sha, role === 'base' ? BASE : HEAD);
   const root = await fs.mkdtemp('/tmp/slack-state-');
-  const captures = [], unexpected = [], modelStages = [];
-  let stage = 'reply', toolRequested = false, toolCompleted = false, gateway;
+  const captures = [], unexpected = [], modelStages = [], modelRequests = [];
+  let stage = 'reply', toolRequested = false, toolCompleted = false, modelRequestCount = 0, gateway;
   const logs = [];
   const signingSecret = 'synthetic-local-slack-signing-fixture';
   const slack = await listen(async (req, res) => {
@@ -214,6 +225,8 @@ async function inside(role, sha) {
     }
   });
   const model = await listen(async (req, res) => {
+    modelRequestCount += 1;
+    if (modelRequests.length < 32) modelRequests.push(modelRouteDiagnostic(req));
     if (req.method === 'GET' && req.url === '/v1/models') return json(res, { object: 'list', data: [{ id: 'gpt-5.6-luna', object: 'model' }] });
     if (req.method !== 'POST' || req.url !== '/v1/responses') { unexpected.push('model-route'); res.writeHead(404); return res.end(); }
     const input = JSON.parse(await body(req));
@@ -282,7 +295,7 @@ async function inside(role, sha) {
     emit({ proofRecord: true, result: 'completed', role, sha, verdict: role === 'base' ? 'baseline-defect-observed' : 'candidate-pass', toolRequested, toolCompleted, modelStages, captures: selected, claim: 'serialized Slack Web API payloads; not live Slack rendering or notifications' });
   } catch (error) {
     // Do not print config, request headers, model inputs, or raw Gateway logs.
-    emit({ proofRecord: true, result: 'failed', role, sha, error: String(error.message), stage, toolRequested, toolCompleted, captureMethods: captures.map((item) => item.method), unexpected, gatewayLogBytes: Buffer.concat(logs).length, gatewayLogSha256: hash(Buffer.concat(logs)) });
+    emit({ proofRecord: true, result: 'failed', role, sha, error: String(error.message), stage, toolRequested, toolCompleted, modelRequestCount, modelRequests, captureMethods: captures.map((item) => item.method), unexpected, gatewayLogBytes: Buffer.concat(logs).length, gatewayLogSha256: hash(Buffer.concat(logs)) });
     throw error;
   } finally {
     if (gateway?.pid) { try { process.kill(-gateway.pid, 'SIGKILL'); } catch {} }
@@ -295,4 +308,10 @@ try {
   if (process.argv[2] === 'build') await build();
   else if (process.argv[2] === 'inside') await inside(process.argv[3], process.argv[4]);
   else { assert.equal(process.argv.length, 2); await host(); }
-} catch (error) { console.error(`Proof incomplete: ${error.message}`); process.exitCode = 1; }
+} catch (error) {
+  console.error(`Proof incomplete: ${error.message}`);
+  // Cleanup above has run. Flush diagnostics before ending a failed harness;
+  // lingering HTTP client handles must not turn its assertion into a timeout.
+  await Promise.all([process.stdout, process.stderr].map((stream) => new Promise((resolve) => stream.write('', resolve))));
+  process.exit(1);
+}
