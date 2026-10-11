@@ -20,31 +20,44 @@ const SELF = fileURLToPath(import.meta.url);
 const FIXTURE = '[Hash](#installation) [User](@U0123ABCD) [Broadcast](!channel) [Here](!here) [Docs](https://example.invalid/docs) native <@U0456EFGH> <#C0456EFGH> <!here>.';
 const PNPM = '/workspace/.proof-tools/package/bin/pnpm.mjs';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const emit = (value) => console.log(JSON.stringify(value));
+// Escape runner command delimiters in the serialized bytes, including nested
+// diagnostic strings. JSON consumers still recover the original payload text.
+const emit = (value) => console.log(JSON.stringify(value)
+  .replace(/##\[/g, '\\u0023\\u0023[')
+  .replace(/::/g, '\\u003a\\u003a'));
+const safeDiagnostic = (text) => text
+  .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  .replace(/(?:Bearer\s+|\bgh[pousr]_|\bgithub_pat_|\bxox[baprs]-)[A-Za-z0-9_.-]+/gi, '[REDACTED]')
+  .replace(/((?:authorization|api[_-]?key|access[_-]?token|password)\s*[=:]\s*)[^\s,;]+/gi, '$1[REDACTED]');
 
 async function run(command, args, options = {}) {
-  const { timeout = 120_000, ...spawnOptions } = options;
+  const { timeout = 120_000, label = command, quietFailure = false, ...spawnOptions } = options;
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...spawnOptions });
     const chunks = [];
+    const tails = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     let bytes = 0;
     const digest = createHash('sha256');
-    const capture = (data) => { digest.update(data); bytes += data.length; if (bytes < 8_000_000) chunks.push(data); };
-    child.stdout.on('data', capture);
-    child.stderr.on('data', capture);
+    const capture = (data, stream) => {
+      digest.update(data); bytes += data.length;
+      if (bytes < 8_000_000) chunks.push(data);
+      tails[stream] = Buffer.concat([tails[stream], data]).subarray(-6_000);
+    };
+    child.stdout.on('data', (data) => capture(data, 'stdout'));
+    child.stderr.on('data', (data) => capture(data, 'stderr'));
     const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
     child.on('error', (error) => { clearTimeout(timer); reject(error); });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       const output = Buffer.concat(chunks).toString();
       if (code !== 0) {
-        emit({ phase: command, exit: code, signal, logBytes: bytes, logSha256: digest.digest('hex') });
+        if (!quietFailure) emit({ proofRecord: true, result: 'command-failure', phase: label, exit: code, signal, logBytes: bytes, logSha256: digest.digest('hex'), diagnosticTail: safeDiagnostic(`stdout:\n${tails.stdout.toString()}\nstderr:\n${tails.stderr.toString()}`) });
         // Build/runtime has no external credentials. Only structured harness
         // records are forwarded; arbitrary target stdout cannot inject Actions commands.
         for (const line of output.split('\n')) {
           try { const record = JSON.parse(line); if (record.proofRecord === true) emit(record); } catch {}
         }
-        reject(new Error(`Command failed: ${command}; exit=${code}; signal=${signal}`));
+        reject(new Error(`Command failed: ${label}; exit=${code}; signal=${signal}`));
       } else resolve(output);
     });
   });
@@ -75,7 +88,7 @@ async function host() {
       const mounts = ['--mount', `type=bind,src=${source},dst=/workspace`, '--mount', `type=bind,src=${source}/.git,dst=/workspace/.git,readonly`, '--mount', `type=bind,src=${path.dirname(SELF)},dst=/proof,readonly`];
       const common = ['run', '--name', containerName, '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`, '--pids-limit=1024', '--memory=7g', '--cpus=4', '-w', '/workspace', ...mounts];
       emit({ role, phase: 'install-and-build', sha });
-      await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'build'], { timeout: 2_100_000 });
+      await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'build'], { timeout: 2_100_000, label: `${role}-container-build` });
       emit({ role, phase: 'gateway-runtime', sha });
       const output = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'inside', role, sha], { timeout: 300_000 });
       const lines = output.split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
@@ -98,7 +111,7 @@ async function host() {
   } finally {
     // A timeout can kill the Docker client before its container; remove that
     // exact named container before deleting the mounted source directory.
-    await run('docker', ['rm', '--force', containerName], { timeout: 30_000 }).catch(() => {});
+    await run('docker', ['rm', '--force', containerName], { timeout: 30_000, quietFailure: true }).catch(() => {});
     await fs.rm(temp, { recursive: true, force: true });
   }
 }
@@ -128,8 +141,8 @@ async function build() {
   await fs.symlink('../package/pnpm', '/workspace/.proof-tools/bin/pnpm');
   process.env.PATH = `/workspace/.proof-tools/bin:${process.env.PATH}`;
   process.env.CI = 'true';
-  await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000 });
-  await run('node', [PNPM, 'build'], { timeout: 1_200_000 });
+  await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000, label: 'pnpm-install' });
+  await run('node', [PNPM, 'build'], { timeout: 1_200_000, label: 'pnpm-build' });
 }
 
 async function listen(handler) {
