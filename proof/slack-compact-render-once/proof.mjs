@@ -131,6 +131,14 @@ async function host() {
       const readonly = common.map((arg) => arg === `type=bind,src=${source},dst=/workspace` ? `${arg},readonly` : arg);
       emit({ role, phase: 'install-and-build', sha });
       await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'build'], { timeout: 2_100_000, label: `${role}-container-build`, log: true });
+      const afterBuildDiff = await git(['diff', '--binary', 'HEAD'], source);
+      if (hash(afterBuildDiff) !== frozenDiff) {
+        emit({ proofRecord: true, result: 'source-integrity-drift', role, sha, phase: 'install-and-build',
+          expectedDiffSha256: frozenDiff, actualDiffSha256: hash(afterBuildDiff),
+          status: safeDiagnostic(await git(['status', '--short', '--untracked-files=no'], source)) });
+        emit({ proofRecord: true, result: 'source-diff-headers', role, sha, phase: 'install-and-build', headers: afterBuildDiff.split('\n').filter((line) => /^(diff --git |index |old mode |new mode |deleted file mode |new file mode )/.test(line)) });
+      }
+      // Preserve the existing final gate; diagnostics distinguish build from test changes.
       const testOutput = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'tests', role, sha], { timeout: 900_000, label: `${role}-owner-regressions`, log: true });
       const sdk = testOutput.split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }).find((record) => record.proofRecord === true && record.result === 'sdk-regressions-completed');
       assert(sdk && sdk.sha === sha && sdk.role === role, 'Missing complete SDK regression result');
@@ -219,6 +227,38 @@ async function host() {
   }
 }
 
+async function snapshotTracked(phase) {
+  assert.equal(process.platform, 'linux');
+  assert.equal(process.cwd(), '/workspace');
+  const raw = await run('git', ['ls-files', '--stage', '-z'], { label: `${phase}-tracked-index` });
+  const files = [];
+  for (const entry of raw.split('\0').filter(Boolean)) {
+    const match = /^(\d+) ([a-f0-9]+) (\d+)\t([\s\S]+)$/.exec(entry);
+    assert(match && match[3] === '0', 'Expected an unconflicted tracked index');
+    const [, indexMode, indexBlob, , relative] = match;
+    assert(!path.isAbsolute(relative) && !relative.split('/').includes('..'));
+    const absolute = path.join('/workspace', relative);
+    const parent = await fs.realpath(path.dirname(absolute));
+    assert(parent === '/workspace' || parent.startsWith('/workspace/'), 'Tracked parent escaped source');
+    const stat = await fs.lstat(absolute).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    let bytes = null, mode = null;
+    if (stat?.isSymbolicLink()) { bytes = Buffer.from(await fs.readlink(absolute)); mode = '120000'; }
+    else if (stat?.isFile()) { bytes = await fs.readFile(absolute); mode = stat.mode & 0o111 ? '100755' : '100644'; }
+    else assert(stat === null, 'Unsupported tracked source kind');
+    const blob = bytes === null ? null : createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    files.push({ path: relative, indexMode, indexBlob, mode, blob });
+  }
+  files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const stable = files.map(({ path: name, mode, blob }) => ({ path: name, mode, blob }));
+  const patch = await run('git', ['--no-pager', 'diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', 'HEAD'], { label: `${phase}-stable-diff` });
+  emit({ proofRecord: true, result: 'tracked-source-summary', phase, files: files.length,
+    contentSha256: hash(JSON.stringify(stable)), diffSha256: hash(patch), diffBytes: Buffer.byteLength(patch),
+    status: safeDiagnostic(await run('git', ['status', '--porcelain=v1', '--untracked-files=no'], { label: `${phase}-status` })),
+    diffHeaders: patch.split('\n').filter((line) => /^(diff --git |index |old mode |new mode |deleted file mode |new file mode )/.test(line)) });
+  for (let offset = 0; offset < files.length; offset += 100)
+    emit({ proofRecord: true, result: 'tracked-source-blobs', phase, offset, files: files.slice(offset, offset + 100) });
+}
+
 async function build() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
@@ -247,10 +287,13 @@ async function build() {
   emit({ proofRecord: true, result: 'package-manager-entry', command: 'corepack pnpm', implementation: 'strict compatibility shim to integrity-verified pnpm 12.9.0' });
   process.env.PATH = `/workspace/.proof-tools/bin:${process.env.PATH}`;
   process.env.CI = 'true';
+  await snapshotTracked('before-install');
   await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000, label: 'pnpm-install', log: true });
+  await snapshotTracked('after-install');
   // The repository's QA runtime profile builds real JS, plugins, assets and
   // freshness stamps. Declaration/package qualification is outside this proof.
   await run('node', [PNPM, 'build', 'qaRuntime'], { timeout: 1_200_000, label: 'pnpm-build-qaRuntime', log: true });
+  await snapshotTracked('after-build');
 }
 
 async function rebuildPristine() {
@@ -380,6 +423,7 @@ async function ownerTests(role, sha) {
     assert.equal(report.success, true, 'Candidate owner regressions failed');
     assert.deepEqual(failed, []);
   }
+  await snapshotTracked('after-tests');
   emit({ proofRecord: true, result: 'sdk-regressions-completed', role, sha, wallMs: Date.now() - started, failed, tests: report.numTotalTests, passed: report.numPassedTests, failedCount: report.numFailedTests, pending: report.numPendingTests, todo: report.numTodoTests, records });
 }
 
