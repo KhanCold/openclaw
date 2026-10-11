@@ -100,8 +100,8 @@ async function host() {
   const records = [], sdkRecords = [], qualified = [], requiredFailures = [];
   const gib = 1024 ** 3;
   const hostMemoryBytes = os.totalmem();
-  const checkMemoryBytes = Math.floor(Math.min(7 * gib, hostMemoryBytes - 3 * gib));
-  assert(checkMemoryBytes >= 7 * gib, 'Runner cannot provide the required check budget while reserving host memory');
+  const checkMemoryBytes = Math.floor(Math.min(11 * gib, hostMemoryBytes - 3 * gib));
+  assert(checkMemoryBytes >= 11 * gib, 'Runner cannot provide the required check budget while reserving host memory');
   emit({ proofRecord: true, result: 'runner-resource-budget', hostMemoryBytes, checkMemoryBytes,
     hostReserveBytes: hostMemoryBytes - checkMemoryBytes, concurrentContainers: 1 });
   const stableDiffArgs = ['diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--diff-algorithm=myers', '--no-indent-heuristic', '--unified=3', '--inter-hunk-context=0', '--src-prefix=a/', '--dst-prefix=b/', 'HEAD'];
@@ -775,24 +775,52 @@ async function inside(role, sha, progressStyle) {
       try { const response = await signed({ type: 'url_verification', challenge: 'proof-ready' }); return response.ok && (await response.text()).includes('proof-ready'); } catch { return false; }
     }, 'signed Slack endpoint readiness', 150_000);
     if (compact) {
-      socket = new WebSocket('ws://127.0.0.1:19241');
       const responses = new Map(); let rpcSequence = 0;
-      socket.addEventListener('message', ({ data }) => {
-        const frame = JSON.parse(String(data));
-        if (frame.type === 'res') responses.set(frame.id, frame);
-        else if (frame.type === 'event') frames.push(frame);
-      });
-      socket.addEventListener('error', () => unexpected.push('gateway-ws-error'));
-      await until(() => frames.some((frame) => frame.event === 'connect.challenge'), 'Gateway challenge');
-      call = async (method, params) => {
+      const connectParams = { minProtocol: 4, maxProtocol: 4, client: { id: 'cli', version: 'compact-proof', platform: 'linux', mode: 'cli' }, role: 'operator', scopes: ['operator.admin', 'operator.read', 'operator.write'], auth: { token: 'synthetic-gateway-proof-token' }, caps: [] };
+      const openGatewaySocket = async (deadline) => {
+        let challenged = false;
+        socket = new WebSocket('ws://127.0.0.1:19241');
+        socket.addEventListener('message', ({ data }) => {
+          const frame = JSON.parse(String(data));
+          if (frame.type === 'res') responses.set(frame.id, frame);
+          else if (frame.type === 'event') {
+            frames.push(frame);
+            if (frame.event === 'connect.challenge') challenged = true;
+          }
+        });
+        socket.addEventListener('error', () => unexpected.push('gateway-ws-error'));
+        await until(() => challenged, 'Gateway challenge', Math.max(1, deadline - Date.now()));
+      };
+      const request = async (method, params, timeout) => {
         const id = `proof-${++rpcSequence}`;
         socket.send(JSON.stringify({ type: 'req', id, method, params }));
-        await until(() => responses.has(id), `Gateway ${method}`);
-        const response = responses.get(id); responses.delete(id);
+        try {
+          await until(() => responses.has(id), `Gateway ${method}`, timeout);
+          return responses.get(id);
+        } finally {
+          responses.delete(id);
+        }
+      };
+      call = async (method, params) => {
+        const response = await request(method, params, 45_000);
         assert(response.ok, `Gateway ${method} rejected: ${response.error?.message}`);
         return response.payload;
       };
-      await call('connect', { minProtocol: 4, maxProtocol: 4, client: { id: 'cli', version: 'compact-proof', platform: 'linux', mode: 'cli' }, role: 'operator', scopes: ['operator.admin', 'operator.read', 'operator.write'], auth: { token: 'synthetic-gateway-proof-token' }, caps: [] });
+      const connectDeadline = Date.now() + 30_000;
+      let connectAttempt = 0;
+      while (true) {
+        await openGatewaySocket(connectDeadline);
+        const response = await request('connect', connectParams, Math.max(1, connectDeadline - Date.now()));
+        if (response.ok) break;
+        const message = response.error?.message;
+        if (message !== 'gateway starting; retry shortly') {
+          throw new Error(`Gateway connect rejected: ${message}`);
+        }
+        socket.close(); socket = null;
+        const remaining = connectDeadline - Date.now();
+        if (remaining <= 0) throw new Error('Gateway connect remained in startup retry window for 30000ms');
+        await delay(Math.min(250 * 2 ** Math.min(connectAttempt++, 2), 1000, remaining));
+      }
     }
     await run('node', [PNPM, 'openclaw', 'agent', '--agent', 'main', '--session-id', 'slack-proof-reply', '--message', 'Return the fixture reply.', '--deliver', '--reply-channel', 'slack', '--reply-to', 'channel:C0123456789', '--json'], { env, timeout: 90_000 });
     await until(() => observed('PROOFREPLY'), 'Gateway reply HTTP delivery');
