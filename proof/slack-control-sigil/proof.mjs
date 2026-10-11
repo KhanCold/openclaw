@@ -142,7 +142,9 @@ async function build() {
   process.env.PATH = `/workspace/.proof-tools/bin:${process.env.PATH}`;
   process.env.CI = 'true';
   await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000, label: 'pnpm-install' });
-  await run('node', [PNPM, 'build'], { timeout: 1_200_000, label: 'pnpm-build' });
+  // The repository's QA runtime profile builds real JS, plugins, assets and
+  // freshness stamps. Declaration/package qualification is outside this proof.
+  await run('node', [PNPM, 'build', 'qaRuntime'], { timeout: 1_200_000, label: 'pnpm-build-qaRuntime' });
 }
 
 async function listen(handler) {
