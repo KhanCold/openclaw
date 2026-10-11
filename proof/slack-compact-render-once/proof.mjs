@@ -100,7 +100,7 @@ async function host() {
   const records = [], sdkRecords = [];
   const containerName = `slack-boundary-${process.pid}`;
   try {
-    const manifest = { workflow: process.env.GITHUB_SHA, harnessSha256: hash(await fs.readFile(SELF)), base: BASE, head: HEAD, image: IMAGE };
+    const manifest = { workflow: process.env.GITHUB_SHA, harnessSha256: hash(await fs.readFile(SELF)), integrityReporterSha256: hash(await fs.readFile(path.join(path.dirname(SELF), 'integrity-reporter.mjs'))), base: BASE, head: HEAD, image: IMAGE };
     emit(manifest);
     await run('docker', ['pull', IMAGE], { timeout: 300_000 });
     for (const [role, sha, repository] of [['base', BASE, 'openclaw/openclaw'], ['head', HEAD, 'KhanCold/openclaw']]) {
@@ -124,7 +124,7 @@ async function host() {
         }
       }
       const overlayHashes = Object.fromEntries(await Promise.all(testFiles.map(async (file) => [file, hash(await fs.readFile(path.join(source, file)))])));
-      const frozenDiff = hash(await git(['diff', '--binary', 'HEAD'], source));
+      let frozenDiff = hash(await git(['diff', '--binary', 'HEAD'], source));
       emit({ role, sha, testSource: HEAD, overlayHashes, productSource: sha });
       const mounts = ['--mount', `type=bind,src=${source},dst=/workspace`, '--mount', `type=bind,src=${source}/.git,dst=/workspace/.git,readonly`, '--mount', `type=bind,src=${path.dirname(SELF)},dst=/proof,readonly`];
       const common = ['run', '--name', containerName, '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`, '--pids-limit=1024', '--memory=7g', '--cpus=4', '-w', '/workspace', ...mounts];
@@ -135,6 +135,41 @@ async function host() {
       const sdk = testOutput.split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }).find((record) => record.proofRecord === true && record.result === 'sdk-regressions-completed');
       assert(sdk && sdk.sha === sha && sdk.role === role, 'Missing complete SDK regression result');
       emit(sdk); sdkRecords.push(sdk);
+      // The regression overlay is a separate source identity. Restore only the
+      // four verified task-owned test paths before building pristine Gateway.
+      assert.equal(hash(await git(['diff', '--binary', 'HEAD'], source)), frozenDiff, 'Tests changed tracked source');
+      for (const file of testFiles) assert.equal(hash(await fs.readFile(path.join(source, file))), overlayHashes[file]);
+      emit({ proofRecord: true, result: 'owner-tree-completed', role, productSource: sha, testSource: HEAD, overlayHashes });
+      const runtimeHashes = { ...overlayHashes };
+      if (role === 'base') {
+        for (const file of testFiles) {
+          if (file === 'extensions/slack/src/draft-stream.http.test.ts') {
+            assert.equal((await git(['ls-tree', '--name-only', BASE, '--', file], source)).trim(), '');
+            await fs.unlink(path.join(source, file));
+            runtimeHashes[file] = null;
+          } else {
+            const original = await git(['show', `${BASE}:${file}`], source);
+            await fs.writeFile(path.join(source, file), original);
+            runtimeHashes[file] = hash(original);
+          }
+        }
+        assert.equal((await git(['diff', '--binary', 'HEAD'], source)).trim(), '', 'Baseline restoration not pristine');
+        await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'rebuild'], { timeout: 1_300_000, label: 'base-pristine-qaRuntime-rebuild', log: true });
+      }
+      assert.equal((await git(['diff', '--binary', 'HEAD'], source)).trim(), '', 'Gateway requires pristine tracked source');
+      frozenDiff = hash(await git(['diff', '--binary', 'HEAD'], source));
+      const stamps = {};
+      for (const name of ['.buildstamp', '.runtime-postbuildstamp']) {
+        const file = path.join(source, 'dist', name);
+        assert((await fs.lstat(file)).isFile(), 'Expected a regular build stamp');
+        const bytes = await fs.readFile(file);
+        const stamp = JSON.parse(bytes);
+        assert.equal(stamp.head, sha, 'Build stamp has wrong source head');
+        assert.equal(stamp.inputsClean, true, 'Build stamp contains dirty watched inputs');
+        stamps[name] = { sha256: hash(bytes), head: stamp.head, inputsClean: stamp.inputsClean };
+      }
+      emit({ proofRecord: true, result: 'pristine-runtime-tree', role, sha, runtimeHashes, stamps,
+        entry: 'pnpm openclaw gateway run; official freshness checks retained' });
       for (const progressStyle of SCENARIOS) {
         emit({ role, phase: 'gateway-runtime', sha, progressStyle });
         const output = await run('docker', [...readonly, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=1024m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'inside', role, sha, progressStyle], { timeout: 300_000, label: `${role}-${progressStyle}-runtime`, log: true });
@@ -145,7 +180,10 @@ async function host() {
         assert.equal(result.sha, sha);
         assert.equal(result.progressStyle, progressStyle);
         assert.equal(hash(await git(['diff', '--binary', 'HEAD'], source)), frozenDiff, 'Build/runtime changed tracked source');
-        for (const file of testFiles) assert.equal(hash(await fs.readFile(path.join(source, file))), overlayHashes[file], 'Regression source changed');
+        for (const [file, expected] of Object.entries(runtimeHashes)) {
+          const bytes = await fs.readFile(path.join(source, file)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+          assert.equal(bytes === null ? null : hash(bytes), expected, 'Pristine runtime source changed');
+        }
         assert.equal((await git(['rev-parse', 'HEAD'], source)).trim(), sha);
         emit(result);
         records.push(result);
@@ -204,12 +242,23 @@ async function build() {
   await fs.chmod('/workspace/.proof-tools/package/pnpm-native', 0o755);
   await fs.mkdir('/workspace/.proof-tools/bin');
   await fs.symlink('../package/pnpm', '/workspace/.proof-tools/bin/pnpm');
+  // Strict offline corepack-pnpm compatibility entry; not a Corepack install.
+  await fs.writeFile('/workspace/.proof-tools/bin/corepack', "#!/bin/sh\n[ \"$1\" = \"pnpm\" ] || exit 64\nshift\nexec /usr/local/bin/node /workspace/.proof-tools/package/bin/pnpm.mjs \"$@\"\n", { mode: 0o755 });
+  emit({ proofRecord: true, result: 'package-manager-entry', command: 'corepack pnpm', implementation: 'strict compatibility shim to integrity-verified pnpm 12.9.0' });
   process.env.PATH = `/workspace/.proof-tools/bin:${process.env.PATH}`;
   process.env.CI = 'true';
   await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000, label: 'pnpm-install', log: true });
   // The repository's QA runtime profile builds real JS, plugins, assets and
   // freshness stamps. Declaration/package qualification is outside this proof.
   await run('node', [PNPM, 'build', 'qaRuntime'], { timeout: 1_200_000, label: 'pnpm-build-qaRuntime', log: true });
+}
+
+async function rebuildPristine() {
+  assert.equal(process.platform, 'linux'); assert.equal(process.cwd(), '/workspace');
+  const home = await fs.mkdtemp('/tmp/pristine-build-home-');
+  await run('node', [PNPM, 'build', 'qaRuntime'], { env: { ...process.env, HOME: home,
+    CI: 'true', PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` }, timeout: 1_200_000,
+    label: 'pristine-qaRuntime-build', log: true });
 }
 
 async function changedChecks() {
@@ -236,7 +285,9 @@ async function ownerTests(role, sha) {
   assert.equal(sha, role === 'base' ? BASE : HEAD);
   const root = await fs.mkdtemp('/tmp/owner-proof-');
   const outputFile = `${root}/vitest.json`;
-  const env = { ...process.env, HOME: root, CI: 'true', OPENCLAW_DELIVERY_PROOF: '1', OPENCLAW_DELIVERY_PROOF_SHA: sha, OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
+  const integrityFile = `${root}/integrity.json`;
+  const expectedFiles = ['delivery-trace.test.ts', 'draft-stream.http.test.ts', 'draft-stream.test.ts', 'format.test.ts', 'monitor/message-handler/dispatch.preview-fallback.test.ts'].map((file) => `/workspace/extensions/slack/src/${file}`).sort();
+  const env = { ...process.env, HOME: root, CI: 'true', OPENCLAW_PROOF_INTEGRITY_REPORT: integrityFile, OPENCLAW_DELIVERY_PROOF: '1', OPENCLAW_DELIVERY_PROOF_SHA: sha, OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
   const started = Date.now();
   const output = await run('node', ['scripts/run-vitest.mjs',
     'extensions/slack/src/delivery-trace.test.ts',
@@ -244,10 +295,44 @@ async function ownerTests(role, sha) {
     'extensions/slack/src/draft-stream.test.ts',
     'extensions/slack/src/format.test.ts',
     'extensions/slack/src/monitor/message-handler/dispatch.preview-fallback.test.ts',
-    '--reporter=json', `--outputFile=${outputFile}`],
+    '--reporter=default', '--reporter=json', '--reporter=/proof/integrity-reporter.mjs', `--outputFile=${outputFile}`],
     { env, timeout: 600_000, allowedExitCodes: role === 'base' ? [1] : [0], label: `${role}-owner-tests`, log: true });
   const report = JSON.parse(await fs.readFile(outputFile, 'utf8'));
+  const integrity = JSON.parse(await fs.readFile(integrityFile, 'utf8'));
+  // JSON reporter omits unhandled errors; the public reporter hook supplies
+  // those separately. Never let the five expected failures hide load errors.
+  emit({ proofRecord: true, result: 'owner-machine-reports', role, sha, report, integrity });
+  assert.equal(integrity.timedOut, false);
+  assert.equal(integrity.reason, role === 'base' ? 'failed' : 'passed');
+  assert.deepEqual(integrity.unhandledErrors, []);
+  assert.deepEqual(integrity.queued.toSorted(), expectedFiles);
+  assert.deepEqual(integrity.ended.toSorted(), expectedFiles);
+  assert.deepEqual(integrity.modules.map((module) => module.path).sort(), expectedFiles);
+  assert.deepEqual(report.testResults.map((suite) => suite.name).sort(), expectedFiles);
+  const allSuites = integrity.modules.flatMap((module) => [module, ...module.suites]);
+  const allTests = integrity.modules.flatMap((module) => module.tests);
+  for (const suite of allSuites) {
+    assert(['passed', 'failed'].includes(suite.state), 'Suite did not complete');
+    assert.deepEqual(suite.errors, [], 'Suite load/runtime error');
+  }
+  assert(allTests.every((test) => ['passed', 'failed'].includes(test.state)), 'Test did not complete');
+  assert.equal(report.numTotalTestSuites, allSuites.length);
+  assert.equal(report.numFailedTestSuites, allSuites.filter((suite) => suite.state === 'failed').length);
+  assert.equal(report.numPassedTestSuites, allSuites.filter((suite) => suite.state === 'passed').length);
+  assert.equal(report.numPendingTestSuites, 0);
+  assert.equal(report.numTotalTests, allTests.length);
+  assert.equal(report.numFailedTests, allTests.filter((test) => test.state === 'failed').length);
+  assert.equal(report.numPassedTests, allTests.filter((test) => test.state === 'passed').length);
+  assert.equal(report.numPendingTests, 0);
+  assert.equal(report.numTodoTests, 0);
   const cases = report.testResults.flatMap((suite) => suite.assertionResults || []);
+  assert.equal(cases.length, report.numTotalTests);
+  assert.equal(cases.filter((item) => item.status === 'failed').length, report.numFailedTests);
+  assert.equal(cases.filter((item) => item.status === 'passed').length, report.numPassedTests);
+  for (const suite of report.testResults) {
+    assert.equal(suite.message, '', 'JSON report recorded a suite error');
+    assert.equal(suite.status, suite.assertionResults.some((item) => item.status === 'failed') ? 'failed' : 'passed');
+  }
   const failed = cases.filter((item) => item.status === 'failed').map((item) => item.fullName);
   const expectedFailures = [
     'keeps native mention policy through serialized compact posts and edits',
@@ -295,7 +380,7 @@ async function ownerTests(role, sha) {
     assert.equal(report.success, true, 'Candidate owner regressions failed');
     assert.deepEqual(failed, []);
   }
-  emit({ proofRecord: true, result: 'sdk-regressions-completed', role, sha, wallMs: Date.now() - started, failed, tests: report.numTotalTests, records });
+  emit({ proofRecord: true, result: 'sdk-regressions-completed', role, sha, wallMs: Date.now() - started, failed, tests: report.numTotalTests, passed: report.numPassedTests, failedCount: report.numFailedTests, pending: report.numPendingTests, todo: report.numTodoTests, records });
 }
 
 async function listen(handler) {
@@ -610,6 +695,7 @@ async function inside(role, sha, progressStyle) {
 
 try {
   if (process.argv[2] === 'build') await build();
+  else if (process.argv[2] === 'rebuild') await rebuildPristine();
   else if (process.argv[2] === 'checks') {
     await changedChecks();
     await flushOutput();
@@ -627,7 +713,7 @@ try {
   }
   else { assert.equal(process.argv.length, 2); await host(); }
 } catch (error) {
-  console.error(`Proof incomplete: ${error.message}`);
+  emit({ proofRecord: true, result: 'harness-incomplete', error: safeDiagnostic(String(error?.message ?? error)) });
   // Cleanup above has run. Flush diagnostics before ending a failed harness;
   // lingering HTTP client handles must not turn its assertion into a timeout.
   await flushOutput();
