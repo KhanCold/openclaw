@@ -119,22 +119,24 @@ async function host() {
       const common = ['run', '--name', containerName, '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`, '--pids-limit=1024', '--memory=7g', '--cpus=4', '-w', '/workspace', ...mounts];
       emit({ role, phase: 'install-and-build', sha });
       await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'build'], { timeout: 2_100_000, label: `${role}-container-build` });
-      emit({ role, phase: 'gateway-runtime', sha });
-      const output = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'inside', role, sha], { timeout: 300_000 });
-      const lines = output.split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
-      const result = lines.find((record) => record.proofRecord === true && record.result === 'completed');
-      assert(result, 'No complete runtime proof record');
-      assert.equal(result.role, role);
-      assert.equal(result.sha, sha);
-      assert.equal((await git(['diff', '--name-only', 'HEAD'], source)).trim(), '', 'Build changed tracked source');
-      assert.equal((await git(['rev-parse', 'HEAD'], source)).trim(), sha);
-      emit(result);
-      records.push(result);
+      for (const progressStyle of ['compact', 'card']) {
+        emit({ role, phase: 'gateway-runtime', sha, progressStyle });
+        const output = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'inside', role, sha, progressStyle], { timeout: 300_000, label: `${role}-${progressStyle}-runtime` });
+        const lines = output.split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+        const result = lines.find((record) => record.proofRecord === true && record.result === 'completed');
+        assert(result, 'No complete runtime proof record');
+        assert.equal(result.role, role);
+        assert.equal(result.sha, sha);
+        assert.equal(result.progressStyle, progressStyle);
+        assert.equal((await git(['diff', '--name-only', 'HEAD'], source)).trim(), '', 'Build changed tracked source');
+        assert.equal((await git(['rev-parse', 'HEAD'], source)).trim(), sha);
+        emit(result);
+        records.push(result);
+      }
       await fs.rm(source, { recursive: true, force: true });
     }
-    assert.equal(records.length, 2);
-    assert.equal(records[0].verdict, 'baseline-defect-observed');
-    assert.equal(records[1].verdict, 'candidate-pass');
+    assert.equal(records.length, 4);
+    for (const record of records) assert.equal(record.verdict, record.role === 'base' ? 'baseline-defect-observed' : 'candidate-pass');
     if (process.env.GITHUB_STEP_SUMMARY) {
       await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `## Slack serialized payload boundary proof\n\nFrozen baseline defect observed and candidate passed. External model and Slack HTTP fixtures only; no live Slack UI or notification claim.\n\n\`\`\`json\n${JSON.stringify({ manifest, records }, null, 2)}\n\`\`\`\n`);
     }
@@ -213,7 +215,8 @@ function sendResponse(res, text, phase, call) {
   res.end('data: [DONE]\n\n');
 }
 
-async function inside(role, sha) {
+async function inside(role, sha, progressStyle) {
+  assert(['compact', 'card'].includes(progressStyle));
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
   assert.equal(sha, role === 'base' ? BASE : HEAD);
@@ -288,7 +291,7 @@ async function inside(role, sha) {
       models: { mode: 'merge', providers: { openai: { baseUrl: `http://127.0.0.1:${model.port}/v1`, apiKey: { source: 'env', provider: 'default', id: 'OPENAI_API_KEY' }, api: 'openai-responses', agentRuntime: { id: 'openclaw' }, request: { allowPrivateNetwork: true }, models: [{ id: 'gpt-5.6-luna', name: 'gpt-5.6-luna', api: 'openai-responses', agentRuntime: { id: 'openclaw' }, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, contextTokens: 96000, maxTokens: 4096 }] } } },
       agents: { defaults: { workspace: `${root}/workspace`, model: { primary: 'openai/gpt-5.6-luna' }, models: { 'openai/gpt-5.6-luna': { agentRuntime: { id: 'openclaw' }, params: { transport: 'sse', openaiWsWarmup: false } } } } },
       plugins: { enabled: true, allow: ['openai', 'slack'], entries: { slack: { enabled: true }, openai: { enabled: true } } },
-      channels: { slack: { enabled: true, mode: 'http', botToken: 'xoxb-synthetic-local-proof', signingSecret, dmPolicy: 'open', allowFrom: ['*'], streaming: { mode: 'progress', progress: { style: 'compact', maxLineChars: 1000, commentary: true, toolProgress: false } } } },
+      channels: { slack: { enabled: true, mode: 'http', botToken: 'xoxb-synthetic-local-proof', signingSecret, dmPolicy: 'open', allowFrom: ['*'], streaming: { mode: 'progress', progress: { style: progressStyle, maxLineChars: 1000, commentary: true, toolProgress: false } } } },
     };
     await fs.mkdir(`${root}/workspace`);
     await fs.writeFile(`${root}/config.json`, JSON.stringify(config));
@@ -315,7 +318,7 @@ async function inside(role, sha) {
     assert.deepEqual(unexpected, [], 'External fixture contract incomplete');
     // Persist bounded synthetic Slack text before assertions, so a failed
     // control remains diagnosable. This is evidence, never a completed verdict.
-    emit({ proofRecord: true, result: 'captured-boundary', role, sha,
+    emit({ proofRecord: true, result: 'captured-boundary', role, sha, progressStyle,
       captures: captures.filter((item) => /PROOF(?:REPLY|PROGRESS|FINAL)/.test(item.text))
         .slice(0, 20).map((item) => ({ ...item, text: item.text.slice(0, 10_000),
           mrkdwnFields: item.mrkdwnFields.slice(0, 20).map((field) => ({ ...field, text: field.text.slice(0, 10_000) })) })) });
@@ -333,7 +336,7 @@ async function inside(role, sha) {
         assert.equal(capture.channel, channel);
         assert(capture.text.includes('<https://example.invalid/docs|Docs>'), `Ordinary URL control failed: ${marker}`);
         for (const mention of ['<@U0456EFGH>', '<#C0456EFGH>', '<!here>']) {
-          const expected = progress ? mention.replace('<', '&lt;').replace('>', '&gt;') : mention;
+          const expected = progress && progressStyle === 'card' ? mention.replace('<', '&lt;').replace('>', '&gt;') : mention;
           assert(capture.text.includes(expected), `Native mention control failed: ${marker}`);
         }
         for (const [label, target] of [['Hash', '#installation'], ['User', '@U0123ABCD'], ['Broadcast', '!channel'], ['Here', '!here']]) {
@@ -343,10 +346,10 @@ async function inside(role, sha) {
       }
       selected.push(...matching);
     }
-    emit({ proofRecord: true, result: 'completed', role, sha, verdict: role === 'base' ? 'baseline-defect-observed' : 'candidate-pass', toolRequested, toolCompleted, modelStages, modelRequestCount, modelRequests, captures: selected, claim: 'serialized Slack Web API payloads; not live Slack rendering or notifications' });
+    emit({ proofRecord: true, result: 'completed', role, sha, progressStyle, verdict: role === 'base' ? 'baseline-defect-observed' : 'candidate-pass', toolRequested, toolCompleted, modelStages, modelRequestCount, modelRequests, captures: selected, claim: 'serialized Slack Web API payloads; not live Slack rendering or notifications' });
   } catch (error) {
     // Do not print config, request headers, model inputs, or raw Gateway logs.
-    emit({ proofRecord: true, result: 'failed', role, sha, error: String(error.message), stage, toolRequested, toolCompleted, modelRequestCount, modelRequests, captureMethods: captures.map((item) => item.method), unexpected, gatewayLogBytes: Buffer.concat(logs).length, gatewayLogSha256: hash(Buffer.concat(logs)) });
+    emit({ proofRecord: true, result: 'failed', role, sha, progressStyle, error: String(error.message), stage, toolRequested, toolCompleted, modelRequestCount, modelRequests, captureMethods: captures.map((item) => item.method), unexpected, gatewayLogBytes: Buffer.concat(logs).length, gatewayLogSha256: hash(Buffer.concat(logs)) });
     throw error;
   } finally {
     if (gateway?.pid) { try { process.kill(-gateway.pid, 'SIGKILL'); } catch {} }
@@ -358,7 +361,7 @@ async function inside(role, sha) {
 try {
   if (process.argv[2] === 'build') await build();
   else if (process.argv[2] === 'inside') {
-    await inside(process.argv[3], process.argv[4]);
+    await inside(process.argv[3], process.argv[4], process.argv[5]);
     await flushOutput();
     process.exit(0);
   }
