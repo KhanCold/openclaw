@@ -40,6 +40,8 @@ const safeDiagnostic = (text) => text
   .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
   .replace(/(?:Bearer\s+|\bgh[pousr]_|\bgithub_pat_|\bxox[baprs]-)[A-Za-z0-9_.-]+/gi, '[REDACTED]')
   .replace(/((?:authorization|api[_-]?key|access[_-]?token|password)\s*[=:]\s*)[^\s,;]+/gi, '$1[REDACTED]');
+const flushOutput = () => Promise.all([process.stdout, process.stderr]
+  .map((stream) => new Promise((resolve) => stream.write('', resolve))));
 
 async function run(command, args, options = {}) {
   const { timeout = 120_000, label = command, quietFailure = false, ...spawnOptions } = options;
@@ -294,6 +296,11 @@ async function inside(role, sha) {
     await until(() => captures.some((item) => item.text.includes('PROOFFINAL')), 'inbound final HTTP delivery', 90_000);
     assert(toolRequested && toolCompleted, 'Real tool round trip missing');
     assert.deepEqual(unexpected, [], 'External fixture contract incomplete');
+    // Persist bounded synthetic Slack text before assertions, so a failed
+    // control remains diagnosable. This is evidence, never a completed verdict.
+    emit({ proofRecord: true, result: 'captured-boundary', role, sha,
+      captures: captures.filter((item) => /PROOF(?:REPLY|PROGRESS|FINAL)/.test(item.text))
+        .slice(0, 20).map((item) => ({ ...item, text: item.text.slice(0, 10_000) })) });
     const selected = [];
     for (const [marker, progress, channel] of [['PROOFREPLY', false, 'C0123456789'], ['PROOFPROGRESS', true, 'D0123456789'], ['PROOFFINAL', false, 'D0123456789']]) {
       const matching = captures.filter((item) => item.text.includes(marker));
@@ -301,10 +308,10 @@ async function inside(role, sha) {
       if (!progress) assert(matching.some((item) => item.method === 'chat.postMessage'), 'Final output was not posted');
       for (const capture of matching) {
         assert.equal(capture.channel, channel);
-        assert(capture.text.includes('<https://example.invalid/docs|Docs>'), 'Ordinary URL control failed');
+        assert(capture.text.includes('<https://example.invalid/docs|Docs>'), `Ordinary URL control failed: ${marker}`);
         for (const mention of ['<@U0456EFGH>', '<#C0456EFGH>', '<!here>']) {
           const expected = progress ? mention.replace('<', '&lt;').replace('>', '&gt;') : mention;
-          assert(capture.text.includes(expected), 'Native mention control failed');
+          assert(capture.text.includes(expected), `Native mention control failed: ${marker}`);
         }
         for (const [label, target] of [['Hash', '#installation'], ['User', '@U0123ABCD'], ['Broadcast', '!channel'], ['Here', '!here']]) {
           if (role === 'base') assert(capture.text.includes(`<${target}|${label}>`), 'Baseline did not exhibit the intended defect');
@@ -327,12 +334,16 @@ async function inside(role, sha) {
 
 try {
   if (process.argv[2] === 'build') await build();
-  else if (process.argv[2] === 'inside') await inside(process.argv[3], process.argv[4]);
+  else if (process.argv[2] === 'inside') {
+    await inside(process.argv[3], process.argv[4]);
+    await flushOutput();
+    process.exit(0);
+  }
   else { assert.equal(process.argv.length, 2); await host(); }
 } catch (error) {
   console.error(`Proof incomplete: ${error.message}`);
   // Cleanup above has run. Flush diagnostics before ending a failed harness;
   // lingering HTTP client handles must not turn its assertion into a timeout.
-  await Promise.all([process.stdout, process.stderr].map((stream) => new Promise((resolve) => stream.write('', resolve))));
+  await flushOutput();
   process.exit(1);
 }
