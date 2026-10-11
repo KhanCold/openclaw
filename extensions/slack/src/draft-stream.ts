@@ -62,7 +62,6 @@ export function createSlackDraftStream(params: {
   const maxChars = Math.min(params.maxChars ?? SLACK_TEXT_LIMIT, SLACK_TEXT_LIMIT);
   const throttleMs = Math.max(250, params.throttleMs ?? DEFAULT_THROTTLE_MS);
   const send = params.send ?? sendMessageSlack;
-  const edit = params.edit ?? editSlackMessage;
   const remove = params.remove ?? deleteSlackMessage;
 
   let streamMessage: SlackDraftMessage | undefined;
@@ -81,7 +80,7 @@ export function createSlackDraftStream(params: {
     lastSentKey = "";
   };
   const editPreview = (message: SlackDraftMessage, update: SlackVisibleDraftUpdate) =>
-    (update.textIsSlackMrkdwn ? editSlackRenderedMessage : edit)(
+    (params.edit ?? (update.textIsSlackMrkdwn ? editSlackRenderedMessage : editSlackMessage))(
       message.channelId,
       message.messageId,
       update.text,
