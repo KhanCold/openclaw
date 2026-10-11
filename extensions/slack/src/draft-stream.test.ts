@@ -583,43 +583,49 @@ describe("createSlackDraftStream", () => {
     expect(stream.messageId()).toBe("111.222");
   });
 
-  it("continues observing conversation boundaries while the final preview edit is in flight", async () => {
-    const accountId = "interrupted-final-edit";
-    let finishFinalEdit: (() => void) | undefined;
-    const finalEdit = new Promise<void>((resolve) => {
-      finishFinalEdit = resolve;
-    });
-    const { stream, edit, remove } = createDraftStreamHarness({
-      accountId,
-      threadTs: "100.000",
-    });
+  it.each([false, true])(
+    "preserves the supplied editor during interrupted finalization (progress=%s)",
+    async (progress) => {
+      const accountId = "interrupted-final-edit";
+      let finishFinalEdit: (() => void) | undefined;
+      const finalEdit = new Promise<void>((resolve) => {
+        finishFinalEdit = resolve;
+      });
+      const { stream, edit, remove } = createDraftStreamHarness({
+        accountId,
+        threadTs: "100.000",
+      });
 
-    stream.update("_checking the last detail_");
-    await stream.flush();
-    await stream.seal();
-    const finalizing = stream.finalizeMessage("111.222", async () => {
-      await finalEdit;
-    });
+      stream.update({
+        text: "_checking the last detail_",
+        ...(progress ? { escapeMentions: true } : {}),
+      });
+      await stream.flush();
+      await stream.seal();
+      const finalizing = stream.finalizeMessage("111.222", async () => {
+        await finalEdit;
+      });
 
-    noteSlackDraftConversationMessage({
-      accountId,
-      channelId: "C123",
-      threadTs: "100.000",
-      messageTs: "111.333",
-      userId: "U_OWNER",
-    });
-    finishFinalEdit?.();
+      noteSlackDraftConversationMessage({
+        accountId,
+        channelId: "C123",
+        threadTs: "100.000",
+        messageTs: "111.333",
+        userId: "U_OWNER",
+      });
+      finishFinalEdit?.();
 
-    await expect(finalizing).resolves.toBe(false);
-    expect(stream.messageId()).toBeUndefined();
-    expect(remove).not.toHaveBeenCalled();
-    expect(edit).toHaveBeenCalledWith(
-      "C123",
-      "111.222",
-      "_checking the last detail_",
-      expect.objectContaining({ accountId }),
-    );
-  });
+      await expect(finalizing).resolves.toBe(false);
+      expect(stream.messageId()).toBeUndefined();
+      expect(remove).not.toHaveBeenCalled();
+      expect(edit).toHaveBeenCalledWith(
+        "C123",
+        "111.222",
+        "_checking the last detail_",
+        expect.objectContaining({ accountId }),
+      );
+    },
+  );
 
   it("does not finalize a preview invalidated while the stream was being sealed", async () => {
     const accountId = "interrupted-sealed-preview";

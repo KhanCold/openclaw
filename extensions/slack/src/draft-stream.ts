@@ -72,7 +72,9 @@ export function createSlackDraftStream(params: {
   let preserveHumanReplies = false;
   const streamState = { stopped: false, final: false };
 
-  const normalizeUpdate = (update: SlackDraftStreamUpdate): Exclude<SlackDraftStreamUpdate, string> =>
+  const normalizeUpdate = (
+    update: SlackDraftStreamUpdate,
+  ): Exclude<SlackDraftStreamUpdate, string> =>
     typeof update === "string" ? { text: update } : update;
   const clearMessageId = () => {
     streamMessage = undefined;
