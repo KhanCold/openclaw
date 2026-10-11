@@ -361,8 +361,9 @@ async function build() {
     await run(command, args, { label: `toolchain-${command}`, log: true });
   await snapshotTracked('before-install');
   await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000, label: 'pnpm-install', log: true });
-  for (const command of ['oxfmt', 'oxlint', 'tsgo'])
+  for (const command of ['oxfmt', 'oxlint'])
     await run('node', [PNPM, 'exec', command, '--version'], { label: `toolchain-${command}`, log: true });
+  await run('node', ['scripts/run-tsgo.mjs', '--version'], { label: 'toolchain-tsgo-official', log: true });
   await snapshotTracked('after-install');
   // The repository's QA runtime profile builds real JS, plugins, assets and
   // freshness stamps. Declaration/package qualification is outside this proof.
