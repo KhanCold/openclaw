@@ -340,10 +340,29 @@ async function build() {
   // Strict offline corepack-pnpm compatibility entry; not a Corepack install.
   await fs.writeFile('/workspace/.proof-tools/bin/corepack', "#!/bin/sh\n[ \"$1\" = \"pnpm\" ] || exit 64\nshift\nexec /usr/local/bin/node /workspace/.proof-tools/package/bin/pnpm.mjs \"$@\"\n", { mode: 0o755 });
   emit({ proofRecord: true, result: 'package-manager-entry', command: 'corepack pnpm', implementation: 'strict compatibility shim to integrity-verified pnpm 12.9.0' });
+  // Official static Linux release, downloaded only in the networked build
+  // phase. Both the archive and extracted executable have fixed digests.
+  const rgUrl = 'https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz';
+  const rgResponse = await fetch(rgUrl);
+  assert(rgResponse.ok, 'Pinned ripgrep download failed');
+  const rgArchive = Buffer.from(await rgResponse.arrayBuffer());
+  assert.equal(hash(rgArchive), '4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e');
+  await fs.writeFile('/workspace/.proof-tools/ripgrep.tgz', rgArchive);
+  await fs.mkdir('/workspace/.proof-tools/ripgrep');
+  await run('tar', ['-xzf', '/workspace/.proof-tools/ripgrep.tgz', '-C', '/workspace/.proof-tools/ripgrep', '--strip-components=1', 'ripgrep-14.1.1-x86_64-unknown-linux-musl/rg']);
+  const rgBytes = await fs.readFile('/workspace/.proof-tools/ripgrep/rg');
+  assert.equal(hash(rgBytes), 'f401154e2393f9002ac77e419f9ee5521c18f4f8cd3e32293972f493ba06fce7');
+  await fs.writeFile('/workspace/.proof-tools/bin/rg', rgBytes, { mode: 0o755 });
+  emit({ proofRecord: true, result: 'toolchain-provenance', tool: 'ripgrep', version: '14.1.1', url: rgUrl,
+    archiveSha256: hash(rgArchive), executableSha256: hash(rgBytes) });
   process.env.PATH = `/workspace/.proof-tools/bin:${process.env.PATH}`;
   process.env.CI = 'true';
+  for (const [command, args] of [['node', ['--version']], ['git', ['--version']], ['tar', ['--version']], ['rg', ['--version']], ['corepack', ['pnpm', '--version']]])
+    await run(command, args, { label: `toolchain-${command}`, log: true });
   await snapshotTracked('before-install');
   await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000, label: 'pnpm-install', log: true });
+  for (const command of ['oxfmt', 'oxlint', 'tsgo'])
+    await run('node', [PNPM, 'exec', command, '--version'], { label: `toolchain-${command}`, log: true });
   await snapshotTracked('after-install');
   // The repository's QA runtime profile builds real JS, plugins, assets and
   // freshness stamps. Declaration/package qualification is outside this proof.
@@ -371,8 +390,8 @@ async function changedChecks() {
     'extensions/slack/src/draft-stream.test.ts', 'extensions/slack/src/draft-stream.http.test.ts',
   ];
   const started = Date.now();
-  const plan = await run('node', ['scripts/check-changed.mjs', '--dry-run', '--base', BASE, '--head', HEAD, '--', ...files], { env, timeout: 120_000, label: 'changed-plan' });
-  emit({ proofRecord: true, result: 'changed-check-plan', sha: HEAD, plan });
+  const plan = await run('node', ['scripts/check-changed.mjs', '--dry-run', '--base', BASE, '--head', HEAD, '--', ...files], { env, timeout: 120_000, label: 'changed-plan', log: true });
+  emit({ proofRecord: true, result: 'changed-check-plan', sha: HEAD, planStdout: plan, stderrPreservedInCommandLog: true });
   await run('node', ['scripts/check-changed.mjs', '--base', BASE, '--head', HEAD, '--', ...files], { env, timeout: 1_000_000, label: 'changed-checks', log: true });
   emit({ proofRecord: true, result: 'changed-checks-completed', sha: HEAD, exit: 0, wallMs: Date.now() - started });
 }
