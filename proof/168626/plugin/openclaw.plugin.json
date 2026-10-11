@@ -1,0 +1,11 @@
+{
+  "id": "silent-claim-proof",
+  "name": "Silent Claim Proof",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["logPath"],
+    "properties": { "logPath": { "type": "string", "minLength": 1 } }
+  }
+}

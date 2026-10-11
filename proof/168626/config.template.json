@@ -1,0 +1,49 @@
+{
+  "gateway": {
+    "mode": "local", "bind": "loopback", "port": 18799,
+    "auth": { "mode": "token", "token": "__TOKEN__" },
+    "controlUi": { "enabled": false }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "__WORKSPACE__",
+      "model": { "primary": "proof-local/proof-model", "fallbacks": [] },
+      "models": { "proof-local/proof-model": { "agentRuntime": { "id": "openclaw" } } },
+      "modelPolicy": { "allow": ["proof-local/proof-model"] },
+      "heartbeat": { "every": "0m" }
+    },
+    "entries": { "proof": { "workspace": "__WORKSPACE__" } }
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "proof-local": {
+        "baseUrl": "http://127.0.0.1:18800/v1",
+        "apiKey": "synthetic-proof-key",
+        "api": "openai-completions",
+        "request": { "allowPrivateNetwork": true },
+        "models": [{
+          "id": "proof-model", "name": "Local proof model", "reasoning": false,
+          "input": ["text"], "contextWindow": 128000, "maxTokens": 256,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }]
+      }
+    }
+  },
+  "plugins": {
+    "allow": ["silent-claim-proof"],
+    "load": { "paths": ["__PLUGIN__"] },
+    "slots": { "memory": "none" },
+    "entries": {
+      "silent-claim-proof": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true },
+        "config": { "logPath": "__HOOK_LOG__" }
+      }
+    }
+  },
+  "tools": { "profile": "minimal" },
+  "cron": { "enabled": false },
+  "discovery": { "mdns": { "mode": "off" } },
+  "logging": { "file": "__GATEWAY_LOG__" }
+}
