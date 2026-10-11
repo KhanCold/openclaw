@@ -97,7 +97,8 @@ async function host() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-boundary-'));
   const cleanEnv = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: temp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
   const git = (args, cwd) => run('/usr/bin/git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...args], { cwd, env: cleanEnv, timeout: 300_000 });
-  const records = [], sdkRecords = [];
+  const records = [], sdkRecords = [], qualified = [];
+  const stableDiffArgs = ['diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--diff-algorithm=myers', '--no-indent-heuristic', '--unified=3', '--inter-hunk-context=0', '--src-prefix=a/', '--dst-prefix=b/', 'HEAD'];
   const containerName = `slack-boundary-${process.pid}`;
   try {
     const manifest = { workflow: process.env.GITHUB_SHA, harnessSha256: hash(await fs.readFile(SELF)), integrityReporterSha256: hash(await fs.readFile(path.join(path.dirname(SELF), 'integrity-reporter.mjs'))), base: BASE, head: HEAD, image: IMAGE };
@@ -123,31 +124,68 @@ async function host() {
           await fs.writeFile(path.join(source, file), content);
         }
       }
-      const overlayHashes = Object.fromEntries(await Promise.all(testFiles.map(async (file) => [file, hash(await fs.readFile(path.join(source, file)))])));
-      let frozenDiff = hash(await git(['diff', '--binary', 'HEAD'], source));
-      emit({ role, sha, testSource: HEAD, overlayHashes, productSource: sha });
+      const overlayHashes = Object.fromEntries(await Promise.all(testFiles.map(async (file) => [file, hash(await readSourceFile(source, file))])));
+      const overlayModes = Object.fromEntries(await Promise.all(testFiles.map(async (file) => [file, (await fs.lstat(path.join(source, file))).mode & 0o100 ? '100755' : '100644'])));
+      let frozenDiff = hash(await git(stableDiffArgs, source));
+      emit({ role, sha, testSource: HEAD, overlayHashes, overlayModes, productSource: sha });
       const mounts = ['--mount', `type=bind,src=${source},dst=/workspace`, '--mount', `type=bind,src=${source}/.git,dst=/workspace/.git,readonly`, '--mount', `type=bind,src=${path.dirname(SELF)},dst=/proof,readonly`];
       const common = ['run', '--name', containerName, '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`, '--pids-limit=1024', '--memory=7g', '--cpus=4', '-w', '/workspace', ...mounts];
       const readonly = common.map((arg) => arg === `type=bind,src=${source},dst=/workspace` ? `${arg},readonly` : arg);
       emit({ role, phase: 'install-and-build', sha });
-      await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'build'], { timeout: 2_100_000, label: `${role}-container-build`, log: true });
-      const afterBuildDiff = await git(['diff', '--binary', 'HEAD'], source);
-      if (hash(afterBuildDiff) !== frozenDiff) {
-        emit({ proofRecord: true, result: 'source-integrity-drift', role, sha, phase: 'install-and-build',
-          expectedDiffSha256: frozenDiff, actualDiffSha256: hash(afterBuildDiff),
-          status: safeDiagnostic(await git(['status', '--short', '--untracked-files=no'], source)) });
-        emit({ proofRecord: true, result: 'source-diff-headers', role, sha, phase: 'install-and-build', headers: afterBuildDiff.split('\n').filter((line) => /^(diff --git |index |old mode |new mode |deleted file mode |new file mode )/.test(line)) });
+      const buildOutput = await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'build'], { timeout: 2_100_000, label: `${role}-container-build`, log: true });
+      const summaries = proofRecords(buildOutput).filter((record) => record.result === 'tracked-source-summary');
+      assert.deepEqual(summaries.map((record) => record.phase), ['before-install', 'after-install', 'after-build']);
+      const initial = summaries[0];
+      const expectedUntracked = role === 'base' ? ['extensions/slack/src/draft-stream.http.test.ts'] : [];
+      for (const snapshot of summaries) {
+        assert.equal(snapshot.head, sha, 'Wrong snapshot HEAD');
+        assert.equal(snapshot.contentSha256, initial.contentSha256, 'Tracked content/mode changed during install/build');
+        assert.equal(snapshot.indexContentSha256, initial.indexContentSha256, 'Tracked index identity changed');
+        assert.deepEqual(snapshot.untracked, expectedUntracked, 'Unexpected untracked source');
+        assert.equal(snapshot.diffSha256, frozenDiff, 'Stable full-index diff differs; inspect serialization separately from content');
       }
-      // Preserve the existing final gate; diagnostics distinguish build from test changes.
+      assert.equal(hash(await git(stableDiffArgs, source)), frozenDiff, 'Stable host diff changed during install/build');
       const testOutput = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'tests', role, sha], { timeout: 900_000, label: `${role}-owner-regressions`, log: true });
       const sdk = testOutput.split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }).find((record) => record.proofRecord === true && record.result === 'sdk-regressions-completed');
       assert(sdk && sdk.sha === sha && sdk.role === role, 'Missing complete SDK regression result');
       emit(sdk); sdkRecords.push(sdk);
+      const tested = proofRecords(testOutput).filter((record) => record.result === 'tracked-source-summary');
+      assert.equal(tested.length, 1); assert.equal(tested[0].phase, 'after-tests');
+      assert.equal(tested[0].head, sha);
+      assert.equal(tested[0].contentSha256, initial.contentSha256, 'Tracked content/mode changed during tests');
+      assert.equal(tested[0].indexContentSha256, initial.indexContentSha256, 'Tests changed index identity');
+      assert.deepEqual(tested[0].untracked, expectedUntracked, 'Tests created unexpected untracked source');
+      assert.equal(tested[0].diffSha256, frozenDiff, 'Stable diff differs after tests; inspect serialization separately from content');
       // The regression overlay is a separate source identity. Restore only the
       // four verified task-owned test paths before building pristine Gateway.
-      assert.equal(hash(await git(['diff', '--binary', 'HEAD'], source)), frozenDiff, 'Tests changed tracked source');
-      for (const file of testFiles) assert.equal(hash(await fs.readFile(path.join(source, file))), overlayHashes[file]);
-      emit({ proofRecord: true, result: 'owner-tree-completed', role, productSource: sha, testSource: HEAD, overlayHashes });
+      assert.equal(hash(await git(stableDiffArgs, source)), frozenDiff, 'Host full-index diff differs after qualification; inspect serialization separately from content');
+      for (const file of testFiles) {
+        assert.equal(hash(await readSourceFile(source, file)), overlayHashes[file]);
+        assert.equal((await fs.lstat(path.join(source, file))).mode & 0o100 ? '100755' : '100644', overlayModes[file]);
+      }
+      if (role === 'head') {
+        const checksOutput = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'checks'], { timeout: 1_200_000, label: 'candidate-changed-checks', log: true });
+        for (const line of checksOutput.split('\n')) { try { const record = JSON.parse(line); if (record.proofRecord) emit(record); } catch {} }
+        const checkedOutput = await run('docker', [...readonly, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'snapshot', 'after-checks'], { timeout: 180_000, label: 'head-source-after-checks', log: true });
+        const checked = proofRecords(checkedOutput).find((record) => record.result === 'tracked-source-summary');
+        assert(checked); assert.equal(checked.head, sha);
+        assert.equal(checked.contentSha256, initial.contentSha256, 'Changed checks changed tracked contents/modes');
+        assert.equal(checked.indexContentSha256, initial.indexContentSha256);
+        assert.deepEqual(checked.untracked, expectedUntracked);
+        for (const file of testFiles) {
+          assert.equal(hash(await readSourceFile(source, file)), overlayHashes[file], 'Checks changed test source');
+          assert.equal((await fs.lstat(path.join(source, file))).mode & 0o100 ? '100755' : '100644', overlayModes[file]);
+        }
+        assert.equal(hash(await git(stableDiffArgs, source)), frozenDiff, 'Changed checks changed source');
+      }
+      emit({ proofRecord: true, result: 'owner-tree-completed', role, productSource: sha, testSource: HEAD, overlayHashes, overlayModes });
+      qualified.push({ role, sha, source, testFiles, overlayHashes, overlayModes, frozenDiff,
+        initial, common, readonly });
+    }
+    // Both revisions qualify sequentially before any Gateway scenario.
+    assert.equal(qualified.length, 2);
+    for (const qualification of qualified) {
+      let { role, sha, source, testFiles, overlayHashes, overlayModes, frozenDiff, initial, common, readonly } = qualification;
       const runtimeHashes = { ...overlayHashes };
       if (role === 'base') {
         for (const file of testFiles) {
@@ -161,11 +199,17 @@ async function host() {
             runtimeHashes[file] = hash(original);
           }
         }
-        assert.equal((await git(['diff', '--binary', 'HEAD'], source)).trim(), '', 'Baseline restoration not pristine');
+        assert.equal((await git(stableDiffArgs, source)).trim(), '', 'Baseline restoration not pristine');
         await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'rebuild'], { timeout: 1_300_000, label: 'base-pristine-qaRuntime-rebuild', log: true });
       }
-      assert.equal((await git(['diff', '--binary', 'HEAD'], source)).trim(), '', 'Gateway requires pristine tracked source');
-      frozenDiff = hash(await git(['diff', '--binary', 'HEAD'], source));
+      assert.equal((await git(stableDiffArgs, source)).trim(), '', 'Gateway requires pristine tracked source');
+      frozenDiff = hash(await git(stableDiffArgs, source));
+      const pristineOutput = await run('docker', [...readonly, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'snapshot', 'pristine-runtime'], { timeout: 180_000, label: `${role}-pristine-source`, log: true });
+      const pristine = proofRecords(pristineOutput).find((record) => record.result === 'tracked-source-summary');
+      assert(pristine); assert.equal(pristine.head, sha);
+      assert.equal(pristine.contentSha256, initial.indexContentSha256, 'Gateway source differs from frozen HEAD contents/modes');
+      assert.equal(pristine.indexContentSha256, initial.indexContentSha256);
+      assert.deepEqual(pristine.untracked, [], 'Pristine Gateway has unexpected untracked source');
       const stamps = {};
       for (const name of ['.buildstamp', '.runtime-postbuildstamp']) {
         const file = path.join(source, 'dist', name);
@@ -187,19 +231,14 @@ async function host() {
         assert.equal(result.role, role);
         assert.equal(result.sha, sha);
         assert.equal(result.progressStyle, progressStyle);
-        assert.equal(hash(await git(['diff', '--binary', 'HEAD'], source)), frozenDiff, 'Build/runtime changed tracked source');
+        assert.equal(hash(await git(stableDiffArgs, source)), frozenDiff, 'Build/runtime changed tracked source');
         for (const [file, expected] of Object.entries(runtimeHashes)) {
-          const bytes = await fs.readFile(path.join(source, file)).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+          const bytes = await readSourceFile(source, file).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
           assert.equal(bytes === null ? null : hash(bytes), expected, 'Pristine runtime source changed');
         }
         assert.equal((await git(['rev-parse', 'HEAD'], source)).trim(), sha);
         emit(result);
         records.push(result);
-      }
-      if (role === 'head') {
-        const checksOutput = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'checks'], { timeout: 1_200_000, label: 'candidate-changed-checks', log: true });
-        for (const line of checksOutput.split('\n')) { try { const record = JSON.parse(line); if (record.proofRecord) emit(record); } catch {} }
-        assert.equal(hash(await git(['diff', '--binary', 'HEAD'], source)), frozenDiff, 'Changed checks changed source');
       }
       await fs.rm(source, { recursive: true, force: true });
     }
@@ -227,6 +266,18 @@ async function host() {
   }
 }
 
+async function readSourceFile(source, relative) {
+  const file = path.join(source, relative);
+  const parent = await fs.realpath(path.dirname(file));
+  assert(parent === source || parent.startsWith(`${source}/`), 'Source file parent escaped checkout');
+  assert((await fs.lstat(file)).isFile(), 'Expected regular source file');
+  return fs.readFile(file);
+}
+
+function proofRecords(output) {
+  return output.split('\n').flatMap((line) => { try { const record = JSON.parse(line); return record?.proofRecord ? [record] : []; } catch { return []; } });
+}
+
 async function snapshotTracked(phase) {
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
@@ -243,20 +294,24 @@ async function snapshotTracked(phase) {
     const stat = await fs.lstat(absolute).catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
     let bytes = null, mode = null;
     if (stat?.isSymbolicLink()) { bytes = Buffer.from(await fs.readlink(absolute)); mode = '120000'; }
-    else if (stat?.isFile()) { bytes = await fs.readFile(absolute); mode = stat.mode & 0o111 ? '100755' : '100644'; }
+    else if (stat?.isFile()) { bytes = await fs.readFile(absolute); mode = stat.mode & 0o100 ? '100755' : '100644'; }
     else assert(stat === null, 'Unsupported tracked source kind');
     const blob = bytes === null ? null : createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
     files.push({ path: relative, indexMode, indexBlob, mode, blob });
   }
   files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   const stable = files.map(({ path: name, mode, blob }) => ({ path: name, mode, blob }));
-  const patch = await run('git', ['--no-pager', 'diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', 'HEAD'], { label: `${phase}-stable-diff` });
+  const indexStable = files.map(({ path: name, indexMode: mode, indexBlob: blob }) => ({ path: name, mode, blob }));
+  const head = (await run('git', ['rev-parse', 'HEAD'], { label: `${phase}-head` })).trim();
+  const untracked = (await run('git', ['ls-files', '--others', '--exclude-standard', '--exclude=.proof-tools/', '-z'], { label: `${phase}-untracked` })).split('\0').filter(Boolean).sort();
+  const patch = await run('git', ['--no-pager', 'diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--diff-algorithm=myers', '--no-indent-heuristic', '--unified=3', '--inter-hunk-context=0', '--src-prefix=a/', '--dst-prefix=b/', 'HEAD'], { label: `${phase}-stable-diff` });
   emit({ proofRecord: true, result: 'tracked-source-summary', phase, files: files.length,
-    contentSha256: hash(JSON.stringify(stable)), diffSha256: hash(patch), diffBytes: Buffer.byteLength(patch),
+    head, gitVersion: (await run('git', ['--version'], { label: `${phase}-git-version` })).trim(), contentSha256: hash(JSON.stringify(stable)), indexContentSha256: hash(JSON.stringify(indexStable)), untracked, diffSha256: hash(patch), diffBytes: Buffer.byteLength(patch),
     status: safeDiagnostic(await run('git', ['status', '--porcelain=v1', '--untracked-files=no'], { label: `${phase}-status` })),
     diffHeaders: patch.split('\n').filter((line) => /^(diff --git |index |old mode |new mode |deleted file mode |new file mode )/.test(line)) });
-  for (let offset = 0; offset < files.length; offset += 100)
-    emit({ proofRecord: true, result: 'tracked-source-blobs', phase, offset, files: files.slice(offset, offset + 100) });
+  // Every tracked path participates in the digest. The diagnostic run retains
+  // full lists; normal runs emit per-file identities only for differences.
+  emit({ proofRecord: true, result: 'tracked-source-changes', phase, files: files.filter((file) => file.blob !== file.indexBlob || file.mode !== file.indexMode) });
 }
 
 async function build() {
@@ -739,6 +794,7 @@ async function inside(role, sha, progressStyle) {
 
 try {
   if (process.argv[2] === 'build') await build();
+  else if (process.argv[2] === 'snapshot') await snapshotTracked(process.argv[3]);
   else if (process.argv[2] === 'rebuild') await rebuildPristine();
   else if (process.argv[2] === 'checks') {
     await changedChecks();
