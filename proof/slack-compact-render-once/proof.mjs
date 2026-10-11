@@ -97,7 +97,13 @@ async function host() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-boundary-'));
   const cleanEnv = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: temp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
   const git = (args, cwd) => run('/usr/bin/git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...args], { cwd, env: cleanEnv, timeout: 300_000 });
-  const records = [], sdkRecords = [], qualified = [];
+  const records = [], sdkRecords = [], qualified = [], requiredFailures = [];
+  const gib = 1024 ** 3;
+  const hostMemoryBytes = os.totalmem();
+  const checkMemoryBytes = Math.floor(Math.min(7 * gib, hostMemoryBytes - 3 * gib));
+  assert(checkMemoryBytes >= 7 * gib, 'Runner cannot provide the required check budget while reserving host memory');
+  emit({ proofRecord: true, result: 'runner-resource-budget', hostMemoryBytes, checkMemoryBytes,
+    hostReserveBytes: hostMemoryBytes - checkMemoryBytes, concurrentContainers: 1 });
   const stableDiffArgs = ['diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--diff-algorithm=myers', '--no-indent-heuristic', '--unified=3', '--inter-hunk-context=0', '--src-prefix=a/', '--dst-prefix=b/', 'HEAD'];
   const containerName = `slack-boundary-${process.pid}`;
   try {
@@ -164,8 +170,16 @@ async function host() {
         assert.equal((await fs.lstat(path.join(source, file))).mode & 0o100 ? '100755' : '100644', overlayModes[file]);
       }
       if (role === 'head') {
-        const checksOutput = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'checks'], { timeout: 1_200_000, label: 'candidate-changed-checks', log: true });
+        try {
+        const checksOutput = await run('docker', [...common.map((arg) => arg === '--memory=7g' ? `--memory=${checkMemoryBytes}` : arg), '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'checks'], { timeout: 1_200_000, label: 'candidate-changed-checks', log: true });
         for (const line of checksOutput.split('\n')) { try { const record = JSON.parse(line); if (record.proofRecord) emit(record); } catch {} }
+        } catch (error) {
+          // Preserve this required failure, but allow independent Gateway proof
+          // only after the same source-integrity checks below still pass.
+          requiredFailures.push({ phase: 'candidate-changed-checks', error: safeDiagnostic(String(error?.message ?? error)) });
+          emit({ proofRecord: true, result: 'required-phase-failed', ...requiredFailures.at(-1) });
+          await run('docker', ['rm', '--force', containerName], { timeout: 30_000, label: 'cleanup-checks-container', quietFailure: true }).catch(() => {});
+        }
         const checkedOutput = await run('docker', [...readonly, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'snapshot', 'after-checks'], { timeout: 180_000, label: 'head-source-after-checks', log: true });
         const checked = proofRecords(checkedOutput).find((record) => record.result === 'tracked-source-summary');
         assert(checked); assert.equal(checked.head, sha);
@@ -255,6 +269,7 @@ async function host() {
         .map(({ ts, thread_ts, ...entry }) => entry);
       assert.deepEqual(project('base'), project('head'), `Gateway control drift: ${style}`);
     }
+    assert.deepEqual(requiredFailures, [], 'Required qualification phases failed; independent runtime records do not make the proof pass');
     if (process.env.GITHUB_STEP_SUMMARY) {
       await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `## Slack serialized payload boundary proof\n\nFrozen baseline defect observed and candidate passed. External model and Slack HTTP fixtures only; no live Slack UI or notification claim.\n\n\`\`\`json\n${JSON.stringify({ manifest, records, sdkRecords }, null, 2)}\n\`\`\`\n`);
     }
@@ -379,22 +394,58 @@ async function rebuildPristine() {
     label: 'pristine-qaRuntime-build', log: true });
 }
 
+async function resourceSnapshot(phase) {
+  const files = ['memory.current', 'memory.max', 'memory.peak', 'memory.events', 'cpu.max', 'pids.current'];
+  const cgroup = {};
+  for (const name of files) {
+    cgroup[name] = await fs.readFile(`/sys/fs/cgroup/${name}`, 'utf8')
+      .then((text) => text.trim()).catch((error) => `unavailable:${error.code}`);
+  }
+  emit({ proofRecord: true, result: 'check-resource-snapshot', phase, cgroup,
+    controllerMemoryBytes: process.memoryUsage(), totalMemoryBytes: os.totalmem(),
+    availableParallelism: os.availableParallelism() });
+}
+
+async function emitCompilerMetrics(directory) {
+  try {
+    const names = (await fs.readdir(directory)).filter((name) => /^tsgo-[a-zA-Z0-9-]+\.json$/.test(name)).sort();
+    assert(names.length <= 100, 'Unexpected compiler metric count');
+    emit({ proofRecord: true, result: 'tsgo-metrics-count', count: names.length });
+    for (const name of names) {
+      const file = path.join(directory, name);
+      const st = await fs.lstat(file);
+      assert(st.isFile() && !st.isSymbolicLink() && st.size <= 1024 * 1024, 'Invalid compiler metric file');
+      const bytes = await fs.readFile(file, 'utf8');
+      emit({ proofRecord: true, result: 'tsgo-compiler-metrics', file: name,
+        sha256: createHash('sha256').update(bytes).digest('hex'), evidence: JSON.parse(safeDiagnostic(bytes)) });
+    }
+  } catch (error) {
+    emit({ proofRecord: true, result: 'tsgo-metrics-unavailable', error: safeDiagnostic(String(error?.message ?? error)) });
+  }
+}
+
 async function changedChecks() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
   const root = await fs.mkdtemp('/tmp/check-proof-');
-  const env = { ...process.env, HOME: root, CI: 'true', OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
+  const env = { ...process.env, HOME: root, CI: 'true', OPENCLAW_LOCAL_CHECK: '1', OPENCLAW_LOCAL_CHECK_MODE: 'throttled', OPENCLAW_TSGO_METRICS_DIR: `${root}/tsgo-metrics`, OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
   const files = [
     'extensions/slack/src/draft-stream.ts', 'extensions/slack/src/format.ts',
     'extensions/slack/src/monitor/message-handler/dispatch-progress.ts',
     'extensions/slack/src/delivery-trace.test.ts', 'extensions/slack/src/delivery-trace.test-support.ts',
     'extensions/slack/src/draft-stream.test.ts', 'extensions/slack/src/draft-stream.http.test.ts',
   ];
+  await resourceSnapshot('before-changed-checks');
+  try {
   const started = Date.now();
   const plan = await run('node', ['scripts/check-changed.mjs', '--dry-run', '--base', BASE, '--head', HEAD, '--', ...files], { env, timeout: 120_000, label: 'changed-plan', log: true });
   emit({ proofRecord: true, result: 'changed-check-plan', sha: HEAD, planStdout: plan, stderrPreservedInCommandLog: true });
   await run('node', ['scripts/check-changed.mjs', '--base', BASE, '--head', HEAD, '--', ...files], { env, timeout: 1_000_000, label: 'changed-checks', log: true });
   emit({ proofRecord: true, result: 'changed-checks-completed', sha: HEAD, exit: 0, wallMs: Date.now() - started });
+  } finally {
+    await resourceSnapshot('after-changed-checks');
+    await emitCompilerMetrics(env.OPENCLAW_TSGO_METRICS_DIR);
+  }
 }
 
 async function ownerTests(role, sha) {
