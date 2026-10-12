@@ -332,9 +332,15 @@ async function snapshotTracked(phase) {
 async function build() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
-  process.env.HOME = '/tmp/proof-build-home';
+  // Keep pnpm's isolated dlx cache on the shared workspace mount so the
+  // required network-disabled checks can reuse the exact prewarmed tool.
+  process.env.HOME = '/workspace/.proof-tools/home';
+  process.env.XDG_CACHE_HOME = '/workspace/.proof-tools/cache';
+  process.env.PNPM_HOME = '/workspace/.proof-tools/pnpm-home';
+  await fs.mkdir('/workspace/.proof-tools', { recursive: true });
   await fs.mkdir(process.env.HOME, { recursive: true });
-  await fs.mkdir('/workspace/.proof-tools');
+  await fs.mkdir(process.env.XDG_CACHE_HOME, { recursive: true });
+  await fs.mkdir(process.env.PNPM_HOME, { recursive: true });
   const response = await fetch('https://registry.npmjs.org/pnpm/-/pnpm-12.9.0.tgz');
   assert(response.ok, 'Pinned pnpm download failed');
   const tarball = Buffer.from(await response.arrayBuffer());
@@ -374,6 +380,11 @@ async function build() {
   process.env.CI = 'true';
   for (const [command, args] of [['node', ['--version']], ['git', ['--version']], ['tar', ['--version']], ['rg', ['--version']], ['corepack', ['pnpm', '--version']]])
     await run(command, args, { label: `toolchain-${command}`, log: true });
+  const knipVersion = (await run('node', [PNPM, 'dlx', '--package', 'knip@6.32.2', 'knip', '--version'],
+    { timeout: 240_000, label: 'prewarm-knip-dlx', log: true })).trim();
+  assert.match(knipVersion, /(?:^|\s)v?6\.32\.2(?:\s|$)/, 'Prewarmed Knip version differs from repository script pin');
+  emit({ proofRecord: true, result: 'toolchain-provenance', tool: 'knip', version: '6.32.2',
+    command: 'pnpm dlx --package knip@6.32.2 knip --version', cacheHome: process.env.HOME });
   await snapshotTracked('before-install');
   await run('node', [PNPM, 'install', '--frozen-lockfile'], { timeout: 900_000, label: 'pnpm-install', log: true });
   for (const command of ['oxfmt', 'oxlint'])
@@ -428,7 +439,7 @@ async function changedChecks() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
   const root = await fs.mkdtemp('/tmp/check-proof-');
-  const env = { ...process.env, HOME: root, CI: 'true', OPENCLAW_LOCAL_CHECK: '1', OPENCLAW_LOCAL_CHECK_MODE: 'throttled', OPENCLAW_TSGO_METRICS_DIR: `${root}/tsgo-metrics`, OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
+  const env = { ...process.env, HOME: '/workspace/.proof-tools/home', XDG_CACHE_HOME: '/workspace/.proof-tools/cache', PNPM_HOME: '/workspace/.proof-tools/pnpm-home', CI: 'true', OPENCLAW_LOCAL_CHECK: '1', OPENCLAW_LOCAL_CHECK_MODE: 'throttled', OPENCLAW_TSGO_METRICS_DIR: `${root}/tsgo-metrics`, OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
   const files = [
     'extensions/slack/src/draft-stream.ts', 'extensions/slack/src/format.ts',
     'extensions/slack/src/monitor/message-handler/dispatch-progress.ts',
@@ -601,7 +612,7 @@ async function inside(role, sha, progressStyle) {
   let sequence = 0, humanTs, socket, call, signed;
   const epoch = Math.floor(Date.now() / 1000);
   const timestamp = () => `${epoch}.${String(++sequence).padStart(6, '0')}`;
-  const textOf = (item) => [item.text, item.markdown_text, ...item.mrkdwnFields.map((field) => field.text), ...(item.chunks ?? []).flatMap((chunk) => [chunk.text, chunk.title, chunk.details, chunk.output])].filter(Boolean).join('\n');
+  const textOf = (item) => [item.topLevelText, item.text, item.markdown_text, ...item.mrkdwnFields.map((field) => field.text), ...(item.chunks ?? []).flatMap((chunk) => [chunk.text, chunk.title, chunk.details, chunk.output])].filter(Boolean).join('\n');
   const observed = (marker, method) => captures.find((item) => (!method || item.method === method) && textOf(item).includes(marker));
   let stage = 'reply', toolRequested = false, toolCompleted = false, toolRound = 0, modelRequestCount = 0, gateway;
   const logs = [];
@@ -619,7 +630,7 @@ async function inside(role, sha, progressStyle) {
       case 'conversations.members': return json(res, { ok: true, members: ['U0123PROOF', 'U0PROOFBOT'], response_metadata: { next_cursor: '' } });
       case 'chat.postMessage': case 'chat.update': {
         const ts = input.ts || timestamp();
-        captures.push({ method, channel, text: input.text || '', blocks: typeof input.blocks === 'string' ? JSON.parse(input.blocks) : input.blocks, thread_ts: input.thread_ts, mrkdwnFields: slackMrkdwnFields(input), ts });
+        captures.push({ method, channel, topLevelText: input.text || '', blocks: typeof input.blocks === 'string' ? JSON.parse(input.blocks) : input.blocks, thread_ts: input.thread_ts, mrkdwnFields: slackMrkdwnFields(input), ts });
         return json(res, { ok: true, channel, ts, message: { text: input.text, ts } });
       }
       case 'chat.startStream': case 'chat.appendStream': case 'chat.stopStream': {
@@ -850,14 +861,39 @@ async function inside(role, sha, progressStyle) {
         for (const capture of matching) {
           assert.equal(capture.channel, channel);
           assert(capture.text.includes('<https://example.invalid/docs|Docs>'), `URL control failed: ${marker}`);
-          assert(capture.text.includes('<https://example.invalid/native|Native>'), `Native URL control failed: ${marker}`);
+          const blockNativeUrl = progress && !compact
+            ? '&lt;https://example.invalid/native|Native&gt;'
+            : '<https://example.invalid/native|Native>';
+          assert(capture.text.includes(blockNativeUrl), `Block Kit native URL control failed: ${marker}/${capture.surface}`);
+          const message = captures.find((item) => item.method === capture.method && item.ts === capture.ts);
+          assert(message, `Missing captured top-level text: ${marker}/${capture.method}`);
+          const fallback = message.topLevelText;
+          assert(fallback.includes('<https://example.invalid/docs|Docs>'), `Top-level Docs URL control failed: ${marker}`);
+          const rawNativeUrl = '<https://example.invalid/native|Native>';
+          const escapedNativeUrl = '&lt;https://example.invalid/native|Native&gt;';
+          if (progress && !compact && capture.method === 'chat.update') {
+            // The legacy card edit has an authored fallback followed by a
+            // normalized card fallback. Record both, rather than conflating
+            // this top-level field with the sanitized Block Kit text.
+            assert(fallback.includes(rawNativeUrl) && fallback.includes(escapedNativeUrl), `Card edit fallback URL surfaces changed: ${marker}`);
+          } else {
+            assert(fallback.includes(progress && !compact ? escapedNativeUrl : rawNativeUrl), `Top-level native URL control failed: ${marker}`);
+          }
           for (const mention of ['<@U0456EFGH>', '<#C0456EFGH>', '<!here>', '<!channel>', '<!subteam^S123>']) {
             const expected = progress && (role === 'head' || !compact) ? mention.replace('<', '&lt;').replace('>', '&gt;') : mention;
             assert(capture.text.includes(expected), `Native mention control failed: ${marker}/${mention}`);
             if (expected !== mention) assert(!capture.text.includes(mention), `Active native token survived: ${marker}`);
+            if (progress && !compact && capture.method === 'chat.update') {
+              assert(fallback.includes(mention) && fallback.includes(mention.replace('<', '&lt;').replace('>', '&gt;')),
+                `Card edit top-level fallback surfaces changed: ${marker}/${mention}`);
+            } else {
+              assert(fallback.includes(expected), `Top-level native mention control failed: ${marker}/${mention}`);
+              if (expected !== mention) assert(!fallback.includes(mention), `Active top-level native token survived: ${marker}/${mention}`);
+            }
           }
           assert(!capture.text.includes('&amp;lt;'), 'Progress double entity');
           assert(capture.text.includes('`src/one.ts`'), 'Code control failed');
+          assert(fallback.includes('`src/one.ts`'), `Top-level code control failed: ${marker}`);
         }
         selected.push(...matching);
       }
