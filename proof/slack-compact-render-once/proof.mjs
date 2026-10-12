@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const BASE = 'a8a349b15b20240d387770378072c2ca51889596';
-const HEAD = 'afc215037f87d26c46ae453bf770f41f8223560f';
+const HEAD = '12026ff4e96a92b1fb2e7b7cfdd678f7bda6be13';
 const IMAGE = 'node:26.11.1-bookworm@sha256:253729d3f2b77dbab6a5694aa20da4b484bc759bfb7004aa2e0b683c390e825e';
 const PNPM_SHA512 = '8f64efa0b792986ca98ae568791bcd7722807e274c4f0c1d9853c62116495c584119db98762a2a5343b1684d361b9ae26fdd16d551666d7635346d3fae830ddd';
 const PNPM_NATIVE_SHA512 = 'ElANYUwQuMfWqMJR4m5L5h9zKjvGKcA8hi2put4J1DMx2smVaNGkGnxkgeIYgMjmF7UFxlZDcL4jItkScgsW4A==';
@@ -608,8 +608,8 @@ async function inside(role, sha, progressStyle) {
   assert.equal(process.cwd(), '/workspace');
   assert.equal(sha, role === 'base' ? BASE : HEAD);
   const root = await fs.mkdtemp('/tmp/slack-state-');
-  const captures = [], unexpected = [], modelStages = [], modelRequests = [], frames = [], humanReceipts = [];
-  let sequence = 0, humanTs, socket, call, signed;
+  const captures = [], statusUpdates = [], unexpected = [], modelStages = [], modelRequests = [], frames = [], humanReceipts = [];
+  let sequence = 0, humanTs, nativeThreadTs, socket, call, signed;
   const epoch = Math.floor(Date.now() / 1000);
   const timestamp = () => `${epoch}.${String(++sequence).padStart(6, '0')}`;
   const textOf = (item) => [item.topLevelText, item.text, item.markdown_text, ...item.mrkdwnFields.map((field) => field.text), ...(item.chunks ?? []).flatMap((chunk) => [chunk.text, chunk.title, chunk.details, chunk.output])].filter(Boolean).join('\n');
@@ -656,6 +656,13 @@ async function inside(role, sha, progressStyle) {
         return json(res, { ok: true, channel, ts });
       }
       case 'chat.delete': captures.push({ method, channel, ts: input.ts, mrkdwnFields: [] }); return json(res, { ok: true });
+      case 'agents.sessions.setStatus': {
+        assert.equal(input.channel_id, 'D0123456789');
+        assert.equal(input.thread_ts, nativeThreadTs);
+        assert(['processing', 'active'].includes(input.status));
+        statusUpdates.push({ channel_id: input.channel_id, thread_ts: input.thread_ts, status: input.status });
+        return json(res, { ok: true });
+      }
       case 'reactions.add': case 'reactions.remove':
       case 'assistant.threads.setStatus': case 'assistant.threads.setTitle': case 'assistant.threads.setSuggestedPrompts': return json(res, { ok: true });
       default: unexpected.push(method); res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'unsupported_fixture_method' }));
@@ -697,11 +704,14 @@ async function inside(role, sha, progressStyle) {
     }
     assert(input.input?.some((item) => item.type === 'function_call_output' && item.call_id === (toolRound === 1 ? 'call_proof' : toolRound === 2 ? 'call_proof_second' : 'call_proof_third')), 'No real tool result reached model');
     if (toolRound === 1) {
-      await until(() => observed('PROOFPROGRESSFIRST', nativeCard ? undefined : 'chat.postMessage'), 'first progress HTTP post');
+      // Native Slack streams buffer short markdown appends until their buffer
+      // threshold or terminal flush. Waiting at the HTTP boundary before
+      // returning the model's next tool call prevents either flush point.
+      if (!nativeCard) await until(() => observed('PROOFPROGRESSFIRST', 'chat.postMessage'), 'first progress HTTP post');
       toolRound = 2;
       return sendResponse(res, `PROOFPROGRESSSECOND ${FIXTURE}`, 'commentary', { type: 'function_call', id: 'fc_proof_second', call_id: 'call_proof_second', name: 'tool_search', arguments: JSON.stringify({ query: 'list files', limit: 1 }) });
     }
-    await until(() => observed('PROOFPROGRESSSECOND', nativeCard ? undefined : 'chat.update'), 'second progress HTTP edit/append');
+    if (!nativeCard) await until(() => observed('PROOFPROGRESSSECOND', 'chat.update'), 'second progress HTTP edit');
     if (compact && toolRound === 2) {
       // Subscribe to public wire events before emitting the incomplete preamble.
       const sessions = await call('sessions.list', {});
@@ -837,6 +847,7 @@ async function inside(role, sha, progressStyle) {
     await until(() => observed('PROOFREPLY'), 'Gateway reply HTTP delivery');
     stage = 'progress';
     const inboundTimestamp = timestamp();
+    if (nativeCard) nativeThreadTs = inboundTimestamp;
     const response = await signed({ type: 'event_callback', team_id: 'T0123456789', api_app_id: 'A0123456789', event_id: 'EvProofOne', event_time: Math.floor(Date.now() / 1000), event: { type: 'message', channel: 'D0123456789', channel_type: 'im', user: 'U0123PROOF', text: 'Show commentary, search for the read tool, then show another preamble and search for the file listing tool before finishing.', ts: inboundTimestamp, event_ts: inboundTimestamp, ...(nativeCard ? { thread_ts: inboundTimestamp } : {}) } });
     assert.equal(response.status, 200, 'Signed inbound event rejected');
     await until(() => observed('PROOFFINAL'), 'inbound final HTTP delivery', 90_000);
@@ -852,6 +863,8 @@ async function inside(role, sha, progressStyle) {
       assert(captures.some((item) => item.method === 'chat.startStream'), 'Native card did not use startStream');
       await until(() => captures.some((item) => item.method === 'chat.stopStream'), 'Native stream finalization');
       assert(observed('PROOFPROGRESSFIRST') && observed('PROOFPROGRESSSECOND') && observed('PROOFFINAL'));
+      assert(statusUpdates.some((item) => item.status === 'processing'), 'Native session did not enter processing status');
+      assert(statusUpdates.some((item) => item.status === 'active'), 'Native session did not return to active status');
       // Native title/details are provider-owned fields. Byte parity across base/head
       // is checked by the controller; do not misclassify these as Block Kit mrkdwn.
     } else {
@@ -910,11 +923,11 @@ async function inside(role, sha, progressStyle) {
         assert.equal(humanReceipts.length, 3);
       }
     }
-    emit({ proofRecord: true, result: 'completed', role, sha, progressStyle, verdict: role === 'base' ? (compact ? 'baseline-defect-observed' : 'baseline-control-pass') : 'candidate-pass', toolRequested, toolCompleted, modelStages, modelRequestCount, modelRequests, captures, humanReceipts, selected, claim: 'isolated built Gateway with external HTTP fixtures; no live Slack rendering or notification claim' });
+    emit({ proofRecord: true, result: 'completed', role, sha, progressStyle, verdict: role === 'base' ? (compact ? 'baseline-defect-observed' : 'baseline-control-pass') : 'candidate-pass', toolRequested, toolCompleted, modelStages, modelRequestCount, modelRequests, captures, statusUpdates, humanReceipts, selected, claim: 'isolated built Gateway with external HTTP fixtures; no live Slack rendering or notification claim' });
 
   } catch (error) {
     // Do not print config, request headers, model inputs, or raw Gateway logs.
-    emit({ proofRecord: true, result: 'failed', role, sha, progressStyle, error: String(error.message), stage, toolRequested, toolCompleted, modelRequestCount, modelRequests, captures, humanReceipts, wirePreambles: frames.filter((frame) => frame.event === 'agent' && frame.payload?.stream === 'item'), unexpected, gatewayLogBytes: Buffer.concat(logs).length, gatewayLogSha256: hash(Buffer.concat(logs)) });
+    emit({ proofRecord: true, result: 'failed', role, sha, progressStyle, error: String(error.message), stage, toolRequested, toolCompleted, modelRequestCount, modelRequests, captures, statusUpdates, humanReceipts, wirePreambles: frames.filter((frame) => frame.event === 'agent' && frame.payload?.stream === 'item'), unexpected, gatewayLogBytes: Buffer.concat(logs).length, gatewayLogSha256: hash(Buffer.concat(logs)) });
     throw error;
   } finally {
     socket?.close();
