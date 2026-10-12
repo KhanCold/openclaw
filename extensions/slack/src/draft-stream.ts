@@ -1,14 +1,14 @@
 import type { MessageMetadata } from "@slack/types";
 import type { Block, KnownBlock } from "@slack/web-api";
-import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { createFinalizableDraftLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { deleteSlackMessage, editSlackMessage, editSlackRenderedMessage } from "./actions.js";
+import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { resolveDefaultSlackAccountId } from "./accounts.js";
+import { deleteSlackMessage, editSlackMessage, editSlackRenderedMessage } from "./actions.js";
 import { trackSlackDraftMessage } from "./draft-message-boundaries.js";
 import { formatSlackError } from "./errors.js";
-import { SLACK_TEXT_LIMIT } from "./limits.js";
 import { normalizeSlackOutboundText } from "./format.js";
+import { SLACK_TEXT_LIMIT } from "./limits.js";
 import type { SlackEventScope } from "./monitor/event-scope.js";
 import type { SlackSendIdentity } from "./send.js";
 import { sendMessageSlack } from "./send.js";

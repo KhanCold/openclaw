@@ -320,7 +320,7 @@ export async function assertSlackProgressMentionHttpTrace(params: {
   expect(readText(final!.body)).toContain(`FINAL ${native}`);
 }
 
-export function emitSlackProgressHttpEvidence(
+function emitSlackProgressHttpEvidence(
   scenario: string,
   requests: ReturnType<typeof createSlackHttpRecorder>["requests"],
 ) {
