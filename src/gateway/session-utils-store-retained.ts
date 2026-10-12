@@ -1,7 +1,9 @@
+import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
 import { listAgentIds } from "../agents/agent-scope-config.js";
 import type { QualifiedSessionEntryAccessTarget } from "../config/sessions/session-accessor.types.js";
+import { getSessionActorStorageBinding } from "../config/sessions/session-actor-storage-binding.js";
 import { withSessionEntriesFromStoresInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import type { SessionEntryWorkerRead } from "../config/sessions/session-entry-read-runtime.types.js";
 import type { CapturedSessionEntryReadSource } from "../config/sessions/session-entry-read-source.types.js";
@@ -224,6 +226,53 @@ export function withIncognitoGatewaySessionStoreTarget<T>(params: {
     assertCurrent: () => void,
   ) => T;
 }): T | Promise<T> {
+  const memory = getSessionActorStorageBinding({});
+  if (memory) {
+    const { actor, authority } = memory;
+    const { agentId, canonicalKey: sessionKey } = params.identity;
+    const storePath = resolveIncognitoOpenClawAgentSqlitePath({
+      agentId,
+      env: params.env ?? { OPENCLAW_STATE_DIR: path.resolve(memory.path, "../../../..") },
+    });
+    actor.assertReadable();
+    const snapshot =
+      agentId === memory.agentId &&
+      storePath === memory.path &&
+      actor.target.sessionKey === sessionKey
+        ? actor.snapshot(authority)
+        : undefined;
+    let consuming = true;
+    const assertCurrent = () => {
+      if (!consuming) {
+        throw new Error("Incognito session source is no longer retained");
+      }
+      actor.assertReadable();
+      authority.assertCurrent();
+    };
+    try {
+      const result = params.consume(
+        {
+          agentId,
+          canonicalKey: sessionKey,
+          storePath,
+          storeKeys: [sessionKey],
+          store: snapshot?.entry ? { [sessionKey]: snapshot.entry } : {},
+          readSource: { agentId, path: storePath },
+        },
+        params.includeMembership && snapshot
+          ? new Map([[sessionKey, snapshot.members]])
+          : new Map(),
+        assertCurrent,
+      );
+      if (isPromiseLike(result)) {
+        void Promise.resolve(result).catch(() => undefined);
+        throw new Error("Session entry consumers must remain synchronous");
+      }
+      return result;
+    } finally {
+      consuming = false;
+    }
+  }
   const binding = captureIncognitoSessionBinding({
     agentId: params.identity.agentId,
     sessionKey: params.identity.canonicalKey,

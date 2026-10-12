@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import { isMainThread, threadId } from "node:worker_threads";
 import type { SqliteWorkerEphemeralTarget } from "../infra/sqlite-worker-contract.js";
 import {
+  assertExistingDatabaseIdentity,
   readDatabasePathIdentitySync,
   type DatabasePathIdentity,
 } from "../infra/sqlite-worker-identity.js";
@@ -77,16 +78,33 @@ export function runOpenClawAgentWriteAdmission<T>(
   timing?: StoreWriterTiming,
   signal?: AbortSignal,
 ): Promise<T> {
-  const pathname = resolveOpenClawAgentSqlitePath(options);
+  return runOpenClawAgentPathWriteAdmission(
+    resolveOpenClawAgentSqlitePath(options),
+    run,
+    reentrant,
+    timing,
+    signal,
+  );
+}
+
+/** A captured physical actor needs no logical agent or ambient path resolution. */
+export function runOpenClawAgentPathWriteAdmission<T>(
+  pathname: string,
+  run: (identity: DatabasePathIdentity, assertCurrent: () => void) => Promise<T> | T,
+  reentrant = false,
+  timing?: StoreWriterTiming,
+  signal?: AbortSignal,
+): Promise<T> {
   const identity = readDatabasePathIdentitySync(pathname);
   const storePath = identity.canonicalPath;
   const assertCurrent = () => {
-    const current = readDatabasePathIdentitySync(pathname);
-    if (
-      current.canonicalPath !== storePath ||
-      (identity.key.startsWith("file:") &&
-        (current.key !== identity.key || current.birthtime !== identity.birthtime))
-    ) {
+    if (identity.key.startsWith("file:")) {
+      try {
+        assertExistingDatabaseIdentity(pathname, identity.key, identity.birthtime);
+      } catch (cause) {
+        throw new Error("Agent database target changed before write admission", { cause });
+      }
+    } else if (readDatabasePathIdentitySync(pathname).canonicalPath !== storePath) {
       throw new Error("Agent database target changed before write admission");
     }
   };

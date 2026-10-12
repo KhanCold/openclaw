@@ -294,6 +294,7 @@ describe("AppSidebar session mutation feedback", () => {
       selfUser: { id: "profile-ada", name: "Ada" },
       hello: gatewayHelloForMethods(["sessions.assignOwner"], ["operator.write"]),
     });
+    sidebar.setSessionOwnerFilter(null);
     const result = harness.sessions.state.result;
     const row = result?.sessions.find((session) => session.key === "agent:main:a");
     if (!result || !row) {
@@ -312,11 +313,13 @@ describe("AppSidebar session mutation feedback", () => {
     await waitForFast(() => expect(menu.textContent).toContain("Bob"));
     expect(menuItemLabels(menu)).toContain("Assign to…");
     const assignmentMenu = menuItem(menu, "Assign to…");
-    expect(
-      Array.from(
-        assignmentMenu?.querySelectorAll<HTMLElement>('wa-dropdown-item[slot="submenu"]') ?? [],
-      ).map((item) => item.querySelector(".session-menu__text")?.textContent?.trim()),
-    ).toEqual(["Me", "Bob"]);
+    await waitForFast(() =>
+      expect(
+        Array.from(
+          assignmentMenu?.querySelectorAll<HTMLElement>('wa-dropdown-item[slot="submenu"]') ?? [],
+        ).map((item) => item.querySelector(".session-menu__text")?.textContent?.trim()),
+      ).toEqual(["Me", "Bob"]),
+    );
     menu.querySelector("wa-dropdown")?.dispatchEvent(
       new CustomEvent("wa-select", {
         bubbles: true,

@@ -4,7 +4,7 @@ import { setImmediate } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
-import { readSqliteBusyTimeout } from "../../infra/sqlite-busy-timeout.js";
+import { readSqliteBusyTimeout, setSqliteBusyTimeout } from "../../infra/sqlite-busy-timeout.js";
 import { withSqlitePostCommitPublications } from "../../infra/sqlite-post-commit.js";
 import { admitSqliteSchema } from "../../infra/sqlite-schema-facts.js";
 import {
@@ -12,6 +12,7 @@ import {
   registerOpenClawAgentDatabaseIdentity,
 } from "../../state/openclaw-agent-db-identity.js";
 import { closeCachedOpenClawAgentDatabase } from "../../state/openclaw-agent-db-lifecycle.js";
+import { runOpenClawAgentWriteWithYieldingAdmission } from "../../state/openclaw-agent-db-transaction.js";
 import {
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabaseByPathAsync,
@@ -176,7 +177,7 @@ describe("SQLite session entry patch commit revalidation", () => {
   it("yields to the event loop while another connection holds the entry write lock", async () => {
     const other = new DatabaseSync(database.path);
     // Bound the defective synchronous path without a timer or a timing assertion.
-    database.db.exec("PRAGMA busy_timeout = 250");
+    setSqliteBusyTimeout(database.db, 250);
     let release: Promise<void> | undefined;
     try {
       const result = await patchEntry("ordinary", () => {
@@ -192,24 +193,29 @@ describe("SQLite session entry patch commit revalidation", () => {
     }
   });
 
-  it("restores the connection's commit wait after admitting a rollback-journal patch", async () => {
+  it("restores the connection's commit wait after admitting a rollback-journal write", async () => {
     await closeOpenClawAgentDatabasesAsync();
     database = openOpenClawAgentDatabase({ agentId: "main", env });
     expect(database.db.prepare("PRAGMA journal_mode = DELETE").get()?.journal_mode).toBe("delete");
-    database.db.exec("PRAGMA busy_timeout = 37");
+    setSqliteBusyTimeout(database.db, 37);
     const reader = new DatabaseSync(database.path);
     try {
       reader.exec("BEGIN");
       reader.prepare("SELECT session_key FROM session_nodes").get();
-      const patched = await patchSessionEntryCore(scope, () => ({ label: "after reader" }), {
-        skipMaintenance: true,
-        assertCommitAllowed: () => {
-          expect(database.db.isTransaction).toBe(true);
+      const patched = await runOpenClawAgentWriteWithYieldingAdmission(
+        (writer) => {
+          expect(writer.db.isTransaction).toBe(true);
           expect(reader.isTransaction).toBe(true);
-          expect(readSqliteBusyTimeout(database.db)).toBe(37);
+          expect(readSqliteBusyTimeout(writer.db)).toBe(37);
           reader.exec("ROLLBACK");
+          return writeSessionEntry(writer, sessionKey, {
+            sessionId: "session-1",
+            updatedAt: 10,
+            label: "after reader",
+          });
         },
-      });
+        { agentId: "main", env },
+      );
       expect(patched?.label).toBe("after reader");
       expect(
         reader

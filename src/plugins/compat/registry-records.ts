@@ -1,11 +1,15 @@
 import { AGENT_HARNESS_COMPAT_RECORDS } from "./agent-harness-records.js";
 import { AGENT_LIST_RUNTIME_PROJECTION_COMPAT_RECORDS } from "./agent-list-runtime-projection-records.js";
+import { ASSISTANT_TEXT_PHASE_TERMINAL_HINT_COMPAT_RECORD } from "./assistant-text-phase-terminal-hint-record.js";
+import { AUTH_ASYNC_COMPAT_RECORD } from "./auth-async-record.js";
 import { BINDING_PERSISTENCE_COMPAT_RECORDS } from "./binding-persistence-records.js";
 import { CHANNEL_PAIRING_COMPAT_RECORD } from "./channel-pairing-record.js";
 import { DEPRECATION_MARKING_COMPAT_RECORDS } from "./deprecation-marking.js";
 import { MEDIA_LEGACY_PROJECTION_COMPAT_RECORD } from "./media-legacy-projection.js";
+import { MEMORY_SESSION_COMPAT_RECORDS } from "./memory-session-records.js";
 import { MENTION_INBOX_COMPAT_RECORD } from "./mention-inbox-record.js";
 import { MODEL_ACCOUNT_CONNECT_COMPAT_RECORD } from "./model-account-connect-record.js";
+import { NATIVE_EXEC_APPROVAL_COMPAT_RECORD } from "./native-exec-approval-record.js";
 import { PLUGIN_SDK_REMOVED_EXPORT_RECORDS } from "./plugin-sdk-removed-export-records.js";
 import {
   BUNDLED_ONLY_PUBLIC_PLUGIN_SDK_SUBPATH_RECORDS,
@@ -13,7 +17,9 @@ import {
 } from "./plugin-sdk-subpath-records.js";
 import { PROGRESS_RECEIPT_HANDOFF_COMPAT_RECORD } from "./progress-receipt-handoff-record.js";
 import { SESSION_PERSISTENCE_COMPAT_RECORDS } from "./session-persistence-records.js";
+import { SKILL_COMMAND_DISCOVERY_COMPAT_RECORD } from "./skill-command-discovery-record.js";
 import { SKILL_PROPOSAL_HOOKS_COMPAT_RECORD } from "./skill-proposal-hooks-record.js";
+import { SQLITE_RUNTIME_COMPAT_RECORDS } from "./sqlite-runtime-records.js";
 import { TTS_PREFERENCES_COMPAT_RECORD } from "./tts-preferences-record.js";
 import type { PluginCompatRecord } from "./types.js";
 import { WATCHED_SESSIONS_COMPAT_RECORD } from "./watched-sessions.js";
@@ -31,16 +37,21 @@ const ACTIVATION_HINT_METADATA = {
 export const PLUGIN_COMPAT_RECORDS = [
   ...PLUGIN_SDK_REMOVED_EXPORT_RECORDS,
   ...AGENT_HARNESS_COMPAT_RECORDS,
+  AUTH_ASYNC_COMPAT_RECORD,
   ...BINDING_PERSISTENCE_COMPAT_RECORDS,
   CHANNEL_PAIRING_COMPAT_RECORD,
   MENTION_INBOX_COMPAT_RECORD,
   MODEL_ACCOUNT_CONNECT_COMPAT_RECORD,
   WORKSPACE_MUTATION_GUARD_COMPAT_RECORD,
   ...SESSION_PERSISTENCE_COMPAT_RECORDS,
+  SKILL_COMMAND_DISCOVERY_COMPAT_RECORD,
+  ...SQLITE_RUNTIME_COMPAT_RECORDS,
+  NATIVE_EXEC_APPROVAL_COMPAT_RECORD,
   TTS_PREFERENCES_COMPAT_RECORD,
   ...AGENT_LIST_RUNTIME_PROJECTION_COMPAT_RECORDS,
   WATCHED_SESSIONS_COMPAT_RECORD,
   PROGRESS_RECEIPT_HANDOFF_COMPAT_RECORD,
+  ASSISTANT_TEXT_PHASE_TERMINAL_HINT_COMPAT_RECORD,
   {
     code: "gateway-placement-sync-results",
     status: "deprecated",
@@ -50,12 +61,13 @@ export const PLUGIN_COMPAT_RECORDS = [
     warningStarts: "2026-10-02",
     removalGate: "next-plugin-sdk-major",
     replacement:
-      "Await getManyAsync, retireSessionPlacementAsync, listPendingWorkspaceResultsAsync, getWorkspaceResultReconcilingSessionIdsAsync, getAdmittedDeviceSessionCountsAsync, and deferOrphanedRequestsAsync on the Gateway context. For placement standing-grant preparation, await resolveBindingAsync, retainAsync, and validateAsync; keep consume synchronous at final transport authorization. Released synchronous methods retain their signatures, return values, and completion timing until the next Plugin SDK major and explicit breaking-release approval.",
+      "Await getManyAsync, retireSessionPlacementAsync, listPendingWorkspaceResultsAsync, getWorkspaceResultReconcilingSessionIdsAsync, getAdmittedDeviceSessionCountsAsync, and deferOrphanedRequestsAsync on the Gateway context. For placement standing-grant preparation, await resolveBindingAsync, retainAsync, and validateAsync; keep consume synchronous at final transport authorization. Released synchronous placement methods retain their signatures, return values, and completion timing until the next Plugin SDK major and explicit breaking-release approval. GitHub publication orphan deferral retains its signature but fails at invocation; use deferOrphanedRequestsAsync.",
     docsPath:
       "/plugins/sdk-migration/compatibility-policy#gateway-placement-and-publication-readers",
     surfaces: [
       "GatewayRequestHandlerOptions.context.workerSessionPlacementService.getMany",
       "GatewayRequestHandlerOptions.context.workerSessionPlacementService.retireSessionPlacement",
+      "GatewayRequestHandlerOptions.context.workerSessionPlacementService.clearLocalTurnClaimsAfterRestart",
       "GatewayRequestHandlerOptions.context.workerPlacementDispatchService.getAdmittedDeviceSessionCounts",
       "GatewayRequestHandlerOptions.context.placementStandingGrants.resolveBinding",
       "GatewayRequestHandlerOptions.context.placementStandingGrants.retain",
@@ -66,11 +78,12 @@ export const PLUGIN_COMPAT_RECORDS = [
       "getPluginRuntimeGatewayRequestScope().context",
     ],
     diagnostics: [
-      "TypeScript @deprecated annotations and migration documentation; no runtime warnings",
+      "TypeScript @deprecated annotations and migration documentation; placement reads, retirement, and restart clearing warn once per plugin and capability family on legacy use, while GitHub orphan deferral shares the github-publication family warning",
     ],
     tests: [
       "src/plugin-sdk/gateway-placement-compat.test.ts",
       "src/gateway/worker-environments/placement-store.test.ts",
+      "src/gateway/worker-environments/placement-turn-claims.worker.test.ts",
       "src/gateway/operator-approval-placement-grants.test.ts",
       "src/gateway/worker-environments/device-placement-demand.test.ts",
       "src/gateway/github-publication-boundaries.test.ts",
@@ -80,29 +93,7 @@ export const PLUGIN_COMPAT_RECORDS = [
     releaseNote:
       "Placement reads, retirement, device demand, standing-grant preparation, and GitHub orphan deferral expose awaited methods while retaining the synchronous Gateway-context contracts shipped to plugins in 2026.9.7, 2026.9.8, and 2026.10.1-beta.1. Internal placement operations use the SQLite worker; stored data and update behavior are unchanged.",
   },
-  {
-    code: "memory-session-sync-inventory",
-    status: "deprecated",
-    owner: "sdk",
-    introduced: "2026-08-09",
-    deprecated: "2026-10-01",
-    warningStarts: "2026-10-01",
-    removalGate: "next-plugin-sdk-major",
-    replacement:
-      "Await loadArchivedSessionsAsync and resolveMemorySessionTargetsAsync from memory-core-host-engine-sessions. Synchronous readers retain their existing signatures and results until the next Plugin SDK major.",
-    docsPath: "/plugins/sdk-migration/compatibility-policy#memory-session-inventory-readers",
-    surfaces: ["loadArchivedSessions", "resolveMemorySessionTargets"],
-    diagnostics: [
-      "TypeScript @deprecated annotations and migration documentation; no runtime warnings",
-    ],
-    tests: [
-      "src/plugin-sdk/memory-core-host-engine-sessions.test.ts",
-      "src/plugins/compat/registry.test.ts",
-      "extensions/memory-core/src/memory-forget.sources.test.ts",
-    ],
-    releaseNote:
-      "Memory archive discovery and forget target selection can be awaited through worker-backed SDK readers; synchronous readers remain compatible until the next Plugin SDK major.",
-  },
+  ...MEMORY_SESSION_COMPAT_RECORDS,
   {
     code: "channel-webhook-listener-config-inputs",
     status: "deprecated",

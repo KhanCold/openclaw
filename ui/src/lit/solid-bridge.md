@@ -52,11 +52,21 @@ Declared methods receive the typed host first, preserve arguments/return values,
 and work before connection. Keep stateful behavior in the primitive's owner;
 methods can change declared properties or invoke its native DOM operations.
 
-Host property reads and writes are synchronous. Component updates are batched
-until the microtask commit. The bridge queues its flush during Lit's property
-commit, so awaiting the caller's `updateComplete` sees committed synchronous
-Solid output. The bridge also exposes `updateComplete` for imperative callers.
+For owners that must invalidate requests or presentation synchronously, the optional
+`propertyChanged(host, key)` hook runs after a changed value is stored and before
+rendering is scheduled. Equal assignments do not invoke it. Keep cancellation and
+authority in that owner; the hook is not a second render lifecycle.
+
+Host property reads and writes are synchronous. Each property has its own Solid
+signal; unchanged inputs do not invalidate other properties' computations.
+Solid batches signal writes during Lit's property commit, so awaiting the caller's
+`updateComplete` sees committed synchronous Solid output without an extra bridge
+flush. Each bridge retains its own mount promise to preserve disconnect/reconnect
+ordering. Solid-owned hosts publish into their parent's existing render cycle.
+The bridge also exposes `updateComplete` for imperative callers.
 Neither completion promise waits for async resources, layout, or animations.
+Callers must retain semantically unchanged object and callback references at
+their projection owner; the bridge compares property values by identity.
 
 Caller children move as one intact DOM range into `{props.children}`. Render it
 exactly once, unconditionally, as the only children of a stable outlet. Lit's

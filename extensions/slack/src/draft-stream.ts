@@ -1,14 +1,14 @@
 import type { MessageMetadata } from "@slack/types";
 import type { Block, KnownBlock } from "@slack/web-api";
+import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { createFinalizableDraftLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
-import { resolveDefaultSlackAccountId } from "./accounts.js";
 import { deleteSlackMessage, editSlackMessage, editSlackRenderedMessage } from "./actions.js";
+import { resolveDefaultSlackAccountId } from "./accounts.js";
 import { trackSlackDraftMessage } from "./draft-message-boundaries.js";
 import { formatSlackError } from "./errors.js";
-import { normalizeSlackOutboundText } from "./format.js";
 import { SLACK_TEXT_LIMIT } from "./limits.js";
+import { normalizeSlackOutboundText } from "./format.js";
 import type { SlackEventScope } from "./monitor/event-scope.js";
 import type { SlackSendIdentity } from "./send.js";
 import { sendMessageSlack } from "./send.js";
@@ -19,7 +19,7 @@ type SlackDraftStreamUpdate =
   | string
   | {
       text: string;
-      // Progress may contain both rendered commentary and raw legacy Markdown.
+      // Compact progress can mix rendered commentary with raw legacy Markdown.
       escapeMentions?: true;
       blocks?: (Block | KnownBlock)[];
       // Partial preambles can edit a visible draft, but must never create a
@@ -36,7 +36,6 @@ type SlackVisibleDraftUpdate = {
 type SlackDraftMessage = {
   channelId: string;
   messageId: string;
-  generation: number;
   detachedByHuman?: boolean;
   retained?: boolean;
 };
@@ -65,20 +64,15 @@ export function createSlackDraftStream(params: {
   const remove = params.remove ?? deleteSlackMessage;
 
   let streamMessage: SlackDraftMessage | undefined;
-  let cleanupGeneration = -1;
   let untrackConversationBoundary: (() => void) | undefined;
-  let lastVisibleUpdate: SlackVisibleDraftUpdate | undefined;
   let lastSentKey = "";
   let preserveHumanReplies = false;
   const streamState = { stopped: false, final: false };
 
-  const normalizeUpdate = (
-    update: SlackDraftStreamUpdate,
-  ): Exclude<SlackDraftStreamUpdate, string> =>
+  const normalizeUpdate = (update: SlackDraftStreamUpdate) =>
     typeof update === "string" ? { text: update } : update;
   const clearMessageId = () => {
     streamMessage = undefined;
-    lastVisibleUpdate = undefined;
     lastSentKey = "";
   };
   const editPreview = (message: SlackDraftMessage, update: SlackVisibleDraftUpdate) =>
@@ -109,9 +103,8 @@ export function createSlackDraftStream(params: {
       params.warn?.(`slack stream preview stopped (text length ${trimmed.length} > ${maxChars})`);
       return;
     }
-    const blocks = update.blocks;
-    // Preserve the no-ping policy through the final Markdown conversion. URLs
-    // remain links, and ordinary partial drafts still use their normal renderer.
+    // Preserve the no-ping policy through the final Markdown conversion while
+    // keeping URLs and ordinary partial drafts on their existing render paths.
     const visibleUpdate: SlackVisibleDraftUpdate = {
       text: update.escapeMentions
         ? normalizeSlackOutboundText(trimmed, {
@@ -123,7 +116,7 @@ export function createSlackDraftStream(params: {
             }),
           })
         : trimmed,
-      ...(blocks ? { blocks } : {}),
+      ...(update.blocks ? { blocks: update.blocks } : {}),
       ...(update.escapeMentions ? { textIsSlackMrkdwn: true as const } : {}),
     };
     const sentKey = JSON.stringify(visibleUpdate);
@@ -131,14 +124,9 @@ export function createSlackDraftStream(params: {
       return;
     }
     lastSentKey = sentKey;
-    const generation = lifecycle.generation;
     try {
       if (streamMessage) {
-        const message = streamMessage;
-        await editPreview(message, visibleUpdate);
-        if (streamMessage === message) {
-          lastVisibleUpdate = visibleUpdate;
-        }
+        await editPreview(streamMessage, visibleUpdate);
         return;
       }
       const threadTs = params.resolveThreadTs?.();
@@ -151,10 +139,6 @@ export function createSlackDraftStream(params: {
           messageTs,
           onInterveningMessage: () => forceNewMessage("human"),
         });
-      const pendingBoundary = params.conversationChannelId
-        ? trackMessage(params.conversationChannelId)
-        : undefined;
-      untrackConversationBoundary = pendingBoundary?.stop;
       await lifecycle.createMessage(
         async () => {
           const sent = await send(params.target, visibleUpdate.text, {
@@ -166,10 +150,10 @@ export function createSlackDraftStream(params: {
             eventScope: params.eventScope,
             ...(visibleUpdate.textIsSlackMrkdwn ? { textIsSlackMrkdwn: true } : {}),
             ...(params.metadata ? { metadata: params.metadata } : {}),
-            ...(blocks ? { blocks } : {}),
+            ...(visibleUpdate.blocks ? { blocks: visibleUpdate.blocks } : {}),
           });
           return sent.channelId && sent.messageId
-            ? { channelId: sent.channelId, messageId: sent.messageId, generation }
+            ? { channelId: sent.channelId, messageId: sent.messageId }
             : undefined;
         },
         (sentMessage) => {
@@ -181,22 +165,15 @@ export function createSlackDraftStream(params: {
           }
           const { channelId, messageId } = sentMessage;
           streamMessage = sentMessage;
-          lastVisibleUpdate = visibleUpdate;
-          if (pendingBoundary && params.conversationChannelId === channelId) {
-            pendingBoundary.setMessageTs(messageId);
-          } else {
-            stopTrackingConversationBoundary();
-            untrackConversationBoundary = trackMessage(channelId, messageId).stop;
-          }
+          stopTrackingConversationBoundary();
+          untrackConversationBoundary = trackMessage(channelId, messageId).stop;
           return true;
         },
         { defer: true },
       );
     } catch (err) {
-      if (generation === lifecycle.generation) {
-        stopTrackingConversationBoundary();
-        streamState.stopped = true;
-      }
+      stopTrackingConversationBoundary();
+      streamState.stopped = true;
       params.warn?.(`slack stream preview failed: ${formatSlackError(err)}`);
     }
   };
@@ -212,9 +189,6 @@ export function createSlackDraftStream(params: {
     isValidMessageId: (value): value is SlackDraftMessage =>
       typeof value === "object" && value !== null,
     deleteMessage: async (message) => {
-      if (message.generation > cleanupGeneration) {
-        return false;
-      }
       if (!message.retained && !(preserveHumanReplies && message.detachedByHuman)) {
         await remove(message.channelId, message.messageId, {
           token: params.token,
@@ -234,48 +208,22 @@ export function createSlackDraftStream(params: {
     untrackConversationBoundary = undefined;
   };
 
-  const dropDetachedMessages = () => {
-    const generation = lifecycle.generation;
-    return lifecycle.cleanupPending(() => {
+  const dropDetachedMessages = () =>
+    lifecycle.cleanupPending(() => {
       preserveHumanReplies = false;
-      cleanupGeneration = generation;
     });
-  };
 
   const discardPendingAndStopTracking = async () => {
-    // A human can reply before Slack returns the pending preview's identity.
-    // Reconcile that receipt before removing the conversation boundary tracker.
-    const generation = lifecycle.generation;
     await discardPending();
-    if (generation === lifecycle.generation) {
-      stopTrackingConversationBoundary();
-    }
+    stopTrackingConversationBoundary();
   };
 
   const clear = async (options?: { preserveHumanReplies?: boolean }) => {
-    // Final delivery preserves human-replied context, while failed active
-    // deletions and explicit rotations remain eligible for cleanup.
-    const generation = lifecycle.generation;
-    let clearingMessage = streamMessage;
-    await lifecycle.clearWithStop(
-      async () => {
-        if (generation === lifecycle.generation) {
-          await discardPendingAndStopTracking();
-          if (generation === lifecycle.generation) {
-            clearingMessage = streamMessage;
-            clearMessageId();
-          }
-        }
-        cleanupGeneration = generation;
-        preserveHumanReplies = options?.preserveHumanReplies === true;
-      },
-      {
-        readMessageId: () => clearingMessage,
-        clearMessageId: () => {
-          clearingMessage = undefined;
-        },
-      },
-    );
+    // Cleanup is best effort if a caller starts another turn before it finishes.
+    await lifecycle.clearWithStop(async () => {
+      await discardPendingAndStopTracking();
+      preserveHumanReplies = options?.preserveHumanReplies === true;
+    });
   };
 
   const forceNewMessage = (reason: "turn" | "human" = "turn") => {
@@ -301,27 +249,14 @@ export function createSlackDraftStream(params: {
     editFinal: () => Promise<void>,
   ): Promise<boolean> => {
     const currentMessage = streamMessage;
-    const previousUpdate = lastVisibleUpdate;
-    if (!currentMessage || currentMessage.messageId !== messageId || !previousUpdate) {
+    if (!currentMessage || currentMessage.messageId !== messageId) {
       return false;
     }
-    const { channelId } = currentMessage;
-
     await editFinal();
-    if (streamMessage?.channelId === channelId && streamMessage.messageId === messageId) {
-      currentMessage.retained = true;
-      stopTrackingConversationBoundary();
-      return true;
-    }
-
-    // A human spoke while the final edit was in flight. Preserve the earlier
-    // progress they responded to and let the final answer land below them.
-    try {
-      await editPreview(currentMessage, previousUpdate);
-    } catch (err) {
-      params.warn?.(`slack stream preview restore failed: ${formatSlackError(err)}`);
-    }
-    return false;
+    // An accepted final stays final even if a human replied during the edit.
+    currentMessage.retained = true;
+    stopTrackingConversationBoundary();
+    return true;
   };
 
   params.log?.(`slack stream preview ready (maxChars=${maxChars}, throttleMs=${throttleMs})`);
