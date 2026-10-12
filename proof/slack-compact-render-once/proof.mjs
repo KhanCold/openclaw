@@ -11,14 +11,19 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const BASE = 'a8a349b15b20240d387770378072c2ca51889596';
-const HEAD = '00a48d94878ab0c36ccd0ba4355efb84ba6222d3';
+const BASE = '25f739c7aad038249324b0762a54c9a92d98dcd9';
+const HEAD = '298b20cc941cfd7d96aea875208dee4189825eb2';
 const IMAGE = 'node:26.11.1-bookworm@sha256:253729d3f2b77dbab6a5694aa20da4b484bc759bfb7004aa2e0b683c390e825e';
 const PNPM_SHA512 = '8f64efa0b792986ca98ae568791bcd7722807e274c4f0c1d9853c62116495c584119db98762a2a5343b1684d361b9ae26fdd16d551666d7635346d3fae830ddd';
 const PNPM_NATIVE_SHA512 = 'ElANYUwQuMfWqMJR4m5L5h9zKjvGKcA8hi2put4J1DMx2smVaNGkGnxkgeIYgMjmF7UFxlZDcL4jItkScgsW4A==';
 const SELF = fileURLToPath(import.meta.url);
 const FIXTURE = 'native <@U0456EFGH> <#C0456EFGH> <!here> <!channel> <!subteam^S123> with `src/one.ts` and [Docs](https://example.invalid/docs) and <https://example.invalid/native|Native>.';
 const SCENARIOS = ['compact-default', 'compact-unlabeled', 'inferred-compact', 'card', 'native-card'];
+const RETIRED_SCENARIO = {
+  name: 'final-edit-restoration',
+  supersededBy: 'c0e2dd79845ad54d5ca2de89b51056bca2c2829f',
+  reason: 'Current upstream removed final-edit restoration and pending-receipt coordination. This is intentionally excluded because it is no longer a supported lifecycle behavior; active compact/inferred defects and partial/card/final-mention controls remain asserted.',
+};
 const PNPM = '/workspace/.proof-tools/package/bin/pnpm.mjs';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const modelRouteDiagnostic = (req) => {
@@ -109,6 +114,7 @@ async function host() {
   try {
     const manifest = { workflow: process.env.GITHUB_SHA, harnessSha256: hash(await fs.readFile(SELF)), integrityReporterSha256: hash(await fs.readFile(path.join(path.dirname(SELF), 'integrity-reporter.mjs'))), base: BASE, head: HEAD, image: IMAGE };
     emit(manifest);
+    emit({ proofRecord: true, result: 'retired-scenario-excluded', ...RETIRED_SCENARIO });
     await run('docker', ['pull', IMAGE], { timeout: 300_000 });
     for (const [role, sha, repository] of [['base', BASE, 'openclaw/openclaw'], ['head', HEAD, 'KhanCold/openclaw']]) {
       const source = path.join(temp, role);
@@ -121,7 +127,6 @@ async function host() {
         'extensions/slack/src/delivery-trace.test.ts',
         'extensions/slack/src/delivery-trace.test-support.ts',
         'extensions/slack/src/draft-stream.test.ts',
-        'extensions/slack/src/draft-stream.http.test.ts',
       ];
       if (role === 'base') {
         await git(['fetch', '--depth=1', 'https://github.com/KhanCold/openclaw.git', HEAD], source);
@@ -142,7 +147,7 @@ async function host() {
       const summaries = proofRecords(buildOutput).filter((record) => record.result === 'tracked-source-summary');
       assert.deepEqual(summaries.map((record) => record.phase), ['before-install', 'after-install', 'after-build']);
       const initial = summaries[0];
-      const expectedUntracked = role === 'base' ? ['extensions/slack/src/draft-stream.http.test.ts'] : [];
+      const expectedUntracked = [];
       for (const snapshot of summaries) {
         assert.equal(snapshot.head, sha, 'Wrong snapshot HEAD');
         assert.equal(snapshot.contentSha256, initial.contentSha256, 'Tracked content/mode changed during install/build');
@@ -163,7 +168,7 @@ async function host() {
       assert.deepEqual(tested[0].untracked, expectedUntracked, 'Tests created unexpected untracked source');
       assert.equal(tested[0].diffSha256, frozenDiff, 'Stable diff differs after tests; inspect serialization separately from content');
       // The regression overlay is a separate source identity. Restore only the
-      // four verified task-owned test paths before building pristine Gateway.
+      // three verified task-owned test paths before building pristine Gateway.
       assert.equal(hash(await git(stableDiffArgs, source)), frozenDiff, 'Host full-index diff differs after qualification; inspect serialization separately from content');
       for (const file of testFiles) {
         assert.equal(hash(await readSourceFile(source, file)), overlayHashes[file]);
@@ -203,15 +208,9 @@ async function host() {
       const runtimeHashes = { ...overlayHashes };
       if (role === 'base') {
         for (const file of testFiles) {
-          if (file === 'extensions/slack/src/draft-stream.http.test.ts') {
-            assert.equal((await git(['ls-tree', '--name-only', BASE, '--', file], source)).trim(), '');
-            await fs.unlink(path.join(source, file));
-            runtimeHashes[file] = null;
-          } else {
-            const original = await git(['show', `${BASE}:${file}`], source);
-            await fs.writeFile(path.join(source, file), original);
-            runtimeHashes[file] = hash(original);
-          }
+          const original = await git(['show', `${BASE}:${file}`], source);
+          await fs.writeFile(path.join(source, file), original);
+          runtimeHashes[file] = hash(original);
         }
         assert.equal((await git(stableDiffArgs, source)).trim(), '', 'Baseline restoration not pristine');
         await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'rebuild'], { timeout: 1_300_000, label: 'base-pristine-qaRuntime-rebuild', log: true });
@@ -257,7 +256,7 @@ async function host() {
       await fs.rm(source, { recursive: true, force: true });
     }
     assert.equal(sdkRecords.length, 2);
-    for (const scenario of ['dispatch-partial', 'dispatch-card', 'restoration-partial']) {
+    for (const scenario of ['dispatch-partial', 'dispatch-card']) {
       const projection = (record) => record.records.find((item) => item.scenario === scenario).writes.map(({ ts, ...write }) => write);
       assert.deepEqual(projection(sdkRecords[0]), projection(sdkRecords[1]), `Control drift: ${scenario}`);
     }
@@ -444,7 +443,7 @@ async function changedChecks() {
     'extensions/slack/src/draft-stream.ts', 'extensions/slack/src/format.ts',
     'extensions/slack/src/monitor/message-handler/dispatch-progress.ts',
     'extensions/slack/src/delivery-trace.test.ts', 'extensions/slack/src/delivery-trace.test-support.ts',
-    'extensions/slack/src/draft-stream.test.ts', 'extensions/slack/src/draft-stream.http.test.ts',
+    'extensions/slack/src/draft-stream.test.ts',
   ];
   await resourceSnapshot('before-changed-checks');
   try {
@@ -466,12 +465,11 @@ async function ownerTests(role, sha) {
   const root = await fs.mkdtemp('/tmp/owner-proof-');
   const outputFile = `${root}/vitest.json`;
   const integrityFile = `${root}/integrity.json`;
-  const expectedFiles = ['delivery-trace.test.ts', 'draft-stream.http.test.ts', 'draft-stream.test.ts', 'format.test.ts', 'monitor/message-handler/dispatch.preview-fallback.test.ts'].map((file) => `/workspace/extensions/slack/src/${file}`).sort();
+  const expectedFiles = ['delivery-trace.test.ts', 'draft-stream.test.ts', 'format.test.ts', 'monitor/message-handler/dispatch.preview-fallback.test.ts'].map((file) => `/workspace/extensions/slack/src/${file}`).sort();
   const env = { ...process.env, HOME: root, CI: 'true', OPENCLAW_PROOF_INTEGRITY_REPORT: integrityFile, OPENCLAW_DELIVERY_PROOF: '1', OPENCLAW_DELIVERY_PROOF_SHA: sha, OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
   const started = Date.now();
   const output = await run('node', ['scripts/run-vitest.mjs',
     'extensions/slack/src/delivery-trace.test.ts',
-    'extensions/slack/src/draft-stream.http.test.ts',
     'extensions/slack/src/draft-stream.test.ts',
     'extensions/slack/src/format.test.ts',
     'extensions/slack/src/monitor/message-handler/dispatch.preview-fallback.test.ts',
@@ -514,31 +512,30 @@ async function ownerTests(role, sha) {
     assert.equal(suite.status, suite.assertionResults.some((item) => item.status === 'failed') ? 'failed' : 'passed');
   }
   const failed = cases.filter((item) => item.status === 'failed').map((item) => item.fullName);
+  // These are the expected baseline reds: explicit compact, inferred compact,
+  // and the draft-stream owner's mention-safe rendered-text regression. The
+  // partial and card controls plus final-reply mention control must remain green.
+  // These intended baseline reds are kept explicit. The removed restoration
+  // scenario is omitted because current main no longer implements that behavior,
+  // not to hide a failure. Any other failure still fails this qualification.
   const expectedFailures = [
     'keeps native mention policy through serialized compact posts and edits',
     'keeps native mention policy through serialized inferred-compact posts and edits',
-    'restores commentary after a human interrupts the final HTTP edit',
-    'restores legacy-reasoning after a human interrupts the final HTTP edit',
-    'restores legacy-commentary after a human interrupts the final HTTP edit',
+    'keeps mention-safe rendered text through the supplied edit owner',
   ];
   const records = output.split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }).filter((record) => record.proofRecord && record.boundary);
-  const expectedScenarios = ['dispatch-compact', 'dispatch-inferred-compact', 'dispatch-partial', 'dispatch-card', 'restoration-commentary', 'restoration-legacy-reasoning', 'restoration-legacy-commentary', 'restoration-partial'];
+  const expectedScenarios = ['dispatch-compact', 'dispatch-inferred-compact', 'dispatch-partial', 'dispatch-card'];
   emit({ proofRecord: true, result: 'sdk-regressions-observed', role, sha, wallMs: Date.now() - started, failed, records });
   assert.deepEqual(records.map((record) => record.scenario).sort(), expectedScenarios.sort(), 'Incomplete owner-boundary coverage');
   assert(records.every((record) => record.sha === sha), 'Wrong regression source revision');
   for (const record of records) {
     const writes = record.writes;
-    const restoration = record.scenario.startsWith('restoration-');
     const progress = !record.scenario.endsWith('-partial');
     const card = record.scenario === 'dispatch-card';
     const first = writes.find((write) => write.method === 'chat.postMessage' && write.text?.includes('FIRST'));
     const second = writes.find((write) => write.method === 'chat.update' && write.text?.includes('SECOND'));
     assert(first && second && first.ts === second.ts, 'Post/edit ownership was not exercised');
-    const previews = restoration ? [writes[0], writes[1], writes[3]] : [first, second];
-    if (restoration) {
-      assert.equal(writes.length, 4);
-      assert.equal(writes[3].text, writes[1].text, 'Restoration did not restore the visible draft');
-    }
+    const previews = [first, second];
     for (const write of previews) {
       const fields = card ? slackMrkdwnFields(write) : [{ text: write.text }];
       const text = fields.map((field) => field.text).join('\n');
@@ -561,7 +558,7 @@ async function ownerTests(role, sha) {
     assert.deepEqual(failed, []);
   }
   await snapshotTracked('after-tests');
-  emit({ proofRecord: true, result: 'sdk-regressions-completed', role, sha, wallMs: Date.now() - started, failed, tests: report.numTotalTests, passed: report.numPassedTests, failedCount: report.numFailedTests, pending: report.numPendingTests, todo: report.numTodoTests, records });
+  emit({ proofRecord: true, result: 'sdk-regressions-completed', role, sha, wallMs: Date.now() - started, failed, tests: report.numTotalTests, passed: report.numPassedTests, failedCount: report.numFailedTests, pending: report.numPendingTests, todo: report.numTodoTests, records, retiredScenario: RETIRED_SCENARIO });
 }
 
 async function listen(handler) {
