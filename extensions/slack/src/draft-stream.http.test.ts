@@ -34,7 +34,7 @@ describe("Slack draft HTTP restoration", () => {
       });
       const native = "<@U0456EFGH> <#C0456EFGH> <!here>";
       const escaped = "&lt;@U0456EFGH&gt; &lt;#C0456EFGH&gt; &lt;!here&gt;";
-      const suffix = `${native} `src/one.ts` [Docs](https://example.invalid/docs)`;
+      const suffix = `${native} \`src/one.ts\` [Docs](https://example.invalid/docs)`;
       const line = (marker: string) =>
         kind === "commentary"
           ? formatSlackProgressDraftLine(`_${marker} ${suffix}_`)
