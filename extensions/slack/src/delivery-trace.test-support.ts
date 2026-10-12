@@ -256,8 +256,7 @@ export async function assertSlackProgressMentionHttpTrace(params: {
   const http = createSlackHttpRecorder();
   const native = "<@U0456EFGH> <#C0456EFGH> <!here>";
   const escaped = "&lt;@U0456EFGH&gt; &lt;#C0456EFGH&gt; &lt;!here&gt;";
-  const source =
-    `${native} with **bold** _context_ \`src/one.ts\` [Docs](https://example.invalid/docs)`;
+  const source = `${native} with **bold** _context_ \`src/one.ts\` [Docs](https://example.invalid/docs)`;
   await runDeliveryTraceScenario({
     scenario: {
       name: `native-mentions-${params.mode}`,
