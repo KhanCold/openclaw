@@ -67,7 +67,7 @@ function slackMrkdwnFields(input) {
 }
 
 async function run(command, args, options = {}) {
-  const { timeout = 120_000, label = command, quietFailure = false, allowedExitCodes = [0], log = false, ...spawnOptions } = options;
+  const { timeout = 120_000, label = command, quietFailure = false, allowedExitCodes = [0], log = false, captureResult = false, ...spawnOptions } = options;
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...spawnOptions });
@@ -87,7 +87,8 @@ async function run(command, args, options = {}) {
       }
       emit({ proofRecord: true, result: 'command-exit', label, code, signal, wallMs: Date.now() - started,
         streams: Object.fromEntries(Object.entries(output).map(([key, raw]) => [key, { bytes: Buffer.byteLength(raw), sha256: hash(raw) }])) });
-      if (!allowedExitCodes.includes(code)) reject(new Error(`Command failed: ${label}; exit=${code}; signal=${signal}`));
+      if (captureResult) resolve({ ...output, code, signal, wallMs: Date.now() - started });
+      else if (!allowedExitCodes.includes(code)) reject(new Error(`Command failed: ${label}; exit=${code}; signal=${signal}`));
       else resolve(output.stdout);
     });
   });
@@ -280,6 +281,123 @@ async function host() {
   }
 }
 
+async function hostChecksOnly() {
+  assert.equal(process.platform, 'linux', 'Host orchestration is CI-only');
+  assert.equal(process.env.GITHUB_ACTIONS, 'true');
+  assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch');
+  assert.equal(process.env.GITHUB_REPOSITORY, 'KhanCold/openclaw');
+  assert.equal(process.env.GITHUB_REF, 'refs/heads/main');
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'slack-checks-only-'));
+  const cleanEnv = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: temp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
+  const git = (args, cwd) => run('/usr/bin/git', ['-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', ...args], { cwd, env: cleanEnv, timeout: 300_000 });
+  const gib = 1024 ** 3;
+  const hostMemoryBytes = os.totalmem();
+  const checkMemoryBytes = Math.floor(Math.min(11 * gib, hostMemoryBytes - 3 * gib));
+  assert(checkMemoryBytes >= 11 * gib, 'Runner cannot provide the required check budget while reserving host memory');
+  const containerName = `slack-checks-only-${process.pid}`;
+  const outcomes = {};
+  try {
+    const manifest = { workflow: process.env.GITHUB_SHA,
+      harnessSha256: hash(await fs.readFile(SELF)),
+      integrityReporterSha256: hash(await fs.readFile(path.join(path.dirname(SELF), 'integrity-reporter.mjs'))),
+      base: BASE, head: HEAD, image: IMAGE, mode: 'checks-only-resume' };
+    emit({ proofRecord: true, result: 'checks-only-manifest', ...manifest,
+      hostMemoryBytes, checkMemoryBytes, hostReserveBytes: hostMemoryBytes - checkMemoryBytes });
+    await run('docker', ['pull', IMAGE], { timeout: 300_000, label: 'checks-only-image-pull', log: true });
+    for (const [role, sha, repository] of [['base', BASE, 'openclaw/openclaw'], ['head', HEAD, 'KhanCold/openclaw']]) {
+      const source = path.join(temp, role);
+      await fs.mkdir(source);
+      await git(['init', '--quiet'], source);
+      await git(['fetch', '--depth=8', `https://github.com/${repository}.git`, sha], source);
+      await git(['checkout', '--quiet', '--detach', 'FETCH_HEAD'], source);
+      assert.equal((await git(['rev-parse', 'HEAD'], source)).trim(), sha);
+      assert.equal((await git(['cat-file', '-e', `${BASE}^{commit}`], source)).trim(), '');
+      if (role === 'head') assert.equal((await git(['cat-file', '-e', `${HEAD}^{commit}`], source)).trim(), '');
+      const stableDiffArgs = ['diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--diff-algorithm=myers', '--no-indent-heuristic', '--unified=3', '--inter-hunk-context=0', '--src-prefix=a/', '--dst-prefix=b/', 'HEAD'];
+      const frozenDiff = hash(await git(stableDiffArgs, source));
+      const mounts = ['--mount', `type=bind,src=${source},dst=/workspace`, '--mount', `type=bind,src=${source}/.git,dst=/workspace/.git,readonly`, '--mount', `type=bind,src=${path.dirname(SELF)},dst=/proof,readonly`];
+      const common = ['run', '--name', containerName, '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`, '--pids-limit=1024', `--memory=${checkMemoryBytes}`, '--cpus=4', '-w', '/workspace', ...mounts];
+      const readonly = common.map((arg) => arg === `type=bind,src=${source},dst=/workspace` ? `${arg},readonly` : arg);
+      emit({ proofRecord: true, result: 'checks-only-source', role, sha, repository, frozenDiff });
+      const prepareOutput = await run('docker', [...common, IMAGE, 'node', '/proof/proof.mjs', 'prepare-checks'], {
+        timeout: 1_500_000, label: `${role}-prepare-checks`, log: true,
+      });
+      const prepareRecords = proofRecords(prepareOutput).filter((record) => record.result === 'tracked-source-summary');
+      assert.deepEqual(prepareRecords.map((record) => record.phase), ['before-install', 'after-install']);
+      const initial = prepareRecords[0];
+      for (const snapshot of prepareRecords) {
+        assert.equal(snapshot.head, sha);
+        assert.equal(snapshot.contentSha256, initial.contentSha256);
+        assert.equal(snapshot.indexContentSha256, initial.indexContentSha256);
+        assert.deepEqual(snapshot.untracked, []);
+        assert.equal(snapshot.diffSha256, frozenDiff);
+      }
+      if (role === 'base') {
+        const checkOutput = await run('docker', [...common, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'baseline-max-lines', BASE], {
+          timeout: 240_000, label: 'base-max-lines-ratchet', log: true, captureResult: true,
+        });
+        const result = proofRecords(checkOutput.stdout).find((record) => record.result === 'base-max-lines-result');
+        assert(result && result.head === BASE && result.base === BASE, 'Missing actual base max-lines result');
+        assert.equal(result.signal, null, 'Base max-lines command was interrupted');
+        assert.notEqual(result.exitCode, null, 'Base max-lines command has no exit result');
+        outcomes.baseMaxLines = result;
+        emit(result);
+      } else {
+        const checkOutput = await run('docker', [...common.map((arg) => arg.startsWith('--memory=') ? `--memory=${checkMemoryBytes}` : arg), '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'checks'], {
+          timeout: 2_400_000, label: 'candidate-all-changed-checks', log: true, captureResult: true,
+        });
+        const records = proofRecords(checkOutput.stdout);
+        const summary = records.find((record) => record.result === 'changed-checks-finished');
+        assert(summary && summary.sha === HEAD, 'Missing complete candidate changed-check summary');
+        outcomes.candidateChangedChecks = summary;
+        outcomes.candidateContainer = { exitCode: checkOutput.code, signal: checkOutput.signal };
+        emit(summary);
+        if (checkOutput.code !== 0) {
+          emit({ proofRecord: true, result: 'candidate-check-container-failed', code: checkOutput.code,
+            signal: checkOutput.signal, summaryFailures: summary.failures });
+        }
+      }
+      const snapshotOutput = await run('docker', [...readonly, '--network=none', '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m,mode=1777', IMAGE, 'node', '/proof/proof.mjs', 'snapshot', 'checks-only-final'], {
+        timeout: 180_000, label: `${role}-checks-only-final-snapshot`, log: true,
+      });
+      const finalSnapshot = proofRecords(snapshotOutput).find((record) => record.result === 'tracked-source-summary');
+      assert(finalSnapshot && finalSnapshot.head === sha);
+      assert.equal(finalSnapshot.contentSha256, initial.contentSha256, 'Checks changed tracked source contents');
+      assert.equal(finalSnapshot.indexContentSha256, initial.indexContentSha256, 'Checks changed tracked index identity');
+      assert.deepEqual(finalSnapshot.untracked, [], 'Checks created unexpected untracked source');
+      assert.equal(finalSnapshot.diffSha256, frozenDiff, 'Checks changed frozen diff');
+      assert.equal((await git(stableDiffArgs, source)).trim(), '', 'Host tracked source changed');
+      emit({ proofRecord: true, result: 'checks-only-source-verified', role, sha,
+        contentSha256: finalSnapshot.contentSha256, diffSha256: finalSnapshot.diffSha256 });
+      await fs.rm(source, { recursive: true, force: true });
+    }
+    const base = outcomes.baseMaxLines;
+    const candidate = outcomes.candidateChangedChecks;
+    const candidateContainer = outcomes.candidateContainer;
+    assert(base && candidate && candidateContainer, 'Missing base or candidate check outcomes');
+    const candidateMaxLines = candidate.failures.find((failure) => failure.name === 'max-lines suppression ratchet');
+    const inheritedFailure = base.exitCode !== 0 && candidateMaxLines?.exitCode === base.exitCode &&
+      base.diagnosticCount >= 2 && candidateMaxLines?.diagnosticCount === base.diagnosticCount &&
+      candidateMaxLines?.diagnosticSha256 === base.diagnosticSha256;
+    emit({ proofRecord: true, result: 'checks-only-comparison-completed', base: BASE, head: HEAD,
+      baseMaxLinesExit: base.exitCode, candidateCheckCount: candidate.total,
+      candidatePassed: candidate.passed, candidateFailed: candidate.failed,
+      candidateContainerExit: candidateContainer.exitCode, candidateContainerSignal: candidateContainer.signal,
+      inheritedMaxLinesFailure: inheritedFailure,
+      baseMaxLinesDiagnostic: { count: base.diagnosticCount, sha256: base.diagnosticSha256, excerpt: base.failureExcerpt },
+      candidateMaxLinesDiagnostic: candidateMaxLines ? { count: candidateMaxLines.diagnosticCount,
+        sha256: candidateMaxLines.diagnosticSha256, excerpt: candidateMaxLines.failureExcerpt } : null,
+      failures: candidate.failures });
+    if (candidate.failed > 0 || candidateContainer.exitCode !== 0 || candidateContainer.signal !== null) process.exitCode = 1;
+    if (process.env.GITHUB_STEP_SUMMARY) {
+      await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, `## Slack remaining changed checks\n\nBase ${BASE} max-lines exit: ${base.exitCode}. Candidate ${HEAD}: ${candidate.passed}/${candidate.total} checks passed; ${candidate.failed} failed; container exit: ${candidateContainer.exitCode}; signal: ${candidateContainer.signal}. Inherited max-lines reproduction: ${inheritedFailure}.\n`);
+    }
+  } finally {
+    await run('docker', ['rm', '--force', containerName], { timeout: 30_000, quietFailure: true }).catch(() => {});
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+}
+
 async function readSourceFile(source, relative) {
   const file = path.join(source, relative);
   const parent = await fs.realpath(path.dirname(file));
@@ -328,7 +446,7 @@ async function snapshotTracked(phase) {
   emit({ proofRecord: true, result: 'tracked-source-changes', phase, files: files.filter((file) => file.blob !== file.indexBlob || file.mode !== file.indexMode) });
 }
 
-async function build() {
+async function build({ qaRuntime = true } = {}) {
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
   // Keep pnpm's isolated dlx cache on the shared workspace mount so the
@@ -390,10 +508,14 @@ async function build() {
     await run('node', [PNPM, 'exec', command, '--version'], { label: `toolchain-${command}`, log: true });
   await run('node', ['scripts/run-tsgo.mjs', '--version'], { label: 'toolchain-tsgo-official', log: true });
   await snapshotTracked('after-install');
-  // The repository's QA runtime profile builds real JS, plugins, assets and
-  // freshness stamps. Declaration/package qualification is outside this proof.
-  await run('node', [PNPM, 'build', 'qaRuntime'], { timeout: 1_200_000, label: 'pnpm-build-qaRuntime', log: true });
-  await snapshotTracked('after-build');
+  if (qaRuntime) {
+    // The repository's QA runtime profile builds real JS, plugins, assets and
+    // freshness stamps. Declaration/package qualification is outside this proof.
+    await run('node', [PNPM, 'build', 'qaRuntime'], { timeout: 1_200_000, label: 'pnpm-build-qaRuntime', log: true });
+    await snapshotTracked('after-build');
+  } else {
+    emit({ proofRecord: true, result: 'check-dependencies-ready', head: await run('git', ['rev-parse', 'HEAD']) });
+  }
 }
 
 async function rebuildPristine() {
@@ -434,28 +556,103 @@ async function emitCompilerMetrics(directory) {
   }
 }
 
+const CHANGED_FILES = [
+  'extensions/slack/src/draft-stream.ts', 'extensions/slack/src/format.ts',
+  'extensions/slack/src/monitor/message-handler/dispatch-progress.ts',
+  'extensions/slack/src/delivery-trace.test.ts', 'extensions/slack/src/delivery-trace.test-support.ts',
+  'extensions/slack/src/draft-stream.test.ts',
+];
+
+async function changedCheckPlan(env) {
+  const planSource = `
+    import { pathToFileURL } from 'node:url';
+    const root = process.cwd();
+    const { detectChangedLanesForPaths } = await import(pathToFileURL(root + '/scripts/changed-lanes.mts').href);
+    const { createChangedCheckPlan } = await import(pathToFileURL(root + '/scripts/check-changed.mts').href);
+    const paths = JSON.parse(process.env.SLACK_PROOF_CHANGED_FILES);
+    const base = process.env.SLACK_PROOF_BASE;
+    const head = process.env.SLACK_PROOF_HEAD;
+    const result = detectChangedLanesForPaths({ paths, base, head });
+    const plan = createChangedCheckPlan(result, { base, head, env: process.env });
+    console.log(JSON.stringify(plan.commands.map(({ name, bin, args, env, coreTestCheck }) => ({ name, bin, args, env, coreTestCheck }))));
+  `;
+  const output = await run('node', ['--import', 'tsx', '--input-type=module', '-e', planSource], {
+    cwd: '/workspace', env: { ...env, SLACK_PROOF_CHANGED_FILES: JSON.stringify(CHANGED_FILES),
+      SLACK_PROOF_BASE: BASE, SLACK_PROOF_HEAD: HEAD },
+    timeout: 180_000, label: 'build-official-changed-check-plan', log: true,
+  });
+  const commands = JSON.parse(output.trim());
+  assert(Array.isArray(commands) && commands.length > 0, 'Changed-check plan is empty');
+  assert(commands.every((command) => !command.coreTestCheck), 'This proof route cannot run a core-test callback');
+  return commands;
+}
+
 async function changedChecks() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.cwd(), '/workspace');
   const root = await fs.mkdtemp('/tmp/check-proof-');
   const env = { ...process.env, HOME: '/workspace/.proof-tools/home', XDG_CACHE_HOME: '/workspace/.proof-tools/cache', PNPM_HOME: '/workspace/.proof-tools/pnpm-home', CI: 'true', OPENCLAW_LOCAL_CHECK: '1', OPENCLAW_LOCAL_CHECK_MODE: 'throttled', OPENCLAW_TSGO_METRICS_DIR: `${root}/tsgo-metrics`, OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: `${root}/module-cache`, PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
-  const files = [
-    'extensions/slack/src/draft-stream.ts', 'extensions/slack/src/format.ts',
-    'extensions/slack/src/monitor/message-handler/dispatch-progress.ts',
-    'extensions/slack/src/delivery-trace.test.ts', 'extensions/slack/src/delivery-trace.test-support.ts',
-    'extensions/slack/src/draft-stream.test.ts',
-  ];
   await resourceSnapshot('before-changed-checks');
   try {
-  const started = Date.now();
-  const plan = await run('node', ['scripts/check-changed.mjs', '--dry-run', '--base', BASE, '--head', HEAD, '--', ...files], { env, timeout: 120_000, label: 'changed-plan', log: true });
-  emit({ proofRecord: true, result: 'changed-check-plan', sha: HEAD, planStdout: plan, stderrPreservedInCommandLog: true });
-  await run('node', ['scripts/check-changed.mjs', '--base', BASE, '--head', HEAD, '--', ...files], { env, timeout: 1_000_000, label: 'changed-checks', log: true });
-  emit({ proofRecord: true, result: 'changed-checks-completed', sha: HEAD, exit: 0, wallMs: Date.now() - started });
+    const started = Date.now();
+    const commands = await changedCheckPlan(env);
+    emit({ proofRecord: true, result: 'changed-check-plan', sha: HEAD,
+      commands: commands.map(({ name, bin, args }) => ({ name, bin: bin ?? 'pnpm', args })) });
+    const results = [];
+    for (const command of commands) {
+      const label = `changed-check:${command.name}`;
+      try {
+        const result = await run(command.bin ?? 'pnpm', command.args, {
+          cwd: '/workspace', env: { ...env, ...(command.env ?? {}) }, timeout: 1_000_000,
+          label, log: true, captureResult: true,
+        });
+        const passed = result.code === 0 && result.signal === null;
+        const diagnosticLines = result.stderr.split('\n').filter((line) =>
+          /Remove stale max-lines baseline entries|config\/max-lines-baseline\.txt/u.test(line));
+        const failureExcerpt = passed ? [] : result.stderr.split('\n')
+          .filter((line) => /Remove stale max-lines baseline entries|config\/max-lines-baseline\.txt|ELIFECYCLE|\[check:changed\]/u.test(line))
+          .slice(0, 8);
+        results.push({ name: command.name, bin: command.bin ?? 'pnpm', args: command.args,
+          exitCode: result.code, signal: result.signal, passed,
+          stdoutBytes: Buffer.byteLength(result.stdout), stdoutSha256: hash(result.stdout),
+          stderrBytes: Buffer.byteLength(result.stderr), stderrSha256: hash(result.stderr), failureExcerpt,
+          diagnosticCount: diagnosticLines.length, diagnosticSha256: hash(diagnosticLines.join('\n')) });
+      } catch (error) {
+        results.push({ name: command.name, bin: command.bin ?? 'pnpm', args: command.args,
+          exitCode: null, signal: null, passed: false, error: safeDiagnostic(String(error?.message ?? error)) });
+      }
+    }
+    const failures = results.filter((result) => !result.passed).map(({ name, exitCode, signal,
+      failureExcerpt, diagnosticCount, diagnosticSha256, error }) => ({ name, exitCode, signal,
+      failureExcerpt, diagnosticCount, diagnosticSha256, error }));
+    emit({ proofRecord: true, result: 'changed-checks-finished', sha: HEAD, wallMs: Date.now() - started,
+      total: results.length, passed: results.length - failures.length, failed: failures.length,
+      results, failures, continuationPolicy: 'ran every planned command sequentially; retained each exit result' });
+    if (failures.length) throw new Error(`Changed-checks completed with ${failures.length} failure(s): ${failures.map((failure) => failure.name).join(', ')}`);
   } finally {
     await resourceSnapshot('after-changed-checks');
     await emitCompilerMetrics(env.OPENCLAW_TSGO_METRICS_DIR);
   }
+}
+
+async function baselineMaxLines(base) {
+  assert.equal(process.platform, 'linux');
+  assert.equal(process.cwd(), '/workspace');
+  const currentHead = (await run('git', ['rev-parse', 'HEAD'], { label: 'baseline-max-lines-head' })).trim();
+  const env = { ...process.env, HOME: '/workspace/.proof-tools/home', XDG_CACHE_HOME: '/workspace/.proof-tools/cache', PNPM_HOME: '/workspace/.proof-tools/pnpm-home', CI: 'true', PATH: `/workspace/.proof-tools/bin:${process.env.PATH}` };
+  const result = await run('node', [PNPM, 'check:max-lines-ratchet', '--base', base], {
+    cwd: '/workspace', env, timeout: 180_000, label: 'base-max-lines-ratchet', log: true, captureResult: true,
+  });
+  const failureExcerpt = result.stderr.split('\n')
+    .filter((line) => /Remove stale max-lines baseline entries|config\/max-lines-baseline\.txt|ELIFECYCLE/u.test(line))
+    .slice(0, 8);
+  const diagnosticLines = result.stderr.split('\n').filter((line) =>
+    /Remove stale max-lines baseline entries|config\/max-lines-baseline\.txt/u.test(line));
+  emit({ proofRecord: true, result: 'base-max-lines-result', base, head: currentHead,
+    exitCode: result.code, signal: result.signal, passed: result.code === 0 && result.signal === null,
+    stdoutBytes: Buffer.byteLength(result.stdout), stdoutSha256: hash(result.stdout),
+    stderrBytes: Buffer.byteLength(result.stderr), stderrSha256: hash(result.stderr), failureExcerpt,
+    diagnosticCount: diagnosticLines.length, diagnosticSha256: hash(diagnosticLines.join('\n')) });
 }
 
 async function ownerTests(role, sha) {
@@ -939,8 +1136,10 @@ async function inside(role, sha, progressStyle) {
 
 try {
   if (process.argv[2] === 'build') await build();
+  else if (process.argv[2] === 'prepare-checks') await build({ qaRuntime: false });
   else if (process.argv[2] === 'snapshot') await snapshotTracked(process.argv[3]);
   else if (process.argv[2] === 'rebuild') await rebuildPristine();
+  else if (process.argv[2] === 'baseline-max-lines') await baselineMaxLines(process.argv[3]);
   else if (process.argv[2] === 'checks') {
     await changedChecks();
     await flushOutput();
@@ -956,7 +1155,11 @@ try {
     await flushOutput();
     process.exit(0);
   }
-  else { assert.equal(process.argv.length, 2); await host(); }
+  else if (process.argv[2] === 'checks-only') {
+    await hostChecksOnly();
+    await flushOutput();
+  }
+  else { assert(process.argv.length === 2 || (process.argv.length === 3 && process.argv[2] === 'full')); await host(); }
 } catch (error) {
   emit({ proofRecord: true, result: 'harness-incomplete', error: safeDiagnostic(String(error?.message ?? error)) });
   // Cleanup above has run. Flush diagnostics before ending a failed harness;

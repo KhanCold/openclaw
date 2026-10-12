@@ -1,6 +1,15 @@
 name: Slack compact render-once boundary proof
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Run the full proof or only the previously incomplete changed-check phase
+        type: choice
+        options:
+          - full
+          - checks-only
+        default: full
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -22,4 +31,4 @@ jobs:
           node-version: 26.11.1
           package-manager-cache: false
       - name: Compare frozen source revisions inside secretless Docker
-        run: node proof/slack-compact-render-once/proof.mjs
+        run: node proof/slack-compact-render-once/proof.mjs "${{ inputs.mode }}"
