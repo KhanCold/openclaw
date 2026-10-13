@@ -1,16 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
-import { isDeepStrictEqual } from "node:util";
-import {
-  MessageChannel,
-  MessagePort,
-  receiveMessageOnPort,
-  type Transferable,
-} from "node:worker_threads";
+import { MessageChannel, MessagePort, receiveMessageOnPort } from "node:worker_threads";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
+import { StateDatabaseAdmissionPendingError } from "./gateway-state-owner-record.js";
 import {
   captureSqliteDatabaseAdmissions,
   createSqliteDatabaseAdmissionCursor,
@@ -20,15 +14,17 @@ import {
   retainSqliteDatabaseAdmissionLocation,
   withSqliteDatabaseAdmissionExchange,
 } from "./sqlite-database-admission.js";
-import { currentSqliteOperationTiming } from "./sqlite-reader-lifecycle.js";
-import { SqliteWorkerAdmissionTimeoutError, SqliteWorkerError } from "./sqlite-worker-contract.js";
+import { SqliteWorkerError, type SqliteWorkerAdmissionRequest } from "./sqlite-worker-contract.js";
 import {
+  SQLITE_COLD_ADMISSION_PENDING,
   exchangeDatabaseAdmissions,
   exchangeSqliteDatabaseAdmissions,
   getSqliteDatabaseAdmissionUpstream,
 } from "./sqlite-worker-database-admission-relay.js";
 import {
   deferSqliteWorkerNativeCommitReceipt,
+  currentSqliteWorkerOperationAdmission as currentAdmission,
+  type WorkerAdmissionScope,
   readNativeCommitReceipt,
   type NativeCommitReceipt,
   type RetainedWorkerTransactionAdmission,
@@ -36,22 +32,21 @@ import {
   type SqliteWorkerNativeSettlementOwner,
   type SqliteWorkerOperationContext,
 } from "./sqlite-worker-operation-settlement.js";
+import { requestSqliteWorkerOperationAdmission } from "./sqlite-writer-admission-client.js";
+
+export type { SqliteWorkerAdmissionRequest } from "./sqlite-worker-contract.js";
+export { requestSqliteWorkerOperationAdmission } from "./sqlite-writer-admission-client.js";
 
 const REQUESTED = 0;
 const GRANTED = 1;
 const REFUSED = 2;
 const TIMED_OUT = 3;
 
-export type SqliteWorkerAdmissionRequest = {
-  stage: "open" | "prepare" | "transaction" | "commit";
-  facts: unknown;
-  /** Opt-in wait budget in milliseconds; omission retains the live-owner wait. */
-  deadlineMs?: number;
-};
-
 type AdmissionFailureSource = "authority" | "domain" | "protocol";
 type DatabaseAuthority = {
   databasePath: string;
+  /** Only the broker can identify an initial open of its captured primary database. */
+  coldOpenPath?: string;
   assertRequest?(): void;
   assertAccess(): void;
   assertCreate?(databasePath: string): void;
@@ -98,12 +93,10 @@ type AdmissionHandler = (
 ) => void;
 
 /** The optional continuation runs under live host authority before releasing the native writer. */
-export function createSqliteWorkerOperationAdmission(
+export const createSqliteWorkerOperationAdmission = (
   admit: AdmissionHandler,
   attachment?: unknown,
-): SqliteWorkerOperationAdmission {
-  return createOperationAdmission(admit, attachment);
-}
+): SqliteWorkerOperationAdmission => createOperationAdmission(admit, attachment);
 
 /** Task lifetime channels relay a broker's creation grant without acquiring database authority. */
 export function createSqliteDatabaseAdmissionRelay(
@@ -168,25 +161,11 @@ function createOperationAdmission(
   const invalidProtocol = (
     kind: "commit receipt" | "native settlement" | "admission request",
     code: "outcome-unknown" | "unavailable" = "outcome-unknown",
-  ) => {
-    recordFailure(new SqliteWorkerError(`SQLite worker ${kind} is invalid`, code), "protocol");
-  };
-  const installCommitted = (receipt: NativeCommitReceipt): boolean => {
-    if (nativeReceipt) {
-      if (
-        receipt.operationId !== nativeReceipt.operationId ||
-        (receipt.sequence === nativeReceipt.sequence && !isDeepStrictEqual(nativeReceipt, receipt))
-      ) {
-        invalidProtocol("commit receipt");
-        return false;
-      }
-      if (receipt.sequence <= nativeReceipt.sequence) {
-        return true;
-      }
-    }
-    if (settlement) {
-      invalidProtocol("commit receipt");
-      return false;
+  ) => recordFailure(new SqliteWorkerError(`SQLite worker ${kind} is invalid`, code), "protocol");
+  const installCommitted = (receipt: NativeCommitReceipt): void => {
+    // Settlement repeats the latest receipt; each private port otherwise delivers in order.
+    if (nativeReceipt && receipt.sequence <= nativeReceipt.sequence) {
+      return;
     }
     nativeReceipt = receipt;
     const publication = { facts: receipt.facts };
@@ -205,7 +184,6 @@ function createOperationAdmission(
     } finally {
       observingCommit = false;
     }
-    return true;
   };
   const receive = (message: unknown) => {
     started = true;
@@ -226,6 +204,7 @@ function createOperationAdmission(
         return;
       }
       const decision = new Int32Array(message.decision);
+      let coldOpenPath: string | undefined;
       try {
         if (closed) {
           throw new SqliteWorkerError("SQLite worker admission is closed", "closed");
@@ -254,11 +233,19 @@ function createOperationAdmission(
           if (message.create === "admitted") {
             create = true;
           } else if (authority && assertCreate) {
+            if (
+              authority.coldOpenPath &&
+              resolveIdentityPathViaExistingAncestorSync(authority.coldOpenPath) ===
+                creationLocation
+            ) {
+              coldOpenPath = authority.coldOpenPath;
+            }
             inOwnerContext(() => {
               authority.assertRequest?.();
               authority.assertAccess();
               assertCreate(creationLocation);
             });
+            coldOpenPath = undefined;
             create = true;
           }
         }
@@ -294,11 +281,23 @@ function createOperationAdmission(
             }
           }
         }
-        message.port.postMessage(captureSqliteDatabaseAdmissions(databaseAdmissionCursor), []);
+        const scope =
+          message.location === undefined ? undefined : { location: message.location, admissions };
+        const reply = captureSqliteDatabaseAdmissions(databaseAdmissionCursor, scope);
+        message.port.postMessage(reply, []);
         Atomics.store(decision, 0, GRANTED);
       } catch (error) {
-        recordFailure(error, "protocol");
-        Atomics.store(decision, 0, REFUSED);
+        if (
+          error instanceof StateDatabaseAdmissionPendingError &&
+          error.databasePath === coldOpenPath
+        ) {
+          // Nothing was created: preserve the worker cold-open owner's existing
+          // bounded wait rather than poisoning this operation as a protocol failure.
+          Atomics.store(decision, 0, SQLITE_COLD_ADMISSION_PENDING);
+        } else {
+          recordFailure(error, "protocol");
+          Atomics.store(decision, 0, REFUSED);
+        }
       } finally {
         message.port.close();
         Atomics.notify(decision, 0);
@@ -320,19 +319,13 @@ function createOperationAdmission(
       if (
         !isRecord(value) ||
         (value.kind !== "completed" && value.kind !== "unknown") ||
-        (value.committed !== undefined && !receipt) ||
-        (nativeReceipt &&
-          (!receipt ||
-            receipt.operationId !== nativeReceipt.operationId ||
-            receipt.sequence < nativeReceipt.sequence)) ||
-        (settlement &&
-          (settlement.kind !== value.kind || !isDeepStrictEqual(nativeReceipt, receipt)))
+        (value.committed !== undefined && !receipt)
       ) {
         invalidProtocol("native settlement");
         return;
       }
-      if (receipt && !installCommitted(receipt)) {
-        return;
+      if (receipt) {
+        installCommitted(receipt);
       }
       settlement = {
         kind: value.kind,
@@ -449,7 +442,28 @@ function createOperationAdmission(
         inOwnerContext(admit, request, grant);
       }
     } catch (error) {
-      refuse(decision, error, source);
+      if (
+        error instanceof StateDatabaseAdmissionPendingError &&
+        databaseAuthority?.coldOpenPath === error.databasePath &&
+        !databaseAuthority.lease &&
+        request.stage === "prepare" &&
+        isRecord(request.facts) &&
+        request.facts.kind === "schema-maintenance" &&
+        typeof request.facts.databasePath === "string" &&
+        resolveIdentityPathViaExistingAncestorSync(request.facts.databasePath) ===
+          databaseAuthority.databasePath
+      ) {
+        // No schema lease or body has begun; let the cold-open owner's bounded
+        // wait handle another process creating this database first.
+        if (
+          Atomics.compareExchange(decision, 0, REQUESTED, SQLITE_COLD_ADMISSION_PENDING) ===
+          REQUESTED
+        ) {
+          Atomics.notify(decision, 0);
+        }
+      } else {
+        refuse(decision, error, source);
+      }
       return;
     } finally {
       // Repeated preparation requests must not retain every settled decision.
@@ -463,8 +477,7 @@ function createOperationAdmission(
       );
     }
   };
-  port1.on("message", receive);
-  port1.unref();
+  port1.on("message", receive).unref();
   const service = () => {
     // Observers may inspect retained facts without recursively publishing the next receipt.
     if (observingCommit) {
@@ -571,19 +584,6 @@ function createOperationAdmission(
   return admission;
 }
 
-type WorkerAdmissionScope = {
-  // Published SDK request helpers share these port/active carrier fields.
-  port: MessagePort;
-  owner: SqliteWorkerOperationContext;
-  active: boolean;
-};
-// Source brokers and built plugin backends can load separate module copies in
-// one Worker. Share the carrier, while each operation still owns its private port.
-const currentAdmission = resolveGlobalSingleton(
-  Symbol.for("openclaw.sqliteWorkerOperationAdmission"),
-  () => new AsyncLocalStorage<WorkerAdmissionScope>(),
-);
-
 /** Install only the private port belonging to the broker's currently executing operation. */
 export function withSqliteWorkerOperationAdmission<T>(
   owner: SqliteWorkerOperationContext,
@@ -591,20 +591,42 @@ export function withSqliteWorkerOperationAdmission<T>(
 ): T {
   const scope = { owner, port: owner.port, active: true };
   try {
-    return currentAdmission.run(scope, () =>
-      withSqliteDatabaseAdmissionExchange((admissions, location, create) => {
-        if (!scope.active) {
+    return runSqliteWorkerAdmissionScope(scope, operation);
+  } finally {
+    scope.active = false;
+  }
+}
+
+/** Async factories and cleanup retain the same grant until their accepted work settles. */
+export async function withSqliteWorkerOperationAdmissionAsync<T>(
+  owner: SqliteWorkerOperationContext,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  const scope = { owner, port: owner.port, active: true };
+  try {
+    return await runSqliteWorkerAdmissionScope(scope, operation);
+  } finally {
+    scope.active = false;
+  }
+}
+
+function runSqliteWorkerAdmissionScope<T>(scope: WorkerAdmissionScope, operation: () => T): T {
+  return currentAdmission.run(scope, () =>
+    withSqliteDatabaseAdmissionExchange((admissions, location, create) => {
+      if (!scope.active) {
+        const upstream = getSqliteDatabaseAdmissionUpstream();
+        if (create || !upstream || upstream.closed) {
           throw new SqliteWorkerError(
             "SQLite facts require their retained admission",
             "unavailable",
           );
         }
-        return exchangeSqliteDatabaseAdmissions(scope.port, admissions, location, create);
-      }, operation),
-    );
-  } finally {
-    scope.active = false;
-  }
+        // Retained cleanup may publish facts; creation still needs the live grant.
+        return exchangeDatabaseAdmissions(upstream.port, admissions, location);
+      }
+      return exchangeSqliteDatabaseAdmissions(scope.port, admissions, location, create);
+    }, operation),
+  );
 }
 
 /** Record facts only after the real transaction commits, before native settlement is announced. */
@@ -631,75 +653,6 @@ export function assertSqliteWorkerCommitReceiptPending(database: DatabaseSync): 
   }
 }
 
-/** Called on the SQLite worker, after transaction entry and before its row mutation. */
-export function requestSqliteWorkerOperationAdmission(
-  request: SqliteWorkerAdmissionRequest,
-  transferList: Transferable[] = [],
-): void {
-  const scope = currentAdmission.getStore();
-  if (!scope?.active) {
-    throw new SqliteWorkerError("SQLite operation requires its retained admission", "unavailable");
-  }
-  if (scope.owner.sourceReservations) {
-    throw new SqliteWorkerError("SQLite source reservations prohibit host admission", "closed");
-  }
-  const decision = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
-  const startedAt = Date.now();
-  const deadlineNs =
-    request.deadlineMs === undefined
-      ? undefined
-      : process.hrtime.bigint() + BigInt(request.deadlineMs) * 1_000_000n;
-  scope.port.postMessage(
-    {
-      ...request,
-      decision: decision.buffer,
-      deadlineNs,
-      ports: transferList.filter((value) => value instanceof MessagePort),
-    },
-    transferList,
-  );
-  // Cancellation revokes this request, never grants authority. Settlement still
-  // joins native rollback before the broker releases operation custody.
-  while (Atomics.load(decision, 0) === REQUESTED) {
-    const remainingMs =
-      deadlineNs === undefined ? undefined : Number(deadlineNs - process.hrtime.bigint()) / 1e6;
-    if (remainingMs !== undefined && remainingMs <= 0) {
-      Atomics.compareExchange(decision, 0, REQUESTED, TIMED_OUT);
-    } else {
-      Atomics.wait(decision, 0, REQUESTED, remainingMs);
-    }
-  }
-  const timing = currentSqliteOperationTiming();
-  if (timing) {
-    timing.hostAdmissionWaitMs += Date.now() - startedAt;
-  }
-  if (Atomics.load(decision, 0) !== GRANTED) {
-    const refusal =
-      Atomics.load(decision, 0) === TIMED_OUT
-        ? new SqliteWorkerAdmissionTimeoutError()
-        : new SqliteWorkerError("SQLite transaction admission was refused", "closed");
-    scope.owner.refusal = refusal;
-    throw refusal;
-  }
-}
-
-/** A native waiter may block MAIN; this interval must complete without host messages. */
-export function withSqliteWorkerSourceReservations<T>(operation: () => T): T {
-  const scope = currentAdmission.getStore();
-  if (!scope?.active || scope.owner.sourceReservations) {
-    throw new SqliteWorkerError(
-      "SQLite source fence requires exclusive operation custody",
-      "closed",
-    );
-  }
-  scope.owner.sourceReservations = true;
-  try {
-    return operation();
-  } finally {
-    delete scope.owner.sourceReservations;
-  }
-}
-
 /** Schema work borrows live host authority through the same retained job port. */
 export function requestSqliteWorkerSchemaMaintenance(databasePath: string): boolean {
   if (!currentAdmission.getStore()) {
@@ -712,35 +665,22 @@ export function requestSqliteWorkerSchemaMaintenance(databasePath: string): bool
   return true;
 }
 
-/** Read optional owner-prepared data once, shared by kernels in the same operation. */
-export function readSqliteWorkerOperationAdmissionAttachment(): unknown {
+/** Require and cache owner-prepared data from this operation's private port. */
+export function takeSqliteWorkerOperationAdmissionAttachment(): unknown {
   const scope = currentAdmission.getStore();
   if (!scope?.active) {
-    return undefined;
-  }
-  if (scope.owner.attachment) {
-    return scope.owner.attachment.value;
-  }
-  const message: unknown = receiveMessageOnPort(scope.port)?.message;
-  if (
-    message !== undefined &&
-    (!isRecord(message) || message.kind !== "sqlite-operation-attachment")
-  ) {
-    throw new SqliteWorkerError("SQLite operation attachment is unavailable", "unavailable");
-  }
-  const value = isRecord(message) ? message.value : undefined;
-  scope.owner.attachment = { value };
-  return value;
-}
-
-/** Require owner-prepared data from this executing operation's private port. */
-export function takeSqliteWorkerOperationAdmissionAttachment(): unknown {
-  if (!currentAdmission.getStore()?.active) {
     throw new SqliteWorkerError("SQLite operation requires its retained admission", "unavailable");
   }
-  const attachment = readSqliteWorkerOperationAdmissionAttachment();
-  if (attachment === undefined) {
-    throw new SqliteWorkerError("SQLite operation attachment is unavailable", "unavailable");
+  if (!scope.owner.attachment) {
+    const message: unknown = receiveMessageOnPort(scope.port)?.message;
+    if (
+      !isRecord(message) ||
+      message.kind !== "sqlite-operation-attachment" ||
+      message.value === undefined
+    ) {
+      throw new SqliteWorkerError("SQLite operation attachment is unavailable", "unavailable");
+    }
+    scope.owner.attachment = { value: message.value };
   }
-  return attachment;
+  return scope.owner.attachment.value;
 }

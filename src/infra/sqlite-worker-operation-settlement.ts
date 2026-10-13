@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
 import { serialize } from "node:v8";
 import type { MessagePort } from "node:worker_threads";
@@ -10,9 +10,12 @@ import {
   SqliteWorkerError,
   type SqliteWorkerAdmissionTimeoutError,
 } from "./sqlite-worker-contract.js";
+import type { SqliteWorkerRequestCustodyDescriptor } from "./sqlite-worker-request-custody.js";
 
 export type SqliteWorkerOperationContext = {
   port: MessagePort;
+  /** Present for broker-owned work; standalone admission owners keep their own lifetime. */
+  requestCustody?: SqliteWorkerRequestCustodyDescriptor;
   attachment?: { value: unknown };
   refusal?: SqliteWorkerError | InstanceType<typeof SqliteWorkerAdmissionTimeoutError>;
   committed?: { facts: unknown };
@@ -23,7 +26,6 @@ export type SqliteWorkerOperationContext = {
 
 export type NativeCommitReceipt = {
   version: 1;
-  operationId: string;
   sequence: number;
   facts: unknown;
 };
@@ -32,8 +34,6 @@ export function readNativeCommitReceipt(value: unknown): NativeCommitReceipt | u
   if (
     !isRecord(value) ||
     value.version !== 1 ||
-    typeof value.operationId !== "string" ||
-    value.operationId.length === 0 ||
     typeof value.sequence !== "number" ||
     !Number.isSafeInteger(value.sequence) ||
     value.sequence < 1 ||
@@ -43,13 +43,12 @@ export function readNativeCommitReceipt(value: unknown): NativeCommitReceipt | u
   }
   return {
     version: 1,
-    operationId: value.operationId,
     sequence: value.sequence,
     facts: value.facts,
   };
 }
 
-// Private wire identity follows the native operation across transformed module copies.
+// Keep the latest committed evidence for settlement if ordinary delivery fails.
 const nativeCommitReceipts = resolveGlobalSingleton(
   Symbol.for("openclaw.sqliteWorkerNativeCommitReceipts"),
   () => new WeakMap<SqliteWorkerOperationContext, NativeCommitReceipt>(),
@@ -92,7 +91,6 @@ export function deferSqliteWorkerNativeCommitReceipt(
     );
   }
   const captured = structuredClone(facts);
-  const operationId = nativeCommitReceipts.get(owner)?.operationId ?? randomUUID();
   const counts = owner.sourceReservations ? (owner.pendingReceipts ??= new Map()) : undefined;
   const pending = (delta: number) => {
     if (!counts) {
@@ -114,7 +112,6 @@ export function deferSqliteWorkerNativeCommitReceipt(
         const previous = nativeCommitReceipts.get(owner);
         const receipt: NativeCommitReceipt = {
           version: 1,
-          operationId: previous?.operationId ?? operationId,
           sequence: (previous?.sequence ?? 0) + 1,
           facts: captured,
         };
@@ -148,3 +145,16 @@ export function settleSqliteWorkerOperationContext(
     [],
   );
 }
+
+export type WorkerAdmissionScope = {
+  // Published SDK request helpers share these port/active carrier fields.
+  port: MessagePort;
+  owner: SqliteWorkerOperationContext;
+  active: boolean;
+};
+// Source brokers and built plugin backends can load separate module copies in
+// one Worker. Share the carrier, while each operation still owns its private port.
+export const currentSqliteWorkerOperationAdmission = resolveGlobalSingleton(
+  Symbol.for("openclaw.sqliteWorkerOperationAdmission"),
+  () => new AsyncLocalStorage<WorkerAdmissionScope>(),
+);

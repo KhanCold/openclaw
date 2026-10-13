@@ -4,10 +4,7 @@ import {
   getNodeSqliteKysely,
   prepareSqliteQuerySync,
 } from "../infra/kysely-sync.js";
-import {
-  getAdmittedSqliteSchemaFacts,
-  getSqliteReadScopeRevision,
-} from "../infra/sqlite-schema-facts.js";
+import { admitSqliteSchema, getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import { SqliteSchemaMismatchError } from "../infra/sqlite-schema-issues.js";
 import {
   createNewerSqliteSchemaVersionError,
@@ -50,13 +47,10 @@ export function readStateSchemaContentVersion(
   }
   const schema = getAdmittedSqliteSchemaFacts(db);
   const version = schema?.userVersion ?? readSqliteUserVersion(db);
-  const revision = getSqliteReadScopeRevision(db);
   const contentVersion = parseContentVersion(
     tableExists(db, "config_machine_state") ? readRow(db)?.value_json : undefined,
   );
-  if (!revision || getSqliteReadScopeRevision(db) === revision) {
-    rememberStateSchemaVersionAdmission(db, { userVersion: version, contentVersion });
-  }
+  rememberStateSchemaVersionAdmission(db, { userVersion: version, contentVersion });
   return Math.max(published ?? version, contentVersion);
 }
 
@@ -90,6 +84,35 @@ function parseContentVersion(valueJson: string | null | undefined): number {
 }
 
 export type { StateSchemaVersionFacts } from "./openclaw-state-db-admission.js";
+
+/** Refuse newer headers before catalog inspection, then share one physical schema capture. */
+export function admitStateSchemaFacts(database: DatabaseSync, pathname: string): void {
+  try {
+    admitSqliteSchema(database, (userVersion) =>
+      assertSupportedStateSchemaVersion(database, pathname, {
+        userVersion,
+        contentVersion: userVersion,
+      }),
+    );
+  } catch (error) {
+    // An unreadable newer catalog must not be mistaken for a repair this build can perform.
+    let version: number;
+    try {
+      version = readSqliteUserVersion(database);
+    } catch {
+      throw normalizeOpenClawStateSchemaReadError(error, pathname);
+    }
+    if (version > OPENCLAW_STATE_SCHEMA_VERSION) {
+      throw createNewerSqliteSchemaVersionError(
+        "OpenClaw state database",
+        pathname,
+        version,
+        OPENCLAW_STATE_SCHEMA_VERSION,
+      );
+    }
+    throw normalizeOpenClawStateSchemaReadError(error, pathname);
+  }
+}
 
 export function assertSupportedStateSchemaVersion(
   db: DatabaseSync,

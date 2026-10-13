@@ -1,6 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { resolveSessionThreadInfo } from "../../channels/plugins/session-conversation.js";
 import { createRuntimeConfigReader } from "../../config/runtime-snapshot.js";
+import {
+  captureIncognitoSessionSource,
+  withIncognitoSessionEntry,
+} from "../../config/sessions/session-incognito-binding.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   bindInProcessSubagentResume,
@@ -64,6 +69,11 @@ export async function prepareSessionsSendCommunication(params: {
   assertAccessCurrent?: () => void;
   callGateway: AgentToolGatewayRequestCaller;
 }) {
+  const requesterSource = captureIncognitoSessionSource(params.source);
+  const requesterClaim =
+    requesterSource && !("kind" in requesterSource)
+      ? requesterSource.actor.sessions.captureCurrent(params.source.sessionKey)
+      : undefined;
   const message = params.message;
   const dispatchMessage = params.dispatchMessage ?? message;
   const inputProvenance = params.inputProvenance
@@ -71,6 +81,7 @@ export async function prepareSessionsSendCommunication(params: {
     : undefined;
   const targetAgentId = params.target.agentId;
   const targetSessionKey = params.target.sessionKey;
+  const targetsThread = Boolean(resolveSessionThreadInfo(targetSessionKey).threadId);
   const caller = getGatewayToolCallerIdentity();
   const assertCaller = captureGatewayToolCallerAssertion();
   const context = getInProcessGatewayToolContext();
@@ -110,18 +121,48 @@ export async function prepareSessionsSendCommunication(params: {
       throw new Error("Session communication admission closed.");
     }
     params.signal?.throwIfAborted();
+    requesterSource?.admissionSignal?.throwIfAborted();
+    if (requesterSource && "kind" in requesterSource) {
+      requesterSource.assertCurrent();
+    }
+    requesterClaim?.assertCurrent();
     assertCaller?.();
     params.assertSourceCurrent?.();
     params.assertAccessCurrent?.();
     if (currentPolicyConfig() !== currentConfig) {
       throw new Error("Communication policy changed; send the message again for a new decision.");
     }
+    // The tool preflight may have captured an older opt-in. Admission owns the
+    // current destination policy, including fallbacks and the final commit guard.
+    if (
+      targetsThread &&
+      policyConfigs.some(
+        (policyConfig) => policyConfig.tools?.sessions?.allowThreadTargets !== true,
+      )
+    ) {
+      throw new Error(
+        "sessions_send cannot target a thread session for inter-agent coordination. Use the parent channel session key instead, or enable tools.sessions.allowThreadTargets.",
+      );
+    }
   };
   const unsubscribe = sessionChanges.subscribeFacts((change) => {
-    if (!sessionChangeScopeAffectsStoredRows(change)) {
+    if (
+      !sessionChangeScopeAffectsStoredRows(change) &&
+      !("all" in change && change.scope === "config")
+    ) {
       return;
     }
     if ("all" in change) {
+      // Creating the selected target can register its first physical store.
+      // The post-creation refresh still verifies every endpoint binding.
+      if (
+        creatingTarget &&
+        typeof change.scope === "object" &&
+        change.scope.topology === true &&
+        change.scope.agentId === targetAgentId
+      ) {
+        return;
+      }
       dirty = true;
       return;
     }
@@ -145,7 +186,10 @@ export async function prepareSessionsSendCommunication(params: {
       return;
     }
     const facts = change.facts;
-    if (facts?.kind === "entry" && facts.communicationBinding !== undefined) {
+    if (
+      (facts?.kind === "entry" || facts?.kind === "replacement") &&
+      facts.communicationBinding !== undefined
+    ) {
       dirty ||= selected.some(
         (endpoint) => communicationEntryBinding(endpoint.entry) !== facts.communicationBinding,
       );
@@ -154,6 +198,23 @@ export async function prepareSessionsSendCommunication(params: {
     }
   });
   const read = async (endpoint: CommunicationEndpoint): Promise<CommunicationEndpoint> => {
+    if (
+      requesterSource &&
+      endpoint.agentId === params.source.agentId &&
+      endpoint.sessionKey === params.source.sessionKey
+    ) {
+      return withIncognitoSessionEntry(
+        requesterSource,
+        endpoint.sessionKey,
+        assertSource,
+        async (entry) => ({
+          agentId: endpoint.agentId,
+          sessionKey: endpoint.sessionKey,
+          storePath: "kind" in requesterSource ? requesterSource.path : requesterSource.actor.path,
+          entry,
+        }),
+      );
+    }
     const loaded = await resolveGatewaySessionStoreTargetInWorker({
       cfg: currentConfig,
       key: endpoint.sessionKey,
@@ -250,7 +311,7 @@ export async function prepareSessionsSendCommunication(params: {
   };
   try {
     assertSource();
-    const source = await lineage(params.source);
+    let source = await lineage(params.source);
     let target = await lineage(params.target);
     endpoints = [...source, ...target];
     let bindings = endpoints.map(communicationEndpointBinding);
@@ -400,6 +461,15 @@ export async function prepareSessionsSendCommunication(params: {
         throw new Error("Created target differs from the approved communication operation.");
       }
       target = await lineage(created);
+      // An initially absent main alias can name both sides of this creation.
+      if (
+        !source[0]!.entry &&
+        source[0]!.agentId === created.agentId &&
+        source[0]!.sessionKey === created.sessionKey &&
+        source[0]!.storePath === created.storePath
+      ) {
+        source = target;
+      }
       endpoints = [...source, ...target];
       bindings = endpoints.map(communicationEndpointBinding);
       // Receiver consent belongs to the created exact incarnation, not a substitute source session.
