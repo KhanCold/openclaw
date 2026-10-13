@@ -71,10 +71,7 @@ function escapeSlackMrkdwnText(text: string, mentions?: SlackMentionPolicy): str
 
 function buildSlackLink(link: MarkdownLinkSpan, text: string) {
   const href = link.href.trim();
-  if (!href) {
-    return null;
-  }
-  if (/^[@#!]/u.test(href)) {
+  if (!href || /^[@#!]/u.test(href)) {
     return null;
   }
   const label = text.slice(link.start, link.end);
