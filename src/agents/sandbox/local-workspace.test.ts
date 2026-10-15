@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import * as localWorkspaceProjection from "../../gateway/worker-environments/local-workspace-projection.js";
+import type { LocalWorkspaceOwner } from "../../gateway/worker-environments/local-workspace-types.js";
 import { runCommandBuffered } from "../../process/exec.js";
 import type { SandboxBackendHandle } from "./backend-handle.types.js";
 import { createSandboxFsBridge } from "./fs-bridge.js";
@@ -67,6 +69,7 @@ it.runIf(process.platform !== "win32")(
         workspaceDir: root,
         workspaceCwd: root,
         checkpoint,
+        settleCheckpoint: async () => await checkpoint(),
         provision: async (run) => {
           await waitForAdmission;
           return await run();
@@ -193,6 +196,7 @@ it.runIf(process.platform !== "win32")(
       workspaceCwd: root,
       provision: async (run) => await run(),
       checkpoint: async () => {},
+      settleCheckpoint: async () => {},
       assertCurrent: () => {
         if (!current) {
           throw new Error("revoked during preparation");
@@ -210,3 +214,136 @@ it.runIf(process.platform !== "win32")(
     }
   },
 );
+
+it.each([
+  { name: "the same owner", replaced: false, settles: true },
+  { name: "a replacement owner", replaced: true, settles: false },
+])("settles after cancellation only for $name", async ({ replaced, settles }) => {
+  const [
+    projectionModule,
+    { prepareLocalSandboxWorkspace, bindLocalSandboxWorkspace: bindProjection },
+    fixtures,
+    bridgeModule,
+    config,
+  ] = await Promise.all([
+    Promise.resolve(localWorkspaceProjection),
+    import("./local-workspace.js"),
+    import("./test-fixtures.js"),
+    import("./fs-bridge.js"),
+    import("./config.js"),
+  ]);
+  const workspaceOwner = {
+    agentId: "main",
+    sessionKey: `agent:main:dashboard:cancelled-${crypto.randomUUID()}`,
+    sessionId: crypto.randomUUID(),
+    lifecycleRevision: null,
+    assertCurrent: () => {},
+    env: process.env,
+    worktree: await (async () => {
+      const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-local-settle-repo-"));
+      const worktreePath = path.join(repoRoot, "worktree");
+      await runCommandBuffered(["git", "init", "--quiet", "-b", "main"], { cwd: repoRoot });
+      await runCommandBuffered(["git", "config", "user.name", "Test"], { cwd: repoRoot });
+      await runCommandBuffered(["git", "config", "user.email", "test@example.invalid"], {
+        cwd: repoRoot,
+      });
+      await fs.writeFile(path.join(repoRoot, "source.txt"), "original\n");
+      await runCommandBuffered(["git", "add", "source.txt"], { cwd: repoRoot });
+      await runCommandBuffered(["git", "commit", "--quiet", "-m", "base"], { cwd: repoRoot });
+      await runCommandBuffered(
+        ["git", "worktree", "add", "--quiet", "-b", "openclaw/guest", worktreePath],
+        { cwd: repoRoot },
+      );
+      return {
+        id: crypto.randomUUID(),
+        name: "guest",
+        repoFingerprint: "test",
+        repoRoot,
+        path: worktreePath,
+        branch: "openclaw/guest",
+        baseRef: "main",
+        ownerKind: "session" as const,
+        ownerId: "session-owner",
+        createdAt: 0,
+        lastActiveAt: 0,
+      };
+    })(),
+  } satisfies LocalWorkspaceOwner;
+  let replaceOnSettlement = false;
+  const controller = new AbortController();
+  const abortError = new Error("agent run aborted");
+  vi.spyOn(projectionModule, "resolveLocalWorkspaceOwner").mockImplementation(async (params) => {
+    const currentOwner =
+      replaceOnSettlement && !params.assertCurrent
+        ? {
+            ...workspaceOwner,
+            worktree: { ...workspaceOwner.worktree, id: "replacement-worktree" },
+          }
+        : workspaceOwner;
+    return {
+      ...currentOwner,
+      assertCurrent: () => {
+        currentOwner.assertCurrent();
+        params.assertCurrent?.();
+      },
+      [Symbol.dispose]() {},
+    };
+  });
+  using projection = await prepareLocalSandboxWorkspace({
+    cfg: { worktreeAcceleration: false },
+    agentId: workspaceOwner.agentId,
+    sessionKey: workspaceOwner.sessionKey,
+    workspaceDir: workspaceOwner.worktree.path,
+    sandbox: config.resolveSandboxConfigForAgent({}, workspaceOwner.agentId),
+    signal: controller.signal,
+    assertCurrent: () => {
+      controller.signal.throwIfAborted();
+    },
+  });
+  if (!projection) {
+    throw new Error("Expected managed projection");
+  }
+  await fs.writeFile(path.join(projection.workspaceDir, "source.txt"), "accepted guest output\n");
+  const finalized = vi.fn(async () => {});
+  const shell = vi.fn(async () => ({
+    code: 0,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.alloc(0),
+  }));
+  const backend: SandboxBackendHandle = {
+    id: "docker",
+    runtimeId: "cancelled-command-owner",
+    runtimeLabel: "cancelled-command-owner",
+    workdir: projection.workspaceDir,
+    buildExecSpec: async () => ({ argv: ["true"], env: {}, stdinMode: "pipe-closed" }),
+    runShellCommand: shell,
+    finalizeExec: finalized,
+  };
+  const sandbox = fixtures.createSandboxTestContext({
+    overrides: { workspaceDir: projection.workspaceDir, backend },
+  });
+  sandbox.fsBridge = bridgeModule.createSandboxFsBridge({ sandbox: { ...sandbox, backend } });
+  bindProjection(sandbox, projection);
+
+  controller.abort(abortError);
+  await expect(backend.runShellCommand({ script: "true" })).rejects.toBe(abortError);
+  expect(shell).not.toHaveBeenCalled();
+  replaceOnSettlement = replaced;
+  const finalization = backend.finalizeExec?.({
+    status: "completed",
+    exitCode: 0,
+    timedOut: false,
+  });
+  if (settles) {
+    await expect(finalization).resolves.toBeUndefined();
+    expect(await fs.readFile(path.join(workspaceOwner.worktree.path, "source.txt"), "utf8")).toBe(
+      "accepted guest output\n",
+    );
+  } else {
+    await expect(finalization).rejects.toThrow("Local sandbox workspace authority changed");
+    expect(await fs.readFile(path.join(workspaceOwner.worktree.path, "source.txt"), "utf8")).toBe(
+      "original\n",
+    );
+  }
+  expect(finalized).toHaveBeenCalledOnce();
+});

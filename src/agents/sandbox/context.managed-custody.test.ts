@@ -84,6 +84,7 @@ it("keeps managed workspace custody through awaited sandbox skill synchronizatio
             return result;
           },
           checkpoint: async () => {},
+          settleCheckpoint: async () => {},
           [Symbol.dispose]: releaseProjection,
         };
       });

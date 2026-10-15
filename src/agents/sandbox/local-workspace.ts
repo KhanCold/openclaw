@@ -64,6 +64,35 @@ export async function prepareLocalSandboxWorkspace(params: {
       }
     }
     owner.assertCurrent();
+    const checkpoint = async (checkpointOwner: NonNullable<typeof owner>) =>
+      await withLocalWorkspaceProjection(checkpointOwner, (state) =>
+        state.synchronize("canonical"),
+      );
+    const settleCheckpoint = async () => {
+      if (!params.signal?.aborted) {
+        await checkpoint(owner);
+        return;
+      }
+
+      // The command has stopped, but its accepted workspace output still needs to
+      // settle. Reacquire session/worktree authority without the canceled run guard.
+      const settledOwner = await resolveLocalWorkspaceOwner({
+        cfg: params.cfg,
+        agentId: params.agentId,
+        sessionKey: params.sessionKey,
+        workspaceDir: params.workspaceDir,
+        env: owner.env,
+      });
+      if (!settledOwner || !hasSameSandboxWorkspaceOwner(owner, settledOwner)) {
+        settledOwner?.[Symbol.dispose]();
+        throw new Error("Local sandbox workspace authority changed");
+      }
+      try {
+        await checkpoint(settledOwner);
+      } finally {
+        settledOwner[Symbol.dispose]();
+      }
+    };
     return {
       workspaceDir,
       workspaceCwd: path.join(
@@ -82,15 +111,33 @@ export async function prepareLocalSandboxWorkspace(params: {
           },
           { provision: true, signal },
         ),
-      checkpoint: async () => {
-        await withLocalWorkspaceProjection(owner, (state) => state.synchronize("canonical"));
-      },
+      checkpoint: async () => await checkpoint(owner),
+      settleCheckpoint,
       [Symbol.dispose]: () => owner[Symbol.dispose](),
     };
   } catch (error) {
     owner[Symbol.dispose]();
     throw error;
   }
+}
+
+function hasSameSandboxWorkspaceOwner(
+  expected: NonNullable<Awaited<ReturnType<typeof resolveLocalWorkspaceOwner>>>,
+  current: NonNullable<Awaited<ReturnType<typeof resolveLocalWorkspaceOwner>>>,
+) {
+  return (
+    expected.agentId === current.agentId &&
+    expected.sessionKey === current.sessionKey &&
+    expected.sessionId === current.sessionId &&
+    expected.lifecycleRevision === current.lifecycleRevision &&
+    expected.worktree.id === current.worktree.id &&
+    expected.worktree.path === current.worktree.path &&
+    expected.worktree.repoRoot === current.worktree.repoRoot &&
+    expected.worktree.branch === current.worktree.branch &&
+    expected.worktree.repoFingerprint === current.worktree.repoFingerprint &&
+    expected.worktree.ownerKind === current.worktree.ownerKind &&
+    expected.worktree.ownerId === current.worktree.ownerId
+  );
 }
 
 /** All harnesses use the same backend/bridge, including native Codex execution. */
@@ -150,7 +197,7 @@ export function bindLocalSandboxWorkspace(
   };
   backend.finalizeExec = async (params) => {
     await finalize?.(params);
-    await projection.checkpoint();
+    await projection.settleCheckpoint();
   };
   const bridge = sandbox.fsBridge;
   if (!bridge) {
