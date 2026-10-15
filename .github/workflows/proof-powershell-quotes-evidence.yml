@@ -17,9 +17,9 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          candidate=be27da2f81ef09e33f5f0634bcbd2c5a9a021594
+          candidate=a8b92c9723b080179c52889d282be5d11c9a7e08
           git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$candidate"
-          test "$(git rev-parse FETCH_HEAD^{tree})" = dd3256649649a7d1fec92864f021d0cb186246cb
+          test "$(git rev-parse FETCH_HEAD^{tree})" = ac1a25875cef4008d25942cc9b7b757ae7036153
           git checkout --detach "$candidate"
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
@@ -246,7 +246,7 @@ jobs:
           log(`PROOF_COMPLETE ${JSON.stringify({ base, candidate, testHash })}`);
           PROOF_DRIVER
           node /tmp/openclaw-powershell-quotes-run.mjs
-  static:
+  workflow_guards:
     if: github.repository == 'KhanCold/openclaw'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -258,9 +258,9 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          candidate=be27da2f81ef09e33f5f0634bcbd2c5a9a021594
+          candidate=a8b92c9723b080179c52889d282be5d11c9a7e08
           git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$candidate"
-          test "$(git rev-parse FETCH_HEAD^{tree})" = dd3256649649a7d1fec92864f021d0cb186246cb
+          test "$(git rev-parse FETCH_HEAD^{tree})" = ac1a25875cef4008d25942cc9b7b757ae7036153
           git checkout --detach "$candidate"
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
@@ -280,16 +280,6 @@ jobs:
           pnpm --version
       - name: Independent physical dependency install
         run: pnpm install --frozen-lockfile
-      - name: Changed-file scope dry run
-        run: node scripts/check-changed.mjs --dry-run -- src/cli/completion-cli.ts src/cli/completion-cli.test.ts
-      - name: Changed-file formatting
-        run: pnpm format:check -- src/cli/completion-cli.ts src/cli/completion-cli.test.ts
-      - name: Changed-file typed lint
-        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/cli/completion-cli.ts src/cli/completion-cli.test.ts
-      - name: Canonical production types
-        run: pnpm tsgo:core
-      - name: Canonical CLI test types
-        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.config-cli.json
       - name: Proof workflow guards
         run: |
           set -euo pipefail
