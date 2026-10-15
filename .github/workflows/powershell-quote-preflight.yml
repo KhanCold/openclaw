@@ -1,0 +1,29 @@
+name: PowerShell quote preflight
+on:
+  push:
+    branches: [proof/powershell-quote-preflight]
+permissions: {}
+jobs:
+  native-language:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Qualify native PowerShell literal parsing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host ("POWERSHELL_VERSION " + $PSVersionTable.PSVersion)
+          $apostrophe = [string][char]0x27
+          foreach ($code in 0x2018..0x201b) {
+            $value = 'Jane' + [char]$code + 's'
+            $unsafeLiteral = $apostrophe + $value + $apostrophe
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($unsafeLiteral, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -eq 0) { throw "Expected unescaped smart quote to break literal: $code" }
+            $encoded = [regex]::Replace($value, "['‘-‛]", '$0$0')
+            $safeLiteral = $apostrophe + $encoded + $apostrophe
+            $decoded = [scriptblock]::Create($safeLiteral).InvokeReturnAsIs()
+            if ($decoded -cne $value) { throw "Safe literal mismatch: $code" }
+            Write-Host ("PREFLIGHT_PASS U+" + $code.ToString('X4') + " unsafe_parse_errors=" + $errors.Count)
+          }
