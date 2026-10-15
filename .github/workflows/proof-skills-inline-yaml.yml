@@ -1,0 +1,43 @@
+name: Skills inline YAML proof
+
+on:
+  push:
+    branches: [proof/skills-inline-yaml-metadata]
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-proof-corepack
+    steps:
+      - name: Anonymous checkout of exact proof and baseline commits
+        env:
+          PROOF_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/KhanCold/openclaw.git
+          git fetch --no-tags --depth=2 origin "$PROOF_SHA"
+          git checkout --detach FETCH_HEAD
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 9b2bc0ed7e135d7be69f7f9749684bf30032981c
+          echo "PROOF_CANDIDATE_SHA=$(git rev-parse HEAD^)" >> "$GITHUB_ENV"
+      - name: Setup standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      - name: Setup pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Install isolated checkout dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prove unchanged baseline failure, repaired behavior and controls
+        run: node .github/proofs/skills-inline-yaml-run.mjs
