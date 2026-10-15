@@ -1,0 +1,35 @@
+name: Plugin manifest JSON5 evidence
+on:
+  push:
+    branches: [proof/plugin-authoring-json5]
+permissions:
+  contents: read
+jobs:
+  preflight:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Anonymous exact source checkout
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 7816d8b6542af575bd67fe0eabd6393ff4f7963a
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = 7816d8b6542af575bd67fe0eabd6393ff4f7963a
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+      - name: Pinned standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Qualify package manager without source execution
+        env:
+          COREPACK_HOME: /tmp/openclaw-json5-corepack
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          node --version
+          pnpm --version
+          printf 'PREFLIGHT_ADMITTED anonymous exact source; no application execution\n'
