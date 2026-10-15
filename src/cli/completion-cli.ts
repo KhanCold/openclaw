@@ -297,9 +297,7 @@ function generatePowerShellCompletion(tree: ShellCompletionCommandTree): string 
   const { root, descendants: contexts } = tree;
   const rootCmd = root.command.name();
   const formatPowerShellArray = (entries: string[]) =>
-    entries.length > 0
-      ? `@(${entries.map(quotePowerShellArg).join(",")})`
-      : "@()";
+    entries.length > 0 ? `@(${entries.map(quotePowerShellArg).join(",")})` : "@()";
   const commandPathCases = contexts
     .flatMap((context) =>
       context.pathVariants.map(
