@@ -1,0 +1,309 @@
+name: Plugin authoring JSON5 behavior evidence
+on:
+  push:
+    branches: [proof/plugin-authoring-json5-evidence]
+permissions:
+  contents: read
+jobs:
+  behavior:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-json5-corepack
+    steps:
+      - name: Anonymous checkout of reviewed production tree
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
+          proof=$(git rev-parse FETCH_HEAD)
+          test "$proof" = "$GITHUB_SHA"
+          candidate=$(git rev-parse "$proof^")
+          test "$(git rev-parse "$candidate^{tree}")" = f3d599fbfdd37c0d0b3de57643de8f8060be04ee
+          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 7816d8b6542af575bd67fe0eabd6393ff4f7963a
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
+          nproc
+          free -m
+      - name: Pinned standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent physical dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Unchanged baseline and head tests and real CLI controls
+        run: |
+          set -euo pipefail
+          cat > /tmp/openclaw-plugin-json5-cli.mjs <<'CLI_FIXTURE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+          import { spawnSync } from "node:child_process";
+          
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-json5-cli-"));
+          const project = path.join(root, "project");
+          const home = path.join(root, "home");
+          const state = path.join(root, "state");
+          const bundled = path.join(root, "bundled");
+          for (const dir of [project, home, state, bundled]) fs.mkdirSync(dir, { recursive: true });
+          const config = path.join(state, "openclaw.json");
+          fs.writeFileSync(config, JSON.stringify({ plugins: { enabled: false } }));
+          const packagePath = path.join(project, "package.json");
+          const manifestPath = path.join(project, "openclaw.plugin.json");
+          fs.writeFileSync(packagePath, JSON.stringify({
+            name: "openclaw-plugin-json5-proof", version: "1.0.0", type: "module",
+            openclaw: { extensions: ["./index.ts"] },
+          }));
+          fs.writeFileSync(path.join(project, "index.ts"), `import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+          export default defineToolPlugin({
+            id: "json5-proof", name: "JSON5 Proof", description: "Synthetic JSON5 proof.",
+            tools: tool => [tool({
+              name: "echo", description: "Echo synthetic input.",
+              parameters: { type: "object", properties: {} },
+              execute: async () => ({ ok: true }),
+            })],
+          });
+          `);
+          const env = {
+            PATH: process.env.PATH, COREPACK_HOME: process.env.COREPACK_HOME,
+            HOME: home, USERPROFILE: home, CI: "true", NO_COLOR: "1",
+            OPENCLAW_HOME: home, OPENCLAW_STATE_DIR: state, OPENCLAW_CONFIG_PATH: config,
+            OPENCLAW_BUNDLED_PLUGINS_DIR: bundled, OPENCLAW_NO_RESPAWN: "1",
+            OPENCLAW_HIDE_BANNER: "1", NODE_DISABLE_COMPILE_CACHE: "1",
+          };
+          const cases = [];
+          const failures = [];
+          function run(label, args, expected = 0) {
+            const start = performance.now();
+            const result = spawnSync("pnpm", ["--silent", "openclaw", "plugins", ...args, "--root", project], {
+              env, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: 300_000,
+            });
+            assert.equal(result.error, undefined, `${label}: process error ${result.error}`);
+            const record = { label, code: result.status, expected, seconds: (performance.now() - start) / 1000,
+              stdout: result.stdout, stderr: result.stderr };
+            cases.push(record);
+            fs.writeFileSync(1, `CLI_CASE ${JSON.stringify(record)}\n`);
+            if (result.status !== expected) failures.push(label);
+            return result;
+          }
+          function unchanged(manifest, pkg) {
+            assert.deepEqual(fs.readFileSync(manifestPath), manifest, "manifest bytes changed");
+            assert.deepEqual(fs.readFileSync(packagePath), pkg, "package bytes changed");
+          }
+          function validResult(result) {
+            assert.deepEqual(JSON.parse(result.stdout), { valid: true, pluginId: "json5-proof", errors: [] });
+          }
+          run("strict:build", ["build"]);
+          validResult(run("strict:validate", ["validate", "--json"]));
+          run("strict:check", ["build", "--check"]);
+          const pkg = fs.readFileSync(packagePath);
+          const document = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          document.uiHints = { token: { label: "Authored JSON5 label" } };
+          const strictManifest = Buffer.from(JSON.stringify(document, null, 2));
+          const authored = Buffer.from(strictManifest.toString()
+            .replace("{", "{ // Explanatory author comment")
+            .replace('"id":', "id:")
+            .replace(/\n\}$/, ",\n}"));
+          fs.writeFileSync(manifestPath, authored);
+          const validation = run("json5:validate", ["validate", "--json"]);
+          if (validation.status === 0) validResult(validation);
+          else assert.match(validation.stderr, /Malformed JSON in .*openclaw\.plugin\.json/);
+          unchanged(authored, pkg);
+          const check = run("json5:check", ["build", "--check"]);
+          if (check.status !== 0) assert.match(check.stderr, /Malformed JSON in .*openclaw\.plugin\.json/);
+          unchanged(authored, pkg);
+          const build = run("json5:build", ["build"]);
+          if (build.status === 0) {
+            const built = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+            assert.deepEqual(built.uiHints, { token: { label: "Authored JSON5 label" } });
+            assert.deepEqual(built.contracts.tools, ["echo"]);
+            assert.equal(built.id, "json5-proof");
+            assert.deepEqual(fs.readFileSync(packagePath), pkg);
+          } else {
+            assert.match(build.stderr, /Malformed JSON in .*openclaw\.plugin\.json/);
+            unchanged(authored, pkg);
+          }
+          
+          const malformed = Buffer.from("{ invalid native manifest");
+          fs.writeFileSync(manifestPath, malformed);
+          const malformedValidation = run("malformed:validate", ["validate", "--json"], 1);
+          assert.equal(JSON.parse(malformedValidation.stdout).valid, false);
+          assert.match(malformedValidation.stderr, /failed to parse plugin manifest/);
+          unchanged(malformed, pkg);
+          const malformedBuild = run("malformed:build", ["build"], 1);
+          assert.match(malformedBuild.stderr, /Malformed JSON in .*openclaw\.plugin\.json/);
+          unchanged(malformed, pkg);
+          
+          fs.writeFileSync(manifestPath, strictManifest);
+          const nonJsonPackage = Buffer.from(pkg.toString().replace("{", "{ // Not valid package JSON\n"));
+          fs.writeFileSync(packagePath, nonJsonPackage);
+          for (const command of ["validate", "build"]) {
+            const result = run(`package-json5:${command}`, [command, ...(command === "validate" ? ["--json"] : [])], 1);
+            assert.match(result.stderr, /Malformed JSON in .*package\.json/);
+            unchanged(strictManifest, nonJsonPackage);
+          }
+          fs.writeFileSync(packagePath, pkg);
+          
+          for (const [label, file, content] of [
+            ["manifest", manifestPath, strictManifest], ["package", packagePath, pkg],
+          ]) {
+            const raw = content.toString().replace("{", '{"encodingProof":"SENTINEL",');
+            const at = raw.indexOf("SENTINEL");
+            const invalidUtf8 = Buffer.concat([Buffer.from(raw.slice(0, at)), Buffer.from([0xff]),
+              Buffer.from(raw.slice(at + "SENTINEL".length))]);
+            fs.writeFileSync(file, invalidUtf8);
+            const beforeManifest = fs.readFileSync(manifestPath);
+            const beforePackage = fs.readFileSync(packagePath);
+            for (const command of ["validate", "build"]) {
+              const result = run(`utf8-${label}:${command}`, [command, ...(command === "validate" ? ["--json"] : [])], 1);
+              assert.match(result.stderr, /must be valid UTF-8/);
+              unchanged(beforeManifest, beforePackage);
+            }
+            fs.writeFileSync(file, content);
+          }
+          fs.writeFileSync(1, `PLUGIN_JSON5_CLI_PROOF ${JSON.stringify({ cases: cases.length, failures })}\n`);
+          process.exitCode = failures.length ? 1 : 0;
+          CLI_FIXTURE
+          cat > /tmp/openclaw-plugin-json5-run.mjs <<'PROOF_DRIVER'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import path from "node:path";
+          import os from "node:os";
+          import { spawnSync } from "node:child_process";
+          
+          const base = "7816d8b6542af575bd67fe0eabd6393ff4f7963a";
+          const candidate = process.env.PROOF_CANDIDATE_SHA;
+          const sources = ["src/cli/plugins-authoring-command.ts", "src/cli/plugins-authoring-json.ts"];
+          const candidateFiles = sources.map(file => fs.readFileSync(file));
+          const test = "src/cli/plugins-authoring-command.test.ts";
+          const testBytes = fs.readFileSync(test);
+          function log(message) { fs.writeFileSync(1, `${message}\n`); }
+          function run(label, command, args, allowFailure = false) {
+            const started = performance.now();
+            const result = spawnSync(command, args, { env: process.env, encoding: "utf8",
+              maxBuffer: 128 * 1024 * 1024, timeout: 35 * 60 * 1000 });
+            fs.writeFileSync(1, result.stdout ?? "");
+            fs.writeFileSync(2, result.stderr ?? "");
+            log(`PROOF_TIMING ${JSON.stringify({ label, seconds: (performance.now()-started)/1000, status: result.status })}`);
+            assert.equal(result.error, undefined, `${label}: ${result.error}`);
+            if (!allowFailure) assert.equal(result.status, 0, `${label} failed`);
+            return result;
+          }
+          function focused(phase, baseline) {
+            assert.deepEqual(fs.readFileSync(test), testBytes, "regression assertions changed");
+            const output = path.join(os.tmpdir(), `plugin-json5-${phase}-tests.json`);
+            const result = run(`${phase} unchanged regression`, "pnpm", ["test", test, "--maxWorkers=1",
+              "--reporter=default", "--reporter=json", `--outputFile.json=${output}`], baseline);
+            const report = JSON.parse(fs.readFileSync(output, "utf8"));
+            const assertions = report.testResults.flatMap(file => file.assertionResults);
+            const failed = assertions.filter(a => a.status === "failed").map(a => a.fullName);
+            assert.equal(result.status, baseline ? 1 : 0);
+            assert.equal(failed.length, baseline ? 3 : 0);
+            if (baseline) {
+              for (const command of ["validate", "build --check", "build"]) {
+                assert.equal(failed.filter(name => name.endsWith(`accepts JSON5 native manifests in ${command} and preserves authored metadata`)).length, 1);
+              }
+            }
+            log(`PROOF_TESTS ${JSON.stringify({ phase, file: test, passed: report.numPassedTests,
+              failed: report.numFailedTests, failures: failed,
+              assertionTotalMs: assertions.reduce((n,a)=>n+(a.duration ?? 0),0),
+              maxAssertionMs: Math.max(0,...assertions.map(a=>a.duration ?? 0)) })}`);
+          }
+          function cli(phase, baseline) {
+            const result = run(`${phase} real CLI`, process.execPath, ["/tmp/openclaw-plugin-json5-cli.mjs"], baseline);
+            const line = result.stdout.split("\n").find(line=>line.startsWith("PLUGIN_JSON5_CLI_PROOF "));
+            assert.ok(line, "CLI fixture did not complete all positive/negative controls");
+            const report = JSON.parse(line.slice("PLUGIN_JSON5_CLI_PROOF ".length));
+            assert.deepEqual(report.failures, baseline ? ["json5:validate", "json5:check", "json5:build"] : []);
+            assert.equal(report.cases, 14);
+            assert.equal(result.status, baseline ? 1 : 0);
+            log(`PROOF_CLI ${JSON.stringify({ phase, ...report })}`);
+          }
+          log(`PROOF_IDENTITIES ${JSON.stringify({ base, candidate, workflow: process.env.GITHUB_SHA })}`);
+          try {
+            for (const source of sources) fs.writeFileSync(source, run("read exact base", "git", ["show", `${base}:${source}`]).stdout);
+            run("baseline owners match base", "git", ["diff", "--exit-code", base, "--", ...sources]);
+            focused("baseline", true);
+            run("baseline runtime build", "pnpm", ["build:runtime"]);
+            cli("baseline", true);
+          } finally {
+            sources.forEach((source,index)=>fs.writeFileSync(source,candidateFiles[index]));
+          }
+          run("candidate owners match head", "git", ["diff", "--exit-code", candidate, "--", ...sources]);
+          focused("head", false);
+          for (const sibling of ["src/cli/plugins-authoring-command.utf8.test.ts",
+            "src/cli/plugins-authoring-validation.test.ts", "src/utils/parse-json-compat.test.ts"]) {
+            run(`head sibling ${sibling}`, "pnpm", ["test", sibling, "--maxWorkers=1"]);
+          }
+          run("head full build", "pnpm", ["build"]);
+          cli("head", false);
+          run("final whitespace", "git", ["diff", "--check", base, candidate]);
+          log(`PROOF_COMPLETE ${JSON.stringify({ base, candidate })}`);
+          PROOF_DRIVER
+          node /tmp/openclaw-plugin-json5-run.mjs
+  static:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-json5-corepack
+    steps:
+      - name: Anonymous checkout of reviewed production tree
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
+          proof=$(git rev-parse FETCH_HEAD)
+          test "$proof" = "$GITHUB_SHA"
+          candidate=$(git rev-parse "$proof^")
+          test "$(git rev-parse "$candidate^{tree}")" = f3d599fbfdd37c0d0b3de57643de8f8060be04ee
+          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 7816d8b6542af575bd67fe0eabd6393ff4f7963a
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
+          nproc
+          free -m
+      - name: Pinned standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent physical dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Changed-file scope dry run
+        run: node scripts/check-changed.mjs --dry-run -- src/cli/plugins-authoring-command.ts src/cli/plugins-authoring-json.ts src/cli/plugins-authoring-command.test.ts
+      - name: Exact changed-file formatting
+        run: pnpm format:check -- src/cli/plugins-authoring-command.ts src/cli/plugins-authoring-json.ts src/cli/plugins-authoring-command.test.ts
+      - name: Exact changed-file typed lint
+        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/cli/plugins-authoring-command.ts src/cli/plugins-authoring-json.ts src/cli/plugins-authoring-command.test.ts
+      - name: Canonical production types
+        run: pnpm tsgo:core
+      - name: Canonical CLI test types
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.config-cli.json
+      - name: Duplicate scan coverage in exact code checkout
+        run: pnpm dup:check:coverage
+      - name: Workflow guard validation
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 --silent --show-error "https://raw.githubusercontent.com/KhanCold/openclaw/$GITHUB_SHA/.github/workflows/proof-plugin-authoring-json5-evidence.yml" --output .github/workflows/proof-plugin-authoring-json5-evidence.yml
+          pnpm check:workflows
+      - name: Candidate whitespace
+        run: git diff --check 7816d8b6542af575bd67fe0eabd6393ff4f7963a "$PROOF_CANDIDATE_SHA"
