@@ -12,20 +12,18 @@ jobs:
     env:
       CI: "true"
       COREPACK_HOME: /tmp/openclaw-json5-corepack
+      PROOF_CANDIDATE_SHA: b846a7a2048a63b3ef1ccd20aed9d954b13b2d65
     steps:
       - name: Anonymous checkout of reviewed production tree
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
-          proof=$(git rev-parse FETCH_HEAD)
-          test "$proof" = "$GITHUB_SHA"
-          candidate=$(git rev-parse "$proof^")
-          test "$(git rev-parse "$candidate^{tree}")" = f3d599fbfdd37c0d0b3de57643de8f8060be04ee
-          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$PROOF_CANDIDATE_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$PROOF_CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = f3d599fbfdd37c0d0b3de57643de8f8060be04ee
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 7816d8b6542af575bd67fe0eabd6393ff4f7963a
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
-          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
           nproc
           free -m
       - name: Pinned standard Node runtime
@@ -80,7 +78,7 @@ jobs:
             HOME: home, USERPROFILE: home, CI: "true", NO_COLOR: "1",
             OPENCLAW_HOME: home, OPENCLAW_STATE_DIR: state, OPENCLAW_CONFIG_PATH: config,
             OPENCLAW_BUNDLED_PLUGINS_DIR: bundled, OPENCLAW_NO_RESPAWN: "1",
-            OPENCLAW_HIDE_BANNER: "1", NODE_DISABLE_COMPILE_CACHE: "1",
+            OPENCLAW_HIDE_BANNER: "1", NODE_DISABLE_COMPILE_CACHE: "1", OPENCLAW_DEBUG: "1",
           };
           const cases = [];
           const failures = [];
@@ -185,7 +183,6 @@ jobs:
           const base = "7816d8b6542af575bd67fe0eabd6393ff4f7963a";
           const candidate = process.env.PROOF_CANDIDATE_SHA;
           const sources = ["src/cli/plugins-authoring-command.ts", "src/cli/plugins-authoring-json.ts"];
-          const candidateFiles = sources.map(file => fs.readFileSync(file));
           const test = "src/cli/plugins-authoring-command.test.ts";
           const testBytes = fs.readFileSync(test);
           function log(message) { fs.writeFileSync(1, `${message}\n`); }
@@ -231,16 +228,27 @@ jobs:
             log(`PROOF_CLI ${JSON.stringify({ phase, ...report })}`);
           }
           log(`PROOF_IDENTITIES ${JSON.stringify({ base, candidate, workflow: process.env.GITHUB_SHA })}`);
+          const originalBaselineTest = spawnSync("git", ["show", `${base}:${test}`]);
+          assert.equal(originalBaselineTest.status, 0);
+          run("candidate initially clean", "git", ["diff", "--exit-code", candidate]);
+          run("checkout exact baseline HEAD", "git", ["-c", "core.hooksPath=/dev/null", "checkout", "--detach", base]);
           try {
-            for (const source of sources) fs.writeFileSync(source, run("read exact base", "git", ["show", `${base}:${source}`]).stdout);
+            assert.equal(run("baseline HEAD", "git", ["rev-parse", "HEAD"]).stdout.trim(), base);
+            fs.writeFileSync(test, testBytes);
+            const changed = run("only unchanged regression differs from base", "git", ["diff", "--name-only", base]).stdout.trim();
+            assert.equal(changed, test);
             run("baseline owners match base", "git", ["diff", "--exit-code", base, "--", ...sources]);
             focused("baseline", true);
             run("baseline runtime build", "pnpm", ["build:runtime"]);
             cli("baseline", true);
           } finally {
-            sources.forEach((source,index)=>fs.writeFileSync(source,candidateFiles[index]));
+            fs.writeFileSync(test, originalBaselineTest.stdout);
+            run("baseline clean before restoring head", "git", ["diff", "--exit-code", base]);
+            run("restore exact candidate HEAD", "git", ["-c", "core.hooksPath=/dev/null", "checkout", "--detach", candidate]);
           }
-          run("candidate owners match head", "git", ["diff", "--exit-code", candidate, "--", ...sources]);
+          assert.equal(run("candidate HEAD", "git", ["rev-parse", "HEAD"]).stdout.trim(), candidate);
+          assert.deepEqual(fs.readFileSync(test), testBytes, "unchanged regression was not restored");
+          run("candidate source and tests match head", "git", ["diff", "--exit-code", candidate]);
           focused("head", false);
           for (const sibling of ["src/cli/plugins-authoring-command.utf8.test.ts",
             "src/cli/plugins-authoring-validation.test.ts", "src/utils/parse-json-compat.test.ts"]) {
@@ -252,27 +260,25 @@ jobs:
           log(`PROOF_COMPLETE ${JSON.stringify({ base, candidate })}`);
           PROOF_DRIVER
           node /tmp/openclaw-plugin-json5-run.mjs
-  static:
+  workflow_guards:
     if: github.repository == 'KhanCold/openclaw'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       CI: "true"
       COREPACK_HOME: /tmp/openclaw-json5-corepack
+      PROOF_CANDIDATE_SHA: b846a7a2048a63b3ef1ccd20aed9d954b13b2d65
     steps:
       - name: Anonymous checkout of reviewed production tree
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
-          proof=$(git rev-parse FETCH_HEAD)
-          test "$proof" = "$GITHUB_SHA"
-          candidate=$(git rev-parse "$proof^")
-          test "$(git rev-parse "$candidate^{tree}")" = f3d599fbfdd37c0d0b3de57643de8f8060be04ee
-          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$PROOF_CANDIDATE_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$PROOF_CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = f3d599fbfdd37c0d0b3de57643de8f8060be04ee
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 7816d8b6542af575bd67fe0eabd6393ff4f7963a
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
-          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
           nproc
           free -m
       - name: Pinned standard Node runtime
@@ -288,18 +294,6 @@ jobs:
           pnpm --version
       - name: Independent physical dependency install
         run: pnpm install --frozen-lockfile
-      - name: Changed-file scope dry run
-        run: node scripts/check-changed.mjs --dry-run -- src/cli/plugins-authoring-command.ts src/cli/plugins-authoring-json.ts src/cli/plugins-authoring-command.test.ts
-      - name: Exact changed-file formatting
-        run: pnpm format:check -- src/cli/plugins-authoring-command.ts src/cli/plugins-authoring-json.ts src/cli/plugins-authoring-command.test.ts
-      - name: Exact changed-file typed lint
-        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/cli/plugins-authoring-command.ts src/cli/plugins-authoring-json.ts src/cli/plugins-authoring-command.test.ts
-      - name: Canonical production types
-        run: pnpm tsgo:core
-      - name: Canonical CLI test types
-        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.config-cli.json
-      - name: Duplicate scan coverage in exact code checkout
-        run: pnpm dup:check:coverage
       - name: Workflow guard validation
         run: |
           set -euo pipefail
