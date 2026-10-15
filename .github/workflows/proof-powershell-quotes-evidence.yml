@@ -1,0 +1,320 @@
+name: PowerShell smart quote behavior evidence
+on:
+  push:
+    branches: [proof/powershell-quotes-evidence]
+permissions:
+  contents: read
+jobs:
+  behavior:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-powershell-quotes-corepack
+    steps:
+      - name: Anonymous checkout of reviewed production tree
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
+          proof=$(git rev-parse FETCH_HEAD)
+          test "$proof" = "$GITHUB_SHA"
+          candidate=$(git rev-parse "$proof^")
+          test "$(git rev-parse "$candidate^{tree}")" = d2022947e08d9281159ecfaf04c69e962739e3e3
+          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
+          nproc
+          free -m
+      - name: Pinned standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent physical dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Unchanged native regression and real CLI baseline/head controls
+        run: |
+          set -euo pipefail
+          cat > /tmp/openclaw-powershell-quotes-cli.mjs <<'CLI_FIXTURE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+          import { spawnSync } from "node:child_process";
+          
+          const phase = process.argv[2];
+          assert.ok(phase === "baseline" || phase === "head");
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), "powershell-quotes-cli-"));
+          const bin = path.join(root, "bin");
+          fs.mkdirSync(bin);
+          fs.writeFileSync(path.join(bin, "openclaw"), '#!/usr/bin/env bash\nexec pnpm --silent openclaw "$@"\n', { mode: 0o700 });
+          const scenarios = [
+            { name: "ordinary", value: "alpha", prefix: "al", insertion: "alpha" },
+            { name: "ascii", value: "Jane's", prefix: "Ja", insertion: "'Jane''s'" },
+            { name: "left", value: "Jane‘s", prefix: "Ja", insertion: "'Jane‘‘s'", broken: true },
+            { name: "right", value: "Jane’s", prefix: "Ja", insertion: "'Jane’’s'", broken: true },
+            { name: "low", value: "Jane‚s", prefix: "Ja", insertion: "'Jane‚‚s'", broken: true },
+            { name: "reversed", value: "Jane‛s", prefix: "Ja", insertion: "'Jane‛‛s'", broken: true },
+            { name: "substitution", value: "literal $(Write-Error OPENCLAW_COMPLETION_VALUE_EXECUTED)", prefix: "literal",
+              insertion: "'literal $(Write-Error OPENCLAW_COMPLETION_VALUE_EXECUTED)'" },
+            { name: "ascii-path", value: "alpha", prefix: "al", insertion: "alpha", nested: "Jane's", broken: true },
+            { name: "smart-path", value: "alpha", prefix: "al", insertion: "alpha", nested: "Jane’s", broken: true },
+          ];
+          const psScript = String.raw`
+          $ErrorActionPreference = 'Stop'
+          $request = Get-Content -Raw -LiteralPath $env:PROOF_PS_REQUEST | ConvertFrom-Json
+          $script = Get-Content -Raw -LiteralPath $request.script
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseInput($script, [ref]$tokens, [ref]$errors)
+          $parseErrors = @($errors | ForEach-Object { @{ id = $_.ErrorId; message = $_.Message; extent = $_.Extent.Text } })
+          $records = @()
+          if ($errors.Count -eq 0) {
+            . ([scriptblock]::Create($script))
+            foreach ($case in $request.cases) {
+              if (Test-Path -LiteralPath $request.marker) { throw 'Action ran before completion' }
+              $completion = [System.Management.Automation.CommandCompletion]::CompleteInput([string]$case.line, $case.line.Length, $null)
+              $matches = @($completion.CompletionMatches)
+              if (Test-Path -LiteralPath $request.marker) { throw 'Completion invoked plugin action' }
+              if ($matches.Count -ne 1 -or $matches[0].CompletionText -cne $case.expected) {
+                throw ('Unexpected completions: ' + ($matches | ConvertTo-Json -Compress))
+              }
+              $completed = $case.line.Substring(0, $completion.ReplacementIndex) + $matches[0].CompletionText + $case.line.Substring($completion.ReplacementIndex + $completion.ReplacementLength)
+              $global:LASTEXITCODE = 0
+              Invoke-Expression $completed | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw ('Completed CLI failed: ' + $LASTEXITCODE) }
+              if (!(Test-Path -LiteralPath $request.marker)) { throw 'Completed CLI did not invoke action' }
+              $observed = Get-Content -Raw -LiteralPath $request.marker | ConvertFrom-Json
+              if ($observed.value -cne $request.value -or $observed.operands -ne 0) { throw 'Completed value did not roundtrip as one argument' }
+              Remove-Item -LiteralPath $request.marker
+              $records += @{ line = $case.line; insertion = $matches[0].CompletionText; replacementIndex = $completion.ReplacementIndex;
+                replacementLength = $completion.ReplacementLength; completed = $completed; value = $observed.value; operands = $observed.operands }
+            }
+          }
+          @{ parseErrors = $parseErrors; records = $records; version = $PSVersionTable.PSVersion.ToString() } | ConvertTo-Json -Depth 8 -Compress
+          `;
+          const records = [];
+          let calls = 0;
+          function execute(label, command, args, env) {
+            const start = performance.now();
+            const result = spawnSync(command, args, { env, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: 300_000 });
+            assert.equal(result.error, undefined, `${label}: ${result.error}`);
+            fs.writeFileSync(1, `CLI_TIMING ${JSON.stringify({ phase, label, status: result.status, seconds: (performance.now()-start)/1000 })}\n`);
+            assert.equal(result.status, 0, `${label}: ${result.stderr}\n${result.stdout}`);
+            return result;
+          }
+          for (const scenario of scenarios) {
+            const dir = path.join(root, scenario.name);
+            const plugin = path.join(dir, "plugin");
+            const state = path.join(dir, "state");
+            fs.mkdirSync(plugin, { recursive: true });
+            fs.mkdirSync(state);
+            const marker = path.join(dir, "action.json");
+            const config = path.join(dir, "openclaw.json");
+            fs.writeFileSync(path.join(plugin, "package.json"), JSON.stringify({ name: "completion-quotes-proof", version: "1.0.0",
+              type: "module", openclaw: { extensions: ["./index.js"] } }));
+            fs.writeFileSync(path.join(plugin, "openclaw.plugin.json"), JSON.stringify({ id: "completion-quotes-proof", configSchema: { type: "object" } }));
+            fs.writeFileSync(path.join(plugin, "index.js"), `import fs from "node:fs";
+          export default function register(api) {
+            api.registerCli(({ program }) => {
+              const command = program.command("proof-quotes");
+              command.addOption(command.createOption("--value <value>").choices([${JSON.stringify(scenario.value)}]));
+              command.action((options, command) => fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ value: options.value, operands: command.args.length })));
+              ${scenario.nested ? `const nested = command.command(${JSON.stringify(scenario.nested)}).alias(${JSON.stringify("alias-" + scenario.nested)});
+              nested.addOption(nested.createOption("--mode <mode>").choices(["local"]));` : ""}
+            }, { descriptors: [{ name: "proof-quotes", description: "Synthetic PowerShell quote proof", hasSubcommands: ${Boolean(scenario.nested)} }] });
+          }
+          `);
+            fs.writeFileSync(config, JSON.stringify({ logging: { file: path.join(dir,"cli.log"), level: "silent", consoleLevel: "silent" },
+              plugins: { allow: ["completion-quotes-proof"], load: { paths: [plugin] }, slots: { memory: "none" },
+                entries: { "completion-quotes-proof": { enabled: true } } } }));
+            const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}`, COREPACK_HOME: process.env.COREPACK_HOME,
+              HOME: dir, USERPROFILE: dir, OPENCLAW_HOME: dir, OPENCLAW_CONFIG_PATH: config, OPENCLAW_STATE_DIR: state,
+              OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1", OPENCLAW_NO_RESPAWN: "1", NODE_DISABLE_COMPILE_CACHE: "1", NO_COLOR: "1", CI: "true" };
+            execute(`${scenario.name} direct valid argv`, "pnpm", ["--silent", "openclaw", "proof-quotes", "--value", scenario.value], env);
+            calls++;
+            assert.deepEqual(JSON.parse(fs.readFileSync(marker,"utf8")), { value: scenario.value, operands: 0 });
+            fs.unlinkSync(marker);
+            const generated = execute(`${scenario.name} real completion generation`, "pnpm", ["--silent", "openclaw", "completion", "--shell", "powershell"], env);
+            calls++;
+            assert.equal(fs.existsSync(marker), false, "Generating completion executed action");
+            assert.match(generated.stdout, /Register-ArgumentCompleter -Native -CommandName openclaw/);
+            const script = path.join(dir, "completion.ps1");
+            fs.writeFileSync(script, generated.stdout);
+            const request = path.join(dir, "request.json");
+            fs.writeFileSync(request, JSON.stringify({ script, marker, value: scenario.value, cases: [
+              { line: `openclaw proof-quotes --value ${scenario.prefix}`, expected: scenario.insertion },
+              { line: `openclaw proof-quotes --value=${scenario.prefix}`, expected: `--value=${scenario.insertion}` },
+            ] }));
+            const native = execute(`${scenario.name} native parsing and completed CLI roundtrip`, "pwsh",
+              ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(psScript,"utf16le").toString("base64")],
+              { ...env, PROOF_PS_REQUEST: request });
+            const observed = JSON.parse(native.stdout.trim());
+            const expectBroken = phase === "baseline" && scenario.broken;
+            assert.equal(observed.parseErrors.length > 0, Boolean(expectBroken), `${scenario.name}: unexpected generated script parse status`);
+            if (expectBroken) {
+              assert.ok(observed.parseErrors.some(error => /UnexpectedToken|TerminatorExpectedAtEndOfString/.test(error.id)));
+              assert.equal(observed.records.length, 0);
+            } else {
+              assert.equal(observed.records.length, 2);
+              calls += observed.records.length;
+            }
+            assert.equal(fs.existsSync(marker), false, "Marker was not cleaned after roundtrip");
+            const record = { phase, scenario: scenario.name, directValid: true, ...observed };
+            records.push(record);
+            fs.writeFileSync(1, `CLI_CASE ${JSON.stringify(record)}\n`);
+          }
+          const failures = records.filter(record => record.parseErrors.length > 0).map(record => record.scenario);
+          assert.deepEqual(failures, phase === "baseline" ? ["left","right","low","reversed","ascii-path","smart-path"] : []);
+          fs.writeFileSync(1, `POWERSHELL_QUOTES_CLI_PROOF ${JSON.stringify({ phase, scenarios: records.length, calls, failures })}\n`);
+          CLI_FIXTURE
+          cat > /tmp/openclaw-powershell-quotes-run.mjs <<'PROOF_DRIVER'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+          import { createHash } from "node:crypto";
+          import { spawnSync } from "node:child_process";
+          
+          const base = "950d600695bd93be80b514daa2cca3af863aad70";
+          const candidate = process.env.PROOF_CANDIDATE_SHA;
+          const test = "src/cli/completion-cli.test.ts";
+          const testBytes = fs.readFileSync(test);
+          const testHash = createHash("sha256").update(testBytes).digest("hex");
+          function log(message) { fs.writeFileSync(1, `${message}\n`); }
+          function run(label, command, args, allowFailure = false) {
+            const start = performance.now();
+            const result = spawnSync(command, args, { env: process.env, encoding: "utf8", maxBuffer: 128 * 1024 * 1024, timeout: 35*60*1000 });
+            fs.writeFileSync(1, result.stdout ?? "");
+            fs.writeFileSync(2, result.stderr ?? "");
+            log(`PROOF_TIMING ${JSON.stringify({ label, seconds: (performance.now()-start)/1000, status: result.status })}`);
+            assert.equal(result.error, undefined, `${label}: ${result.error}`);
+            if (!allowFailure) assert.equal(result.status, 0, `${label} failed`);
+            return result;
+          }
+          function focused(phase, baseline) {
+            assert.deepEqual(fs.readFileSync(test), testBytes, "regression assertions changed");
+            const output = path.join(os.tmpdir(), `powershell-quotes-${phase}-tests.json`);
+            const result = run(`${phase} unchanged regression`, "pnpm", ["test", test, "--maxWorkers=1", "--reporter=default", "--reporter=json", `--outputFile.json=${output}`], baseline);
+            const report = JSON.parse(fs.readFileSync(output,"utf8"));
+            const assertions = report.testResults.flatMap(file=>file.assertionResults);
+            const failed = assertions.filter(a=>a.status === "failed");
+            assert.equal(result.status, baseline ? 1 : 0);
+            assert.equal(failed.length, baseline ? 6 : 0);
+            assert.ok(assertions.some(a => /inserts PowerShell ordinary values/.test(a.fullName) && a.status === "passed"));
+            assert.ok(assertions.filter(a=>/PowerShell|powershell/.test(a.fullName)).every(a=>a.status === "passed" || (baseline && a.status === "failed")), "PowerShell coverage skipped");
+            if (baseline) {
+              const expected = ["left", "right", "low", "reversed"].map(name=>`completion-cli inserts PowerShell ${name} typographic apostrophes as one safe argument`);
+              expected.push("completion-cli keeps PowerShell scripts valid with apostrophes in nested command paths",
+                "completion-cli keeps PowerShell scripts valid with typographic apostrophes in nested command paths");
+              assert.deepEqual(failed.map(a=>a.fullName).sort(), expected.sort());
+              for (const failure of failed) assert.match(failure.failureMessages.join("\n"), /Unexpected token|terminator|Terminator|ParserError|Missing/i);
+            }
+            log(`PROOF_TESTS ${JSON.stringify({ phase, file: test, testHash, passed: report.numPassedTests, failed: report.numFailedTests,
+              skipped: assertions.filter(a=>!['passed','failed'].includes(a.status)).map(a=>a.fullName),
+              failures: failed.map(a=>a.fullName), assertionTotalMs: assertions.reduce((n,a)=>n+(a.duration??0),0), maxAssertionMs: Math.max(0,...assertions.map(a=>a.duration??0)) })}`);
+          }
+          function cli(phase) {
+            const result = run(`${phase} supported CLI and native PowerShell`, process.execPath, ["/tmp/openclaw-powershell-quotes-cli.mjs", phase]);
+            const line = result.stdout.split("\n").find(line=>line.startsWith("POWERSHELL_QUOTES_CLI_PROOF "));
+            assert.ok(line, "CLI fixture did not finish all controls");
+            const record = JSON.parse(line.slice("POWERSHELL_QUOTES_CLI_PROOF ".length));
+            assert.equal(record.scenarios, 9);
+            assert.equal(record.calls, phase === "baseline" ? 24 : 36);
+            log(`PROOF_CLI ${JSON.stringify(record)}`);
+          }
+          log(`PROOF_IDENTITIES ${JSON.stringify({ base, candidate, workflow: process.env.GITHUB_SHA, testHash })}`);
+          run("required native PowerShell", "pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"]);
+          const original = spawnSync("git", ["show", `${base}:${test}`]);
+          assert.equal(original.status, 0);
+          run("candidate initially clean", "git", ["diff", "--exit-code", candidate]);
+          run("checkout exact baseline", "git", ["-c", "core.hooksPath=/dev/null", "checkout", "--detach", base]);
+          try {
+            assert.equal(run("baseline HEAD", "git", ["rev-parse", "HEAD"]).stdout.trim(), base);
+            fs.writeFileSync(test,testBytes);
+            assert.equal(run("only unchanged regression differs", "git", ["diff", "--name-only", base]).stdout.trim(),test);
+            run("baseline production owner exact", "git", ["diff", "--exit-code", base, "--", "src/cli/completion-cli.ts"]);
+            focused("baseline",true);
+            run("baseline runtime build", "pnpm", ["build:runtime"]);
+            cli("baseline");
+          } finally {
+            fs.writeFileSync(test,original.stdout);
+            run("baseline clean before restore", "git", ["diff", "--exit-code", base]);
+            run("restore exact candidate", "git", ["-c", "core.hooksPath=/dev/null", "checkout", "--detach", candidate]);
+          }
+          assert.equal(run("candidate HEAD", "git", ["rev-parse", "HEAD"]).stdout.trim(),candidate);
+          assert.deepEqual(fs.readFileSync(test),testBytes);
+          run("candidate source/test exact", "git", ["diff", "--exit-code", candidate]);
+          focused("head",false);
+          for (const sibling of ["src/cli/completion-cli.aliases.test.ts", "src/cli/completion-cli.visibility.test.ts",
+            "src/cli/completion-command-tree.test.ts", "src/cli/quote-cli-arg.test.ts"]) {
+            run(`head sibling ${sibling}`, "pnpm", ["test", sibling, "--maxWorkers=1"]);
+          }
+          run("head full build", "pnpm", ["build"]);
+          cli("head");
+          run("final whitespace", "git", ["diff", "--check", base, candidate]);
+          log(`PROOF_COMPLETE ${JSON.stringify({ base, candidate, testHash })}`);
+          PROOF_DRIVER
+          node /tmp/openclaw-powershell-quotes-run.mjs
+  static:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-powershell-quotes-corepack
+    steps:
+      - name: Anonymous checkout of reviewed production tree
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
+          proof=$(git rev-parse FETCH_HEAD)
+          test "$proof" = "$GITHUB_SHA"
+          candidate=$(git rev-parse "$proof^")
+          test "$(git rev-parse "$candidate^{tree}")" = d2022947e08d9281159ecfaf04c69e962739e3e3
+          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
+          nproc
+          free -m
+      - name: Pinned standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent physical dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Changed-file scope dry run
+        run: node scripts/check-changed.mjs --dry-run -- src/cli/completion-cli.ts src/cli/completion-cli.test.ts
+      - name: Changed-file formatting
+        run: pnpm format:check -- src/cli/completion-cli.ts src/cli/completion-cli.test.ts
+      - name: Changed-file typed lint
+        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/cli/completion-cli.ts src/cli/completion-cli.test.ts
+      - name: Canonical production types
+        run: pnpm tsgo:core
+      - name: Canonical CLI test types
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.config-cli.json
+      - name: Proof workflow guards
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 --silent --show-error "https://raw.githubusercontent.com/KhanCold/openclaw/$GITHUB_SHA/.github/workflows/proof-powershell-quotes-evidence.yml" --output .github/workflows/proof-powershell-quotes-evidence.yml
+          pnpm check:workflows
+      - name: Whitespace
+        run: git diff --check 950d600695bd93be80b514daa2cca3af863aad70 "$PROOF_CANDIDATE_SHA"
