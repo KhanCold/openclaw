@@ -1,0 +1,87 @@
+name: Plugin JSON5 assertion safety repair
+on:
+  push:
+    branches: [proof/plugin-json5-assertion-safety]
+permissions:
+  contents: read
+jobs:
+  assertion_safety:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-json5-assertion-corepack
+    steps:
+      - name: Anonymous exact reviewed source checkout
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=3 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
+          proof=$(git rev-parse FETCH_HEAD)
+          test "$proof" = "$GITHUB_SHA"
+          candidate=$(git rev-parse "$proof^")
+          test "$(git rev-parse "$candidate^{tree}")" = 6561f2f5d131fcf60e2271f088d9ba2391b4702f
+          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
+      - name: Pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Physical dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Prove exact comment-only mapping
+        run: |
+          set -euo pipefail
+          python3 - <<'COMMENT_MAP'
+          from pathlib import Path
+          import subprocess, hashlib
+          owner = 'src/cli/plugins-authoring-json.ts'
+          before = subprocess.check_output(['git', 'show', 'b846a7a2048a63b3ef1ccd20aed9d954b13b2d65:' + owner])
+          after = Path(owner).read_bytes()
+          comment = b'    // SAFETY: Preserve the JSON-object authoring contract; values stay unknown for consumers to narrow.\n'
+          assert before.count(comment) == after.count(comment) == 1
+          assert before.replace(comment, b'') == after.replace(comment, b'')
+          changed = subprocess.check_output(['git', 'diff', '--name-only', 'b846a7a2048a63b3ef1ccd20aed9d954b13b2d65', 'HEAD'], text=True).strip()
+          assert changed == owner, changed
+          print('COMMENT_ONLY_SOURCE_SHA256', hashlib.sha256(after.replace(comment, b'')).hexdigest())
+          print('REPAIRED_OWNER_SHA256', hashlib.sha256(after).hexdigest())
+          COMMENT_MAP
+      - name: Original PR head reproduces assertion safety failure
+        run: |
+          set -euo pipefail
+          git -c core.hooksPath=/dev/null checkout --detach b846a7a2048a63b3ef1ccd20aed9d954b13b2d65
+          set +e
+          pnpm check:assertion-safety --base 950d600695bd93be80b514daa2cca3af863aad70 > /tmp/assertion-before.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/assertion-before.log
+          test "$result" -eq 1
+          rg -F 'src/cli/plugins-authoring-json.ts: 1 > 0' /tmp/assertion-before.log
+          git diff --exit-code HEAD
+      - name: Repaired exact PR head passes assertion safety
+        run: |
+          set -euo pipefail
+          git -c core.hooksPath=/dev/null checkout --detach "$PROOF_CANDIDATE_SHA"
+          test "$(git rev-parse HEAD)" = "$PROOF_CANDIDATE_SHA"
+          pnpm check:assertion-safety --base 950d600695bd93be80b514daa2cca3af863aad70
+      - name: Scoped format and whitespace
+        run: |
+          set -euo pipefail
+          pnpm format:check -- src/cli/plugins-authoring-json.ts
+          git diff --check b846a7a2048a63b3ef1ccd20aed9d954b13b2d65 "$PROOF_CANDIDATE_SHA"
+          git diff --exit-code "$PROOF_CANDIDATE_SHA"
+      - name: Workflow guards
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 --silent --show-error "https://raw.githubusercontent.com/KhanCold/openclaw/$GITHUB_SHA/.github/workflows/proof-plugin-json5-assertion-safety.yml" --output .github/workflows/proof-plugin-json5-assertion-safety.yml
+          pnpm check:workflows
