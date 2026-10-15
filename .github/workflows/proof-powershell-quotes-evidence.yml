@@ -17,11 +17,9 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
-          proof=$(git rev-parse FETCH_HEAD)
-          test "$proof" = "$GITHUB_SHA"
-          candidate=$(git rev-parse "$proof^")
-          test "$(git rev-parse "$candidate^{tree}")" = d2022947e08d9281159ecfaf04c69e962739e3e3
+          candidate=be27da2f81ef09e33f5f0634bcbd2c5a9a021594
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$candidate"
+          test "$(git rev-parse FETCH_HEAD^{tree})" = dd3256649649a7d1fec92864f021d0cb186246cb
           git checkout --detach "$candidate"
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
@@ -41,7 +39,7 @@ jobs:
           pnpm --version
       - name: Independent physical dependency install
         run: pnpm install --frozen-lockfile
-      - name: Unchanged native regression and real CLI baseline/head controls
+      - name: Final head native regression and real CLI controls
         run: |
           set -euo pipefail
           cat > /tmp/openclaw-powershell-quotes-cli.mjs <<'CLI_FIXTURE'
@@ -232,25 +230,8 @@ jobs:
             assert.equal(record.calls, phase === "baseline" ? 24 : 36);
             log(`PROOF_CLI ${JSON.stringify(record)}`);
           }
-          log(`PROOF_IDENTITIES ${JSON.stringify({ base, candidate, workflow: process.env.GITHUB_SHA, testHash })}`);
+          log(`PROOF_IDENTITIES ${JSON.stringify({ base, candidate, workflow: process.env.GITHUB_SHA, testHash, baselineEvidenceRun: 38748717831 })}`);
           run("required native PowerShell", "pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"]);
-          const original = spawnSync("git", ["show", `${base}:${test}`]);
-          assert.equal(original.status, 0);
-          run("candidate initially clean", "git", ["diff", "--exit-code", candidate]);
-          run("checkout exact baseline", "git", ["-c", "core.hooksPath=/dev/null", "checkout", "--detach", base]);
-          try {
-            assert.equal(run("baseline HEAD", "git", ["rev-parse", "HEAD"]).stdout.trim(), base);
-            fs.writeFileSync(test,testBytes);
-            assert.equal(run("only unchanged regression differs", "git", ["diff", "--name-only", base]).stdout.trim(),test);
-            run("baseline production owner exact", "git", ["diff", "--exit-code", base, "--", "src/cli/completion-cli.ts"]);
-            focused("baseline",true);
-            run("baseline runtime build", "pnpm", ["build:runtime"]);
-            cli("baseline");
-          } finally {
-            fs.writeFileSync(test,original.stdout);
-            run("baseline clean before restore", "git", ["diff", "--exit-code", base]);
-            run("restore exact candidate", "git", ["-c", "core.hooksPath=/dev/null", "checkout", "--detach", candidate]);
-          }
           assert.equal(run("candidate HEAD", "git", ["rev-parse", "HEAD"]).stdout.trim(),candidate);
           assert.deepEqual(fs.readFileSync(test),testBytes);
           run("candidate source/test exact", "git", ["diff", "--exit-code", candidate]);
@@ -277,11 +258,9 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
-          proof=$(git rev-parse FETCH_HEAD)
-          test "$proof" = "$GITHUB_SHA"
-          candidate=$(git rev-parse "$proof^")
-          test "$(git rev-parse "$candidate^{tree}")" = d2022947e08d9281159ecfaf04c69e962739e3e3
+          candidate=be27da2f81ef09e33f5f0634bcbd2c5a9a021594
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$candidate"
+          test "$(git rev-parse FETCH_HEAD^{tree})" = dd3256649649a7d1fec92864f021d0cb186246cb
           git checkout --detach "$candidate"
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
