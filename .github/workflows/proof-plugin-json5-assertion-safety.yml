@@ -12,20 +12,22 @@ jobs:
     env:
       CI: "true"
       COREPACK_HOME: /tmp/openclaw-json5-assertion-corepack
+      PROOF_CANDIDATE_SHA: 4648dd4bc6c91dfbd690c18e9fc63255761f2d90
     steps:
-      - name: Anonymous exact reviewed source checkout
+      - name: Anonymous exact source and original upstream CI snapshot
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=3 https://github.com/KhanCold/openclaw.git "$GITHUB_SHA"
-          proof=$(git rev-parse FETCH_HEAD)
-          test "$proof" = "$GITHUB_SHA"
-          candidate=$(git rev-parse "$proof^")
-          test "$(git rev-parse "$candidate^{tree}")" = 6561f2f5d131fcf60e2271f088d9ba2391b4702f
-          git checkout --detach "$candidate"
-          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
+          git fetch --no-tags --depth=2 https://github.com/openclaw/openclaw.git 43b32dc8de739631a342dc3960bd6a8093f16c19
+          test "$(git rev-parse FETCH_HEAD^{tree})" = ba79de9a4f04ba251eb99b54c9a128ddca8c7318
+          git fetch --no-tags --depth=3 https://github.com/KhanCold/openclaw.git "$PROOF_CANDIDATE_SHA"
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 6561f2f5d131fcf60e2271f088d9ba2391b4702f
+          git checkout --detach "$PROOF_CANDIDATE_SHA"
+          test "$(git merge-base HEAD 7816d8b6542af575bd67fe0eabd6393ff4f7963a)" = 7816d8b6542af575bd67fe0eabd6393ff4f7963a
+          test "$(git merge-base 43b32dc8de739631a342dc3960bd6a8093f16c19 950d600695bd93be80b514daa2cca3af863aad70)" = 950d600695bd93be80b514daa2cca3af863aad70
+          test "$(git rev-parse HEAD:package.json)" = "$(git rev-parse 43b32dc8de739631a342dc3960bd6a8093f16c19:package.json)"
+          test "$(git rev-parse HEAD:pnpm-lock.yaml)" = "$(git rev-parse 43b32dc8de739631a342dc3960bd6a8093f16c19:pnpm-lock.yaml)"
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
-          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
       - name: Pinned Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -39,7 +41,7 @@ jobs:
           pnpm --version
       - name: Physical dependency install
         run: pnpm install --frozen-lockfile
-      - name: Prove exact comment-only mapping
+      - name: Prove exact comment-only mapping across both contexts
         run: |
           set -euo pipefail
           python3 - <<'COMMENT_MAP'
@@ -47,8 +49,10 @@ jobs:
           import subprocess, hashlib
           owner = 'src/cli/plugins-authoring-json.ts'
           before = subprocess.check_output(['git', 'show', 'b846a7a2048a63b3ef1ccd20aed9d954b13b2d65:' + owner])
+          ci_before = subprocess.check_output(['git', 'show', '43b32dc8de739631a342dc3960bd6a8093f16c19:' + owner])
           after = Path(owner).read_bytes()
           comment = b'    // SAFETY: Preserve the JSON-object authoring contract; values stay unknown for consumers to narrow.\n'
+          assert ci_before == before
           assert before.count(comment) == after.count(comment) == 1
           assert before.replace(comment, b'') == after.replace(comment, b'')
           changed = subprocess.check_output(['git', 'diff', '--name-only', 'b846a7a2048a63b3ef1ccd20aed9d954b13b2d65', 'HEAD'], text=True).strip()
@@ -56,24 +60,38 @@ jobs:
           print('COMMENT_ONLY_SOURCE_SHA256', hashlib.sha256(after.replace(comment, b'')).hexdigest())
           print('REPAIRED_OWNER_SHA256', hashlib.sha256(after).hexdigest())
           COMMENT_MAP
-      - name: Original PR head reproduces assertion safety failure
+      - name: Original upstream CI snapshot reproduces only the target failure
         run: |
           set -euo pipefail
-          git -c core.hooksPath=/dev/null checkout --detach b846a7a2048a63b3ef1ccd20aed9d954b13b2d65
+          git -c core.hooksPath=/dev/null checkout --detach 43b32dc8de739631a342dc3960bd6a8093f16c19
           set +e
           pnpm check:assertion-safety --base 950d600695bd93be80b514daa2cca3af863aad70 > /tmp/assertion-before.log 2>&1
           result=$?
           set -e
           cat /tmp/assertion-before.log
           test "$result" -eq 1
-          rg -F 'src/cli/plugins-authoring-json.ts: 1 > 0' /tmp/assertion-before.log
+          python3 - <<'FAILURE_CHECK'
+          from pathlib import Path
+          output = Path('/tmp/assertion-before.log').read_text()
+          assert 'src/cli/plugins-authoring-json.ts: 1 > 0' in output
+          assert 'The assertion SAFETY baseline may only shrink:' not in output
+          FAILURE_CHECK
           git diff --exit-code HEAD
-      - name: Repaired exact PR head passes assertion safety
+      - name: Identical upstream CI context with repaired owner passes
         run: |
           set -euo pipefail
+          git show "$PROOF_CANDIDATE_SHA:src/cli/plugins-authoring-json.ts" > src/cli/plugins-authoring-json.ts
+          test "$(git diff --name-only)" = src/cli/plugins-authoring-json.ts
+          pnpm check:assertion-safety --base 950d600695bd93be80b514daa2cca3af863aad70
+          sha256sum src/cli/plugins-authoring-json.ts
+      - name: Actual repaired source HEAD passes against its fork base
+        run: |
+          set -euo pipefail
+          git show HEAD:src/cli/plugins-authoring-json.ts > src/cli/plugins-authoring-json.ts
           git -c core.hooksPath=/dev/null checkout --detach "$PROOF_CANDIDATE_SHA"
           test "$(git rev-parse HEAD)" = "$PROOF_CANDIDATE_SHA"
-          pnpm check:assertion-safety --base 950d600695bd93be80b514daa2cca3af863aad70
+          test "$(git merge-base HEAD 7816d8b6542af575bd67fe0eabd6393ff4f7963a)" = 7816d8b6542af575bd67fe0eabd6393ff4f7963a
+          pnpm check:assertion-safety --base 7816d8b6542af575bd67fe0eabd6393ff4f7963a
       - name: Scoped format and whitespace
         run: |
           set -euo pipefail
