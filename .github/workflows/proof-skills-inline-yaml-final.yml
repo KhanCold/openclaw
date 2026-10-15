@@ -1,0 +1,314 @@
+name: Skills inline YAML final evidence
+on:
+  push:
+    branches: [proof/skills-inline-yaml-final]
+permissions:
+  contents: read
+jobs:
+  behavior:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-proof-corepack
+      PROOF_CANDIDATE_SHA: 03114b45600aa6ce1a9b8575e005f03bbfdcd6ab
+    steps:
+      - name: Anonymous checkout of exact candidate and baseline
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$PROOF_CANDIDATE_SHA"
+          git checkout --detach FETCH_HEAD
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 9b2bc0ed7e135d7be69f7f9749684bf30032981c
+          test "$(git rev-parse HEAD)" = "$PROOF_CANDIDATE_SHA"
+      - name: Setup standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      - name: Setup pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Install independent checkout dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Write external proof fixtures and prove behavior
+        run: |
+          set -euo pipefail
+          cat > /tmp/skills-inline-yaml-cli.mjs <<'CLI_FIXTURE'
+          // Fork-only evidence fixture; not part of the proposed upstream change.
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import net from "node:net";
+          import os from "node:os";
+          import path from "node:path";
+          import { spawnSync } from "node:child_process";
+
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), "skills-inline-yaml-proof-"));
+          const workspace = path.join(root, "workspace");
+          const home = path.join(root, "home");
+          const state = path.join(root, "state");
+          const emptyBundled = path.join(root, "bundled");
+          for (const directory of [workspace, home, state, emptyBundled]) {
+            fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+          }
+
+          const server = net.createServer();
+          await new Promise((resolve, reject) => {
+            server.once("error", reject);
+            server.listen(0, "127.0.0.1", resolve);
+          });
+          const port = server.address().port;
+          await new Promise((resolve) => server.close(resolve));
+          const fixtures = [
+            {
+              name: "indented-yaml",
+              metadata:
+                "metadata:\n  openclaw:\n    emoji: lobster\n    homepage: https://example.test/indented-yaml",
+            },
+            {
+              name: "json5-control",
+              metadata:
+                "metadata: {openclaw: {emoji: 'lobster', homepage: 'https://example.test/json5-control'}}",
+            },
+            {
+              name: "json-comment-control",
+              metadata:
+                'metadata: {"openclaw": {"emoji": "lobster", "homepage": "https://example.test/json-comment-control"}} # display metadata',
+            },
+            {
+              name: "inline-yaml",
+              metadata:
+                "metadata: {openclaw: {emoji: lobster, homepage: https://example.test/inline-yaml}}",
+            },
+          ];
+          for (const fixture of [...fixtures, { name: "invalid-yaml", metadata: "metadata: {broken: [" }]) {
+            const directory = path.join(workspace, "skills", fixture.name);
+            fs.mkdirSync(directory, { recursive: true });
+            fs.writeFileSync(
+              path.join(directory, "SKILL.md"),
+              `---\nname: ${fixture.name}\ndescription: Synthetic metadata proof\n${fixture.metadata}\n---\nSynthetic instructions.\n`,
+            );
+          }
+          const configPath = path.join(state, "openclaw.json");
+          fs.writeFileSync(
+            configPath,
+            JSON.stringify({
+              agents: { defaults: { workspace } },
+              gateway: { mode: "local", port, auth: { mode: "none" } },
+              plugins: { enabled: false },
+              skills: { load: { watch: false } },
+              cron: { enabled: false },
+            }),
+            { mode: 0o600 },
+          );
+          const env = {
+            PATH: process.env.PATH,
+            HOME: home,
+            CI: "true",
+            NO_COLOR: "1",
+            COREPACK_HOME: process.env.COREPACK_HOME,
+            OPENCLAW_STATE_DIR: state,
+            OPENCLAW_CONFIG_PATH: configPath,
+            OPENCLAW_BUNDLED_SKILLS_DIR: emptyBundled,
+            OPENCLAW_HIDE_BANNER: "1",
+            OPENCLAW_HANDSHAKE_TIMEOUT_MS: "2000",
+            NPM_CONFIG_USERCONFIG: "/dev/null",
+            NPM_CONFIG_GLOBALCONFIG: "/dev/null",
+          };
+          function cli(args) {
+            const result = spawnSync("pnpm", ["--silent", "openclaw", ...args], {
+              cwd: process.cwd(),
+              env,
+              encoding: "utf8",
+              timeout: 180_000,
+              maxBuffer: 4 * 1024 * 1024,
+            });
+            assert.equal(result.error, undefined, `CLI process error: ${result.error}`);
+            assert.equal(result.status, 0, `CLI failed: ${result.stderr}`);
+            return JSON.parse(result.stdout);
+          }
+          try {
+            const list = cli(["skills", "list", "--json"]);
+            const checks = [];
+            for (const fixture of fixtures) {
+              const info = cli(["skills", "info", fixture.name, "--json"]);
+              for (const [surface, skill] of [
+                ["list", list.skills.find((entry) => entry.name === fixture.name)],
+                ["info", info],
+              ]) {
+                checks.push({
+                  name: `${fixture.name}:${surface}`,
+                  actual: { name: skill?.name, emoji: skill?.emoji, homepage: skill?.homepage },
+                  ok:
+                    skill?.name === fixture.name &&
+                    skill?.emoji === "lobster" &&
+                    skill?.homepage === `https://example.test/${fixture.name}`,
+                });
+              }
+            }
+            checks.push({
+              name: "invalid-yaml:excluded",
+              ok: !list.skills.some((entry) => entry.name === "invalid-yaml"),
+            });
+            const failures = checks.filter((check) => !check.ok).map((check) => check.name);
+            fs.writeFileSync(1, `SKILLS_METADATA_PROOF ${JSON.stringify({ checks, failures })}\n`);
+            assert.deepEqual(failures, [], "Metadata proof failed");
+          } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+          }
+          CLI_FIXTURE
+          cat > /tmp/skills-inline-yaml-run.mjs <<'PROOF_DRIVER'
+          // Fork-only baseline/head evidence driver. Never run in the credentialed workspace.
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+          import { spawnSync } from "node:child_process";
+          import { performance } from "node:perf_hooks";
+
+          const base = "9b2bc0ed7e135d7be69f7f9749684bf30032981c";
+          const candidate = process.env.PROOF_CANDIDATE_SHA;
+          assert.match(candidate ?? "", /^[a-f0-9]{40}$/);
+          const source = "packages/markdown-core/src/frontmatter.ts";
+          const candidateSource = fs.readFileSync(source);
+          function log(message) { fs.writeFileSync(1, `${message}\n`); }
+          const tests = [
+            ["packages/markdown-core/src/frontmatter.test.ts", "normalizes YAML flow mappings"],
+            ["src/cli/skills-cli.formatting.test.ts", "retains inline YAML skill metadata"],
+          ];
+          function run(label, command, args, { allowFailure = false } = {}) {
+            log(`PROOF_STAGE ${label} ${JSON.stringify({ command, args })}`);
+            const started = performance.now();
+            const result = spawnSync(command, args, {
+              env: process.env,
+              encoding: "utf8",
+              maxBuffer: 128 * 1024 * 1024,
+              timeout: 45 * 60 * 1000,
+            });
+            fs.writeFileSync(1, result.stdout ?? "");
+            fs.writeFileSync(2, result.stderr ?? "");
+            log(
+              `PROOF_TIMING ${JSON.stringify({ label, seconds: (performance.now() - started) / 1000, status: result.status })}`,
+            );
+            assert.equal(result.error, undefined, `${label} process failed: ${result.error}`);
+            if (!allowFailure) {
+              assert.equal(result.status, 0, `${label} failed`);
+            }
+            return result;
+          }
+          function focusedTests(phase, expectBaselineFailure) {
+            for (const [file, expectedFailure] of tests) {
+              const output = path.join(os.tmpdir(), `skills-${phase}-${path.basename(file)}.json`);
+              const result = run(
+                `${phase} ${file}`,
+                "pnpm",
+                ["test", file, "--maxWorkers=1", "--reporter=default", "--reporter=json", `--outputFile.json=${output}`],
+                { allowFailure: expectBaselineFailure },
+              );
+              const report = JSON.parse(fs.readFileSync(output, "utf8"));
+              const failures = report.testResults.flatMap((fileResult) =>
+                fileResult.assertionResults.filter((test) => test.status === "failed"),
+              );
+              if (expectBaselineFailure) {
+                assert.equal(result.status, 1, "baseline must fail an assertion");
+                assert.equal(failures.length, 1, "baseline has an unexpected failure set");
+                assert.ok(failures[0].fullName.includes(expectedFailure));
+              } else {
+                assert.deepEqual(failures, []);
+              }
+              log(`PROOF_TESTS ${JSON.stringify({ phase, file, failures: failures.map((test) => test.fullName), passed: report.numPassedTests, failed: report.numFailedTests, maxAssertionMs: Math.max(0, ...report.testResults.flatMap((r) => r.assertionResults.map((a) => a.duration ?? 0))) })}`);
+            }
+          }
+          function cliProof(phase, expectBaselineFailure) {
+            const result = run(
+              `${phase} real CLI`,
+              process.execPath,
+              ["/tmp/skills-inline-yaml-cli.mjs"],
+              { allowFailure: expectBaselineFailure },
+            );
+            const marker = result.stdout.split("\n").find((line) => line.startsWith("SKILLS_METADATA_PROOF "));
+            assert.ok(marker, "real CLI fixture did not reach metadata assertions");
+            const report = JSON.parse(marker.slice("SKILLS_METADATA_PROOF ".length));
+            assert.deepEqual(
+              report.failures,
+              expectBaselineFailure ? ["inline-yaml:list", "inline-yaml:info"] : [],
+              "unexpected runtime/control failure",
+            );
+            assert.equal(result.status, expectBaselineFailure ? 1 : 0);
+          }
+          log(`PROOF_IDENTITIES ${JSON.stringify({ base, candidate, workflow: process.env.GITHUB_SHA })}`);
+          try {
+            fs.writeFileSync(source, run("read baseline owner", "git", ["show", `${base}:${source}`]).stdout);
+            run("baseline owner is unchanged", "git", ["diff", "--exit-code", base, "--", source]);
+            focusedTests("baseline", true);
+            run("baseline runtime build", "pnpm", ["build:runtime"]);
+            cliProof("baseline", true);
+          } finally {
+            fs.writeFileSync(source, candidateSource);
+          }
+          run("head source matches candidate", "git", ["diff", "--exit-code", candidate, "--", source]);
+          focusedTests("head", false);
+          for (const file of ["src/shared/frontmatter.test.ts", "src/hooks/frontmatter.test.ts", "src/skills/loading/frontmatter.test.ts"]) {
+            run(`head sibling ${file}`, "pnpm", ["test", file, "--maxWorkers=1"]);
+          }
+          run("head build", "pnpm", ["build"]);
+          cliProof("head", false);
+          run("final whitespace", "git", ["diff", "--check", base, candidate]);
+          log(`PROOF_COMPLETE ${JSON.stringify({ base, candidate })}`);
+          PROOF_DRIVER
+          node /tmp/skills-inline-yaml-run.mjs
+  static:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-proof-corepack
+      PROOF_CANDIDATE_SHA: 03114b45600aa6ce1a9b8575e005f03bbfdcd6ab
+    steps:
+      - name: Anonymous checkout of exact candidate and baseline
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$PROOF_CANDIDATE_SHA"
+          git checkout --detach FETCH_HEAD
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 9b2bc0ed7e135d7be69f7f9749684bf30032981c
+          test "$(git rev-parse HEAD)" = "$PROOF_CANDIDATE_SHA"
+      - name: Setup standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      - name: Setup pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Install independent checkout dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check exact changed-file formatting
+        run: pnpm format:check --no-error-on-unmatched-pattern -- packages/markdown-core/package.json packages/markdown-core/src/frontmatter.test.ts packages/markdown-core/src/frontmatter.ts pnpm-lock.yaml src/cli/skills-cli.formatting.test.ts
+      - name: Lint touched production and test files
+        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json packages/markdown-core/src/frontmatter.ts packages/markdown-core/src/frontmatter.test.ts src/cli/skills-cli.formatting.test.ts
+      - name: Typecheck production graph
+        run: pnpm tsgo:core
+      - name: Typecheck canonical package test graph
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.test.packages.json
+      - name: Typecheck canonical CLI test graph
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.config-cli.json
+      - name: Verify dependency pins
+        run: pnpm deps:pins:check
+      - name: Verify exact code checkout duplicate scan coverage
+        run: pnpm dup:check:coverage
+      - name: Validate proof workflow and existing workflows
+        env:
+          PROOF_WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 --silent --show-error "https://raw.githubusercontent.com/KhanCold/openclaw/$PROOF_WORKFLOW_SHA/.github/workflows/proof-skills-inline-yaml-final.yml" --output .github/workflows/proof-skills-inline-yaml-final.yml
+          pnpm check:workflows
+      - name: Check candidate whitespace
+        run: git diff --check 9b2bc0ed7e135d7be69f7f9749684bf30032981c "$PROOF_CANDIDATE_SHA"
