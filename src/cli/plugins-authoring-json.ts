@@ -12,8 +12,8 @@ export function readPluginAuthoringJson(
     throw new Error(`JSON file must be valid UTF-8: ${filePath}`);
   }
   try {
-    // SAFETY: Preserve the JSON-object authoring contract; values stay unknown for consumers to narrow.
     const raw = bytes.toString("utf8");
+    // SAFETY: Preserve the JSON-object authoring contract; values stay unknown for consumers to narrow.
     return (options.json5 ? parseJsonWithJson5Fallback(raw) : JSON.parse(raw)) as Record<
       string,
       unknown
