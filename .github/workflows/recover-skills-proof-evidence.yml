@@ -1,0 +1,33 @@
+name: Recover existing skills proof evidence
+on:
+  push:
+    branches: [proof/skills-inline-yaml-logs]
+permissions:
+  contents: read
+jobs:
+  evidence:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Read existing public job log without credentials
+        run: curl --fail --location --max-time 60 --silent --show-error https://api.github.com/repos/KhanCold/openclaw/actions/jobs/116350174651/logs --output /tmp/existing-proof.log
+      - name: Expose sanitized evidence through check annotations
+        shell: python
+        run: |
+          import pathlib
+          import re
+          lines = pathlib.Path('/tmp/existing-proof.log').read_text(errors='replace').splitlines()
+          markers = ('PROOF_STAGE ', 'PROOF_TIMING ', 'PROOF_TESTS ', 'PROOF_COMPLETE ', 'SKILLS_METADATA_PROOF ')
+          selected = [line for line in lines if any(marker in line for marker in markers)]
+          selected.extend(lines[-12:])
+          sanitized = []
+          for line in dict.fromkeys(selected):
+              line = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line)
+              line = re.sub(r'https?://[^\s\"<>]+', '[URL]', line)
+              line = re.sub(r'(?i)(authorization|token|password|secret)\s*[:=]\s*[^\s,}]+', r'\1=[redacted]', line)
+              sanitized.append(line[:12000])
+          evidence = '\n'.join(sanitized)[-40000:]
+          for offset in range(0, len(evidence), 5000):
+              chunk = evidence[offset:offset + 5000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::notice title=Existing proof evidence {offset // 5000 + 1}::{chunk}')
