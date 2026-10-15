@@ -1,0 +1,67 @@
+name: PowerShell formatter diagnosis
+on:
+  push:
+    branches: [proof/powershell-format-diagnosis]
+permissions:
+  contents: read
+jobs:
+  formatter:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-powershell-quotes-corepack
+    steps:
+      - name: Anonymous checkout of reviewed production tree
+        run: |
+          set -euo pipefail
+          git init .
+          candidate=be27da2f81ef09e33f5f0634bcbd2c5a9a021594
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "$candidate"
+          test "$(git rev-parse FETCH_HEAD^{tree})" = dd3256649649a7d1fec92864f021d0cb186246cb
+          git checkout --detach "$candidate"
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 950d600695bd93be80b514daa2cca3af863aad70
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+          echo "PROOF_CANDIDATE_SHA=$candidate" >> "$GITHUB_ENV"
+          nproc
+          free -m
+      - name: Pinned standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent physical dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Canonical formatting output and exact source receipt
+        run: |
+          set -euo pipefail
+          pnpm format -- src/cli/completion-cli.ts
+          git diff -- src/cli/completion-cli.ts
+          sha256sum src/cli/completion-cli.ts
+          python3 - <<'FORMAT_RECEIPT'
+          import base64
+          from pathlib import Path
+          print('FORMATTED_SOURCE_BASE64 ' + base64.b64encode(Path('src/cli/completion-cli.ts').read_bytes()).decode())
+          FORMAT_RECEIPT
+          git -c core.hooksPath=/dev/null add src/cli/completion-cli.ts
+          echo "FORMATTED_PRODUCTION_TREE=$(git write-tree)"
+      - name: Formatted source check
+        run: pnpm format:check -- src/cli/completion-cli.ts src/cli/completion-cli.test.ts
+      - name: Exact formatted source typed lint
+        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/cli/completion-cli.ts src/cli/completion-cli.test.ts
+      - name: Exact formatted production types
+        run: pnpm tsgo:core
+      - name: Exact formatted CLI test types
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.config-cli.json
+      - name: Workflow guards
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 --silent --show-error "https://raw.githubusercontent.com/KhanCold/openclaw/$GITHUB_SHA/.github/workflows/proof-powershell-format-diagnosis.yml" --output .github/workflows/proof-powershell-format-diagnosis.yml
+          pnpm check:workflows
