@@ -163,28 +163,53 @@ describe("wiki apply compile ownership", () => {
     expect(await compileCount(rootDir)).toBe(before);
   });
 
-  it("refreshes indexes on the next wiki_get after a missing-target mutation fails", async () => {
-    const { rootDir, config } = await createFixture({ missingIndex: true });
-    const pagePath = path.join(rootDir, "entities", "alpha.md");
-    const original = await fs.readFile(pagePath, "utf8");
+  it("refreshes a changed import on the next wiki_get after a missing-target mutation fails", async () => {
+    const fixtureRoot = await harness.createTempDir("memory-wiki-apply-recovery-");
+    const notesDir = path.join(fixtureRoot, "notes");
+    await fs.mkdir(notesDir);
+    await fs.writeFile(path.join(notesDir, "first.md"), "First source sentinel.\n", "utf8");
+    const { rootDir, config } = await harness.createVault({
+      rootDir: path.join(fixtureRoot, "vault"),
+      config: {
+        vaultMode: "unsafe-local",
+        unsafeLocal: { allowPrivateMemoryCoreAccess: true, paths: [notesDir] },
+        render: { createBacklinks: false, createDashboards: false },
+      },
+    });
+    const get = createWikiGetTool(config);
+    await get.execute("warm-import", { lookup: "entity.absent" });
+    const warmCache = await loadMemoryWikiCompiledCache(config);
+    expect(warmCache?.digest.pages).toEqual([
+      expect.objectContaining({ title: "Unsafe Local Import: first.md" }),
+    ]);
+    const firstPage = warmCache?.digest.pages[0];
+    if (!firstPage) {
+      throw new Error("Expected the initial imported page in the compiled cache");
+    }
+    const before = await compileCount(rootDir);
+    await fs.writeFile(path.join(notesDir, "second.md"), "Second source sentinel.\n", "utf8");
     await expect(applyTool(config, { ...metadata, lookup: "entity.absent" })).rejects.toThrow(
       "Wiki page not found: entity.absent",
     );
-    await expect(fs.readFile(pagePath, "utf8")).resolves.toBe(original);
+    const importedFiles = await fs.readdir(path.join(rootDir, "sources"));
+    expect(importedFiles.filter((file) => file !== "index.md")).toHaveLength(2);
 
-    const result = await createWikiGetTool(config).execute("read-after-error", {
-      lookup: "entity.alpha",
-    });
+    const result = await get.execute("read-after-error", { lookup: firstPage.path });
     expect(result.details).toMatchObject({
       found: true,
-      content: expect.stringContaining("Keep this human note."),
+      content: expect.stringContaining("First source sentinel."),
     });
     await expect(fs.readFile(path.join(rootDir, "index.md"), "utf8")).resolves.toContain(
-      "entities/alpha.md",
+      "Unsafe Local Import: second.md",
     );
     const cache = await loadMemoryWikiCompiledCache(config);
-    expect(cache?.digest.pages).toEqual([
-      expect.objectContaining({ id: "entity.alpha", path: "entities/alpha.md", questions: [] }),
-    ]);
+    expect(cache?.digest.pages).toHaveLength(2);
+    expect(cache?.digest.pages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "Unsafe Local Import: first.md" }),
+        expect.objectContaining({ title: "Unsafe Local Import: second.md" }),
+      ]),
+    );
+    expect((await compileCount(rootDir)) - before).toBe(1);
   });
 });
