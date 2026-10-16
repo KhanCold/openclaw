@@ -55,7 +55,10 @@ function createRegisteredBoardTool() {
     // Match the agent loop: rejected arguments must never reach execute.
     update: (input: Record<string, unknown>) => tool.execute("board-appearance", validate(input)),
     read: async (id: string) =>
-      expectDefined((await store.listBoards()).boards.find((board) => board.id === id), id),
+      expectDefined(
+        (await store.listBoards()).boards.find((board) => board.id === id),
+        id,
+      ),
   };
 }
 
