@@ -49,7 +49,7 @@ jobs:
           import path from 'node:path';
           import { pathToFileURL } from 'node:url';
           import { spawn, spawnSync } from 'node:child_process';
-
+          
           const head = 'b7d88c7da40ee8840cd5435b12b7fde542492bd3';
           const root = process.cwd();
           const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'workboard-running-agent-'));
@@ -96,10 +96,11 @@ jobs:
             const result = command(name, ['agent','--local','--agent','main','--session-id',`workboard-proof-${name}`,'--message',`Perform this Workboard operation using ${tool}: ${JSON.stringify(args)}. Then report completion.`,'--thinking','off','--timeout','180','--json']);
             const response = JSON.parse(result.stdout);
             const requests = fs.readFileSync(requestLog,'utf8').split('\n').filter(Boolean).slice(offset).map(line=>JSON.parse(line));
-            const bodies = requests.filter(x=>x.path==='/v1/responses').map(x=>x.body);
+            const bodies = requests.filter(x=>x.path==='/v1/responses').map(x=>{ assert.equal(typeof x.body, 'string', 'official request record must contain complete JSON text'); return JSON.parse(x.body); });
             assert.ok(bodies.length >= 2, 'real agent must consume model response and return tool output');
             assert.ok(bodies.every(x=>x && !x.truncated), 'request evidence must be complete');
             const declared = bodies.flatMap(x=>x.tools ?? []).find(x=>x.name===tool);
+            console.log('ACTUAL_REQUEST_FACTS', JSON.stringify({stage:name, requests:bodies.length, declaredTools:bodies.flatMap(x=>(x.tools ?? []).map(t=>t.name))}));
             assert.ok(declared, `${tool} must be declared by the actual agent`);
             if (tool==='workboard_board_create') assert.ok(declared.parameters?.properties?.clearAppearance, 'actual agent schema must expose clearAppearance');
             const outputs = bodies.flatMap(x=>x.input ?? []).filter(x=>x.type==='function_call_output' && x.call_id===`call_${name}`);
@@ -109,7 +110,7 @@ jobs:
             console.log('ACTUAL_TOOL_RESULT', JSON.stringify({ stage:name, tool, arguments:args, result:actual }));
             console.log('ACTUAL_AGENT_REPLY', redact(JSON.stringify({stage:name, reply:response})));
           }
-
+          
           assert.equal(spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim(), head);
           const mockFd = fs.openSync(mockLog, 'w');
           fs.writeFileSync(control, JSON.stringify({text:'NOT_A_TOOL_RESULT'}));
@@ -135,6 +136,9 @@ jobs:
             stage('clear-icon','workboard_board_create',{id:'planning',clearAppearance:['icon']}, x=>{assert.equal(x.board.name,'Planning');assert.equal(x.board.color,'blue');assert.equal(x.board.icon,undefined);});
             stage('read-new-process','workboard_boards',{}, x=>{const board=x.boards.find(b=>b.id==='planning');assert.ok(board);assert.equal(board.name,'Planning');assert.equal(board.color,'blue');assert.equal(board.icon,undefined);});
             console.log('RUNNING_AGENT_PROOF_COMPLETE', JSON.stringify({head,stages:['create','clear-icon','read-new-process'], externalModel:false, authorityMocks:false}));
+          } catch (error) {
+            for (const file of fs.readdirSync(fixture).filter(x=>/\.(stdout|stderr)$/.test(x))) console.log('PROOF_DIAGNOSTIC', file, redact(fs.readFileSync(path.join(fixture,file),'utf8').slice(-20000)));
+            throw error;
           } finally {
             mock.kill('SIGTERM');
             await Promise.race([new Promise(r=>mock.once('exit',r)),new Promise(r=>setTimeout(r,5000))]);
