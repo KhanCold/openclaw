@@ -160,7 +160,7 @@ jobs:
           const pageBefore=fs.readFileSync(path.join(vault,'entities','alpha.md'));
           const beforeInvalid=completedCompiles().length;
           const invalid=command('invalid-command',['wiki','apply','unsupported-operation'],true);
-          assert.notEqual(invalid.status,0);assert.match(invalid.stderr,/unknown command/i);
+          assert.notEqual(invalid.status,0);assert.match(invalid.stderr,/OpenClaw wiki apply has no command "unsupported-operation"\./);
           assert.deepEqual(fs.readFileSync(path.join(vault,'entities','alpha.md')),pageBefore);
           assert.equal(completedCompiles().length,beforeInvalid);
           console.log('WIKI_BUILT_CLI_PROOF_COMPLETE',JSON.stringify({actualHead,baseline,missingIndexCounts:baseline?[2,2]:[1,1],warmCompileCount:1,coldReadExtraCompiles:0,invalidCommandWikiPageWrites:0,persistedCache:'actual SQLite read-only inspection after CLI process exit',scope:'metadata and synthesis shipped CLI; no Gateway or Agent claim'}));
