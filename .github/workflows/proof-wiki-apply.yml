@@ -17,11 +17,11 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git 198539a51318639bab3a2bbb37f9bdb481b7619d
-          test "$(git rev-parse FETCH_HEAD^{tree})" = 503266c8b438efe81cbfca1b4d246e7598520aac
-          git checkout --detach 198539a51318639bab3a2bbb37f9bdb481b7619d
+          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git 00023baa1e5c979657caa113c3390b410c573a57
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 005cd76580865b787ae08a4915a22131568756a8
+          git checkout --detach 00023baa1e5c979657caa113c3390b410c573a57
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c
-          git merge-base --is-ancestor 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 198539a51318639bab3a2bbb37f9bdb481b7619d
+          git merge-base --is-ancestor 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 00023baa1e5c979657caa113c3390b410c573a57
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
       - name: Pinned Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -43,7 +43,7 @@ jobs:
           import { createHash } from 'node:crypto';
           import { spawnSync } from 'node:child_process';
           const base = '02f671cd22a7b4be9aca038ce5bc1d4a58b3809c';
-          const candidate = '198539a51318639bab3a2bbb37f9bdb481b7619d';
+          const candidate = '00023baa1e5c979657caa113c3390b410c573a57';
           const test = 'extensions/memory-wiki/src/apply-entrypoints.compile.test.ts';
           const bytes = fs.readFileSync(test);
           const testHash = createHash('sha256').update(bytes).digest('hex');
@@ -89,7 +89,7 @@ jobs:
           run('candidate checkout', 'git', ['checkout', '--detach', candidate]);
           run('candidate exact tree', 'git', ['diff', '--exit-code', candidate]);
           focused('head', false);
-          run('relevant sibling owners and entries', '/usr/bin/time', ['-v', 'pnpm', 'test', ...['apply.test.ts', 'source-sync.test.ts', 'tool.test.ts', 'gateway.test.ts', 'cli.test.ts'].map(file => `extensions/memory-wiki/src/${file}`), '--maxWorkers=1']);
+          run('memory-wiki plugin lane', '/usr/bin/time', ['-v', 'pnpm', 'test:extension', 'memory-wiki', '--maxWorkers=1']);
           run('whitespace', 'git', ['diff', '--check', base, candidate]);
           console.log('PROOF_COMPLETE', JSON.stringify({ base, candidate, testHash }));
           PROOF_DRIVER
@@ -106,11 +106,11 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git 198539a51318639bab3a2bbb37f9bdb481b7619d
-          test "$(git rev-parse FETCH_HEAD^{tree})" = 503266c8b438efe81cbfca1b4d246e7598520aac
-          git checkout --detach 198539a51318639bab3a2bbb37f9bdb481b7619d
+          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git 00023baa1e5c979657caa113c3390b410c573a57
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 005cd76580865b787ae08a4915a22131568756a8
+          git checkout --detach 00023baa1e5c979657caa113c3390b410c573a57
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c
-          git merge-base --is-ancestor 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 198539a51318639bab3a2bbb37f9bdb481b7619d
+          git merge-base --is-ancestor 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 00023baa1e5c979657caa113c3390b410c573a57
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
       - name: Pinned Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -130,7 +130,7 @@ jobs:
           import fs from 'node:fs';
           import { createHash } from 'node:crypto';
           import { spawnSync } from 'node:child_process';
-          const files = ['cli.ts', 'gateway.ts', 'source-sync.ts', 'tool.ts', 'apply-entrypoints.compile.test.ts'].map(f => `extensions/memory-wiki/src/${f}`);
+          const files = ['cli.ts', 'gateway.ts', 'source-sync.ts', 'tool.ts', 'gateway.test.ts', 'apply-entrypoints.compile.test.ts'].map(f => `extensions/memory-wiki/src/${f}`);
           let failed = false;
           function check(label, command, args) {
             const start = performance.now();
@@ -153,7 +153,7 @@ jobs:
           check('production extension types','node',['scripts/run-tsgo.mjs','-p','tsconfig.extensions.json','--incremental','--tsBuildInfoFile','.artifacts/tsgo-cache/extensions.tsbuildinfo']);
           check('extension test types','node',['scripts/run-tsgo.mjs','-p','test/tsconfig/tsconfig.extensions.test.json','--incremental','--tsBuildInfoFile','.artifacts/tsgo-cache/extensions-test.tsbuildinfo']);
           check('scoped extension lint','node',['scripts/run-oxlint.mjs','--tsconfig','extensions/tsconfig.json',...files]);
-          check('whitespace','git',['diff','--check','02f671cd22a7b4be9aca038ce5bc1d4a58b3809c','198539a51318639bab3a2bbb37f9bdb481b7619d']);
+          check('whitespace','git',['diff','--check','02f671cd22a7b4be9aca038ce5bc1d4a58b3809c','00023baa1e5c979657caa113c3390b410c573a57']);
           check('fetch exact proof workflow','curl',['--fail','--location','--max-time','60','--silent','--show-error',`https://raw.githubusercontent.com/KhanCold/openclaw/${process.env.GITHUB_SHA}/.github/workflows/proof-wiki-apply.yml`,'--output','.github/workflows/proof-wiki-apply.yml']);
           check('workflow guards','pnpm',['check:workflows']);
           process.exitCode = failed ? 1 : 0;
