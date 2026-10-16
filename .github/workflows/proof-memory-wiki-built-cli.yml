@@ -1,0 +1,148 @@
+name: Memory Wiki built CLI proof
+on:
+  push:
+    branches: [proof/memory-wiki-built-cli]
+permissions:
+  contents: read
+jobs:
+  built-cli:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - revision: baseline
+            sha: 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c
+            tree: 583b626afb10b0acfb6c26f0ad075d15cc2cdd24
+          - revision: head
+            sha: 7b8531758a3fff16d3261baab0ab693089820b1a
+            tree: 9f20fc1b938091b176fe1d4c4fc126390a3866a6
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-wiki-cli-corepack
+    steps:
+      - name: Anonymous immutable product checkout
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git ${{ matrix.sha }}
+          test "$(git rev-parse FETCH_HEAD^{tree})" = ${{ matrix.tree }}
+          git checkout --detach ${{ matrix.sha }}
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+      - name: Pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent frozen dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Validate proof workflow
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --max-time 60 "https://raw.githubusercontent.com/KhanCold/openclaw/${GITHUB_SHA}/.github/workflows/proof-memory-wiki-built-cli.yml" --output .github/workflows/proof-memory-wiki-built-cli.yml
+          pnpm check:workflows
+      - name: Build product runtime
+        run: /usr/bin/time -v pnpm build:runtime
+      - name: Execute shipped CLI with actual persistent plugin state
+        run: |
+          cat > /tmp/openclaw-wiki-built-cli.mjs <<'WIKI_PROOF'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          import { gunzipSync } from 'node:zlib';
+          import { DatabaseSync } from 'node:sqlite';
+          import { spawnSync } from 'node:child_process';
+          
+          const base = '02f671cd22a7b4be9aca038ce5bc1d4a58b3809c';
+          const head = '7b8531758a3fff16d3261baab0ab693089820b1a';
+          const actualHead = spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim();
+          assert.ok([base,head].includes(actualHead));
+          const baseline = actualHead === base;
+          const fixture = fs.mkdtempSync(path.join(os.tmpdir(),'wiki-built-cli-'));
+          const state = path.join(fixture,'state');
+          const vault = path.join(fixture,'vault');
+          const workspace = path.join(fixture,'workspace');
+          fs.mkdirSync(state); fs.mkdirSync(workspace);
+          const configPath = path.join(state,'openclaw.json');
+          const config = {gateway:{mode:'local',bind:'loopback'},agents:{entries:{main:{workspace}}},plugins:{allow:['memory-wiki'],entries:{'memory-wiki':{enabled:true,config:{vaultMode:'isolated',vault:{scope:'global',path:vault},ingest:{autoCompile:true},search:{backend:'local',corpus:'wiki'},render:{createBacklinks:false,createDashboards:false}}}}};
+          fs.writeFileSync(configPath,JSON.stringify(config,null,2)+'\n');
+          const env = {...process.env,OPENCLAW_STATE_DIR:state,OPENCLAW_CONFIG_PATH:configPath,OPENCLAW_DISABLE_UPDATE_CHECK:'1',NO_COLOR:'1'};
+          function command(label,args,allowedFailure=false) {
+            const started=performance.now();
+            const r=spawnSync(process.execPath,['openclaw.mjs',...args],{env,encoding:'utf8',timeout:240000,maxBuffer:16*1024*1024});
+            fs.writeFileSync(path.join(fixture,`${label}.stdout`),r.stdout??'');fs.writeFileSync(path.join(fixture,`${label}.stderr`),r.stderr??'');
+            console.log('WIKI_CLI_COMMAND',JSON.stringify({label,args,status:r.status,signal:r.signal,seconds:(performance.now()-started)/1000}));
+            if(r.status!==0&&!allowedFailure){console.log((r.stdout??'').slice(-12000));console.log((r.stderr??'').slice(-12000));}
+            assert.equal(r.error,undefined,`${label}: ${r.error?.message}`);
+            if(!allowedFailure)assert.equal(r.status,0,`${label} failed`);
+            return r;
+          }
+          const logPath=path.join(vault,'.openclaw-wiki','log.jsonl');
+          function completedCompiles(){return fs.readFileSync(logPath,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)).filter(x=>x.type==='compile'&&x.details?.pageCounts);}
+          function storedSnapshot(){
+            const dbPath=path.join(state,'state','openclaw.sqlite');
+            const db=new DatabaseSync(dbPath,{readOnly:true});
+            try{
+              const rows=db.prepare('SELECT entry_key, metadata_json, blob FROM plugin_blob_entries WHERE plugin_id = ? AND namespace = ?').all('memory-wiki','compiled-cache');
+              assert.equal(rows.length,1,'one actual persisted compiled publication');
+              const snapshot=JSON.parse(gunzipSync(rows[0].blob).toString('utf8'));
+              return {snapshot,entryKey:rows[0].entry_key,blobSha256:createHash('sha256').update(rows[0].blob).digest('hex')};
+            }finally{db.close();}
+          }
+          function assertMutation(label,pagePath,question,body){
+            const raw=fs.readFileSync(path.join(vault,pagePath),'utf8');
+            assert.ok(raw.includes(question));assert.ok(raw.includes(body));
+            assert.ok(fs.readFileSync(path.join(vault,'index.md'),'utf8').includes(pagePath));
+            const persisted=storedSnapshot();
+            assert.deepEqual(persisted.snapshot.digest.pages.find(x=>x.path===pagePath)?.questions,[question]);
+            console.log('WIKI_PERSISTED_RESULT',JSON.stringify({label,pagePath,question,preservedBody:body,entryKey:persisted.entryKey,blobSha256:persisted.blobSha256,sqliteReadOnlyAfterCliExit:true}));
+          }
+          function missingIndexCase(label,args,pagePath,question,body){
+            fs.rmSync(path.join(vault,'index.md'));
+            const before=completedCompiles().length;
+            const r=command(label,['wiki','apply',...args,'--json']);
+            const result=JSON.parse(r.stdout);
+            console.log('WIKI_ACTUAL_APPLY_RESULT',JSON.stringify({label,result}));
+            assert.equal(result.changed,true);
+            assertMutation(label,pagePath,question,body);
+            const delta=completedCompiles().length-before;
+            console.log('WIKI_WORK_COUNT',JSON.stringify({label,desired:1,observed:delta,baseline,contractPassed:delta===1}));
+            assert.equal(delta,baseline?2:1,'only the established duplicate-compile defect may differ');
+          }
+          try {
+          console.log('WIKI_CLI_IDENTITIES',JSON.stringify({base,head,actualHead,baseline,driverSha256:createHash('sha256').update(fs.readFileSync(import.meta.filename)).digest('hex'),workflow:process.env.GITHUB_SHA,providerCalls:false}));
+          command('version',['--version']);command('validate',['config','validate','--json']);command('init',['wiki','init','--json']);
+          fs.writeFileSync(path.join(vault,'entities','alpha.md'),'---\npageType: entity\nid: entity.alpha\ntitle: Alpha\n---\n# Alpha\n\nKeep this human note.\n');
+          missingIndexCase('metadata',['metadata','entity.alpha','--question','Who owns the next milestone?'],'entities/alpha.md','Who owns the next milestone?','Keep this human note.');
+          missingIndexCase('synthesis',['synthesis','Summary','--body','Fresh summary.','--source-id','entity.alpha','--question','What happens next?'],'syntheses/summary.md','What happens next?','Fresh summary.');
+          const beforeWarm=completedCompiles().length;
+          command('warm-metadata',['wiki','apply','metadata','entity.alpha','--question','Warm index control?','--json']);
+          assertMutation('warm-metadata','entities/alpha.md','Warm index control?','Keep this human note.');
+          assert.equal(completedCompiles().length-beforeWarm,1);
+          const beforeRead=completedCompiles().length;
+          const read=command('cold-read',['wiki','get','entity.alpha','--backend','local','--json']);
+          assert.ok(read.stdout.includes('Keep this human note.'));assert.ok(read.stdout.includes('Warm index control?'));
+          assert.equal(completedCompiles().length,beforeRead,'fresh CLI read must reuse durable cache');
+          const pageBefore=fs.readFileSync(path.join(vault,'entities','alpha.md'));
+          const beforeInvalid=completedCompiles().length;
+          const invalid=command('invalid-command',['wiki','apply','unsupported-operation','--json'],true);
+          assert.notEqual(invalid.status,0);assert.match(invalid.stderr,/unknown command/i);
+          assert.deepEqual(fs.readFileSync(path.join(vault,'entities','alpha.md')),pageBefore);
+          assert.equal(completedCompiles().length,beforeInvalid);
+          console.log('WIKI_BUILT_CLI_PROOF_COMPLETE',JSON.stringify({actualHead,baseline,missingIndexCounts:baseline?[2,2]:[1,1],warmCompileCount:1,coldReadExtraCompiles:0,invalidCommandWikiPageWrites:0,persistedCache:'actual SQLite read-only inspection after CLI process exit',scope:'metadata and synthesis shipped CLI; no Gateway or Agent claim'}));
+          } catch(error) {
+            for(const file of fs.readdirSync(fixture).filter(x=>/\.(stdout|stderr)$/.test(x))) console.log('WIKI_DIAGNOSTIC',file,fs.readFileSync(path.join(fixture,file),'utf8').slice(-12000));
+            throw error;
+          }
+          WIKI_PROOF
+          git diff --exit-code
+          /usr/bin/time -v node /tmp/openclaw-wiki-built-cli.mjs
