@@ -19,10 +19,9 @@ function createRegisteredBoardTool() {
       runtimeSource: fileURLToPath(new URL("../index.ts", import.meta.url)),
       runtime: createPluginRuntimeMock({
         sandbox: {
-          resolveWorkspaceAuthority: vi.fn(() => ({
-            sandboxed: false,
-            workspaceAccess: "rw",
-          })),
+          resolveWorkspaceAuthority: vi.fn<
+            OpenClawPluginApi["runtime"]["sandbox"]["resolveWorkspaceAuthority"]
+          >(() => ({ sandboxed: false, workspaceAccess: "rw" })),
         },
       }),
       registerTool,
