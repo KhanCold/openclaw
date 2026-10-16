@@ -23,7 +23,7 @@ type SyncMemoryWikiImportedSourcesParams = {
   config: ResolvedMemoryWikiConfig;
   appConfig?: OpenClawConfig;
   signal?: AbortSignal;
-  /** Set when the caller compiles next (compile, lint), so the import does not compile too. */
+  /** Set when the caller compiles next (compile, lint, apply), so the import does not compile too. */
   deferIndexRefresh?: boolean;
 };
 
