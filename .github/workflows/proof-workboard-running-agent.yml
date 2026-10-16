@@ -1,0 +1,145 @@
+name: Workboard running agent proof
+on:
+  push:
+    branches: [proof/workboard-running-agent]
+permissions:
+  contents: read
+jobs:
+  running-agent:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-running-agent-corepack
+    steps:
+      - name: Anonymous immutable product checkout
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git b7d88c7da40ee8840cd5435b12b7fde542492bd3
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 1d8e0df273d49eddd003ef0e719a682f9a6c1d5b
+          git checkout --detach b7d88c7da40ee8840cd5435b12b7fde542492bd3
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+      - name: Pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent frozen dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Validate proof workflow
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --max-time 60 "https://raw.githubusercontent.com/KhanCold/openclaw/${GITHUB_SHA}/.github/workflows/proof-workboard-running-agent.yml" --output .github/workflows/proof-workboard-running-agent.yml
+          pnpm check:workflows
+      - name: Build product runtime
+        run: /usr/bin/time -v pnpm build:runtime
+      - name: Execute real CLI agent with deterministic local provider
+        run: |
+          cat > /tmp/openclaw-workboard-running-agent.mjs <<'AGENT_PROOF'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          import { spawn, spawnSync } from 'node:child_process';
+
+          const head = 'b7d88c7da40ee8840cd5435b12b7fde542492bd3';
+          const root = process.cwd();
+          const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'workboard-running-agent-'));
+          const state = path.join(fixture, 'state');
+          const workspace = path.join(fixture, 'workspace');
+          fs.mkdirSync(state); fs.mkdirSync(workspace);
+          const configPath = path.join(state, 'openclaw.json');
+          const requestLog = path.join(fixture, 'requests.jsonl');
+          const control = path.join(fixture, 'responses.json');
+          const mockLog = path.join(fixture, 'mock.log');
+          const redact = value => String(value).replaceAll('workboard-proof-dummy-key', '[fixture-key]').replaceAll('workboard-proof-dummy-token', '[fixture-token]').replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[ip]');
+          const env = { ...process.env, OPENCLAW_STATE_DIR: state, OPENCLAW_CONFIG_PATH: configPath, OPENAI_API_KEY: 'workboard-proof-dummy-key', OPENCLAW_GATEWAY_TOKEN: 'workboard-proof-dummy-token' };
+          function command(label, args, timeout = 240000) {
+            const started = performance.now();
+            const r = spawnSync(process.execPath, ['openclaw.mjs', ...args], { cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 16*1024*1024 });
+            fs.writeFileSync(path.join(fixture, `${label}.stdout`), r.stdout ?? '');
+            fs.writeFileSync(path.join(fixture, `${label}.stderr`), r.stderr ?? '');
+            console.log('AGENT_COMMAND', JSON.stringify({ label, executable: 'node openclaw.mjs', args, status:r.status, signal:r.signal, seconds:(performance.now()-started)/1000 }));
+            if (r.status !== 0 || r.error) {
+              console.log(redact((r.stdout ?? '').slice(-16000)));
+              console.log(redact((r.stderr ?? '').slice(-16000)));
+            }
+            assert.equal(r.error, undefined, `${label}: ${r.error?.message}`);
+            assert.equal(r.status, 0, `${label} failed`);
+            return r;
+          }
+          function functionEvents(stage, name, args) {
+            const item = { type:'function_call', id:`fc_${stage}`, call_id:`call_${stage}`, name, arguments:JSON.stringify(args) };
+            return [
+              { type:'response.output_item.added', item:{ ...item, arguments:'' } },
+              { type:'response.function_call_arguments.delta', delta:item.arguments },
+              { type:'response.output_item.done', item },
+              { type:'response.completed', response:{ id:`resp_${stage}`, status:'completed', output:[item], usage:{input_tokens:64,output_tokens:16,total_tokens:80,input_tokens_details:{cached_tokens:0}} } },
+            ];
+          }
+          function decodeToolOutput(output) {
+            if (typeof output === 'string') return JSON.parse(output);
+            if (Array.isArray(output)) return JSON.parse(output.filter(x=>typeof x.text==='string').map(x=>x.text).join('\n'));
+            throw new Error('Unexpected actual function_call_output shape');
+          }
+          function stage(name, tool, args, verify) {
+            const offset = fs.existsSync(requestLog) ? fs.readFileSync(requestLog, 'utf8').split('\n').filter(Boolean).length : 0;
+            fs.writeFileSync(control, JSON.stringify({ scriptVersion:name, responses:[{events:functionEvents(name,tool,args)}, {text:`WORKBOARD_${name}_DONE`}]}));
+            const result = command(name, ['agent','--local','--agent','main','--session-id',`workboard-proof-${name}`,'--message',`Perform this Workboard operation using ${tool}: ${JSON.stringify(args)}. Then report completion.`,'--thinking','off','--timeout','180','--json']);
+            const response = JSON.parse(result.stdout);
+            const requests = fs.readFileSync(requestLog,'utf8').split('\n').filter(Boolean).slice(offset).map(line=>JSON.parse(line));
+            const bodies = requests.filter(x=>x.path==='/v1/responses').map(x=>x.body);
+            assert.ok(bodies.length >= 2, 'real agent must consume model response and return tool output');
+            assert.ok(bodies.every(x=>x && !x.truncated), 'request evidence must be complete');
+            const declared = bodies.flatMap(x=>x.tools ?? []).find(x=>x.name===tool);
+            assert.ok(declared, `${tool} must be declared by the actual agent`);
+            if (tool==='workboard_board_create') assert.ok(declared.parameters?.properties?.clearAppearance, 'actual agent schema must expose clearAppearance');
+            const outputs = bodies.flatMap(x=>x.input ?? []).filter(x=>x.type==='function_call_output' && x.call_id===`call_${name}`);
+            assert.ok(outputs.length > 0, 'actual tool result must reach the provider');
+            const actual = decodeToolOutput(outputs.at(-1).output);
+            verify(actual);
+            console.log('ACTUAL_TOOL_RESULT', JSON.stringify({ stage:name, tool, arguments:args, result:actual }));
+            console.log('ACTUAL_AGENT_REPLY', redact(JSON.stringify({stage:name, reply:response})));
+          }
+
+          assert.equal(spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim(), head);
+          const mockFd = fs.openSync(mockLog, 'w');
+          fs.writeFileSync(control, JSON.stringify({text:'NOT_A_TOOL_RESULT'}));
+          const mock = spawn(process.execPath, ['scripts/e2e/mock-openai-server.mjs'], {cwd:root, env:{...env,MOCK_PORT:'0',MOCK_BIND_HOST:'127.0.0.1',MOCK_REQUEST_LOG:requestLog,MOCK_RESPONSE_CONTROL:control}, stdio:['ignore',mockFd,mockFd]});
+          fs.closeSync(mockFd);
+          try {
+            let port;
+            for (let i=0;i<100;i++) {
+              const match = fs.readFileSync(mockLog,'utf8').match(/mock-openai listening on (\d+)/);
+              if (match) { port=Number(match[1]); break; }
+              if (mock.exitCode !== null) throw new Error(`mock failed: ${redact(fs.readFileSync(mockLog,'utf8'))}`);
+              await new Promise(r=>setTimeout(r,100));
+            }
+            assert.ok(port, 'local provider listener ready');
+            const { applyMockOpenAiModelConfig } = await import(pathToFileURL(path.join(root,'scripts/e2e/lib/fixtures/mock-openai-config.mjs')));
+            const config = { gateway:{mode:'local',bind:'loopback',auth:{mode:'token'}}, tools:{allow:['workboard_board_create','workboard_boards']}, plugins:{allow:['openai','workboard'],entries:{openai:{enabled:true},workboard:{enabled:true}}}, agents:{defaults:{workspace,skipBootstrap:true,timeoutSeconds:180}} };
+            applyMockOpenAiModelConfig(config,{mockPort:port});
+            fs.writeFileSync(configPath, JSON.stringify(config,null,2)+'\n');
+            console.log('PROOF_IDENTITY', JSON.stringify({head, workflow:process.env.GITHUB_SHA, runtime:'built product CLI agent --local', provider:'official deterministic loopback fixture; no external inference', store:'product-owned persistent store; no injected runtime authority'}));
+            command('version',['--version']);
+            command('config-validate',['config','validate','--json']);
+            stage('create','workboard_board_create',{id:'planning',name:'Planning',icon:'rocket',color:'blue'}, x=>assert.deepEqual({id:x.board.id,name:x.board.name,icon:x.board.icon,color:x.board.color},{id:'planning',name:'Planning',icon:'rocket',color:'blue'}));
+            stage('clear-icon','workboard_board_create',{id:'planning',clearAppearance:['icon']}, x=>{assert.equal(x.board.name,'Planning');assert.equal(x.board.color,'blue');assert.equal(x.board.icon,undefined);});
+            stage('read-new-process','workboard_boards',{}, x=>{const board=x.boards.find(b=>b.id==='planning');assert.ok(board);assert.equal(board.name,'Planning');assert.equal(board.color,'blue');assert.equal(board.icon,undefined);});
+            console.log('RUNNING_AGENT_PROOF_COMPLETE', JSON.stringify({head,stages:['create','clear-icon','read-new-process'], externalModel:false, authorityMocks:false}));
+          } finally {
+            mock.kill('SIGTERM');
+            await Promise.race([new Promise(r=>mock.once('exit',r)),new Promise(r=>setTimeout(r,5000))]);
+            if (mock.exitCode === null && mock.signalCode === null) { mock.kill('SIGKILL'); await new Promise(r=>mock.once('exit',r)); }
+          }
+          AGENT_PROOF
+          git diff --exit-code
+          /usr/bin/time -v node /tmp/openclaw-workboard-running-agent.mjs
