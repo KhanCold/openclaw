@@ -1,11 +1,11 @@
-name: Memory Wiki apply evidence
+name: Memory Wiki final formatting evidence
 on:
   push:
     branches: [proof/wiki-apply]
 permissions:
   contents: read
 jobs:
-  behavior:
+  final-format:
     if: github.repository == 'KhanCold/openclaw'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -17,11 +17,11 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git 00023baa1e5c979657caa113c3390b410c573a57
-          test "$(git rev-parse FETCH_HEAD^{tree})" = 005cd76580865b787ae08a4915a22131568756a8
-          git checkout --detach 00023baa1e5c979657caa113c3390b410c573a57
+          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git 7b8531758a3fff16d3261baab0ab693089820b1a
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 9f20fc1b938091b176fe1d4c4fc126390a3866a6
+          git checkout --detach 7b8531758a3fff16d3261baab0ab693089820b1a
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c
-          git merge-base --is-ancestor 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 00023baa1e5c979657caa113c3390b410c573a57
+          git merge-base --is-ancestor 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 7b8531758a3fff16d3261baab0ab693089820b1a
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
       - name: Pinned Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -35,127 +35,12 @@ jobs:
           pnpm --version
       - name: Independent physical dependency install
         run: pnpm install --frozen-lockfile
-      - name: Unchanged baseline and candidate proof with resource measurements
-        run: |
-          cat > /tmp/wiki-apply-proof.mjs <<'PROOF_DRIVER'
-          import assert from 'node:assert/strict';
-          import fs from 'node:fs';
-          import { createHash } from 'node:crypto';
-          import { spawnSync } from 'node:child_process';
-          const base = '02f671cd22a7b4be9aca038ce5bc1d4a58b3809c';
-          const candidate = '00023baa1e5c979657caa113c3390b410c573a57';
-          const test = 'extensions/memory-wiki/src/apply-entrypoints.compile.test.ts';
-          const bytes = fs.readFileSync(test);
-          const testHash = createHash('sha256').update(bytes).digest('hex');
-          function run(label, command, args, allowedFailure = false) {
-            const started = performance.now();
-            const result = spawnSync(command, args, { env: process.env, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: 30 * 60 * 1000 });
-            process.stdout.write(result.stdout ?? '');
-            process.stderr.write(result.stderr ?? '');
-            console.log('PROOF_TIMING', JSON.stringify({ label, seconds: (performance.now() - started) / 1000, status: result.status }));
-            assert.equal(result.error, undefined, `${label}: ${result.error}`);
-            if (!allowedFailure) assert.equal(result.status, 0, `${label} failed`);
-            return result;
-          }
-          function focused(phase, baseline) {
-            assert.deepEqual(fs.readFileSync(test), bytes, 'unchanged regression bytes');
-            const output = `/tmp/wiki-apply-${phase}.json`;
-            const timing = `/tmp/wiki-apply-${phase}.time`;
-            const result = run(`${phase} real apply boundaries`, '/usr/bin/time', ['-v', '-o', timing, 'pnpm', 'test', test, '--maxWorkers=1', '--reporter=default', '--reporter=json', `--outputFile.json=${output}`], baseline);
-            console.log('PROOF_RESOURCE', JSON.stringify({ phase, report: fs.readFileSync(timing, 'utf8') }));
-            const report = JSON.parse(fs.readFileSync(output, 'utf8'));
-            const cases = report.testResults.flatMap(file => file.assertionResults);
-            console.log('PROOF_CASES', JSON.stringify({ phase, testHash, cases: cases.map(item => ({ name: item.fullName, status: item.status, duration: item.duration, failures: item.failureMessages })) }));
-            assert.equal(cases.length, 8, 'eight scenarios collected');
-            const failures = cases.filter(item => item.status === 'failed');
-            assert.equal(result.status, baseline ? 1 : 0);
-            assert.equal(failures.length, baseline ? 4 : 0);
-            assert.ok(cases.every(item => ['passed', 'failed'].includes(item.status)));
-            if (baseline) {
-              for (const entry of ['tool', 'gateway', 'cli-synthesis', 'cli-metadata']) {
-                assert.ok(failures.some(item => item.title.includes(entry)), `missing expected entry failure: ${entry}`);
-              }
-              for (const item of failures) assert.match(item.failureMessages.join('\n'), /expected 2 to be 1/);
-              assert.equal(cases.filter(item => item.status === 'passed').length, 4);
-            }
-          }
-          console.log('PROOF_IDENTITIES', JSON.stringify({ base, candidate, workflow: process.env.GITHUB_SHA, testHash }));
-          assert.equal(run('head identity', 'git', ['rev-parse', 'HEAD']).stdout.trim(), candidate);
-          run('baseline checkout', 'git', ['checkout', '--detach', base]);
-          fs.writeFileSync(test, bytes);
-          run('baseline production untouched', 'git', ['diff', '--exit-code', base]);
-          focused('baseline', true);
-          fs.unlinkSync(test);
-          run('candidate checkout', 'git', ['checkout', '--detach', candidate]);
-          run('candidate exact tree', 'git', ['diff', '--exit-code', candidate]);
-          focused('head', false);
-          run('memory-wiki plugin lane', '/usr/bin/time', ['-v', 'pnpm', 'test:extension', 'memory-wiki', '--maxWorkers=1']);
-          run('whitespace', 'git', ['diff', '--check', base, candidate]);
-          console.log('PROOF_COMPLETE', JSON.stringify({ base, candidate, testHash }));
-          PROOF_DRIVER
-          node /tmp/wiki-apply-proof.mjs
-  checks:
-    if: github.repository == 'KhanCold/openclaw'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    env:
-      CI: "true"
-      COREPACK_HOME: /tmp/openclaw-wiki-apply-corepack
-    steps:
-      - name: Anonymous immutable source checkout
+      - name: Verify final formatting and preserved source
         run: |
           set -euo pipefail
-          git init .
-          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git 00023baa1e5c979657caa113c3390b410c573a57
-          test "$(git rev-parse FETCH_HEAD^{tree})" = 005cd76580865b787ae08a4915a22131568756a8
-          git checkout --detach 00023baa1e5c979657caa113c3390b410c573a57
-          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c
-          git merge-base --is-ancestor 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 00023baa1e5c979657caa113c3390b410c573a57
-          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
-      - name: Pinned Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24.21.0"
-          package-manager-cache: false
-      - name: Pinned package manager
-        run: |
-          npm install --global --ignore-scripts corepack@0.34.6
-          corepack enable
-          pnpm --version
-      - name: Independent physical dependency install
-        run: pnpm install --frozen-lockfile
-      - name: Targeted checks and canonical formatting diagnostics
-        run: |
-          cat > /tmp/wiki-apply-checks.mjs <<'CHECKS_DRIVER'
-          import fs from 'node:fs';
-          import { createHash } from 'node:crypto';
-          import { spawnSync } from 'node:child_process';
-          const files = ['cli.ts', 'gateway.ts', 'source-sync.ts', 'tool.ts', 'gateway.test.ts', 'apply-entrypoints.compile.test.ts'].map(f => `extensions/memory-wiki/src/${f}`);
-          let failed = false;
-          function check(label, command, args) {
-            const start = performance.now();
-            const r = spawnSync(command, args, { env: process.env, encoding: 'utf8', maxBuffer: 128*1024*1024, timeout: 20*60*1000 });
-            process.stdout.write(r.stdout ?? ''); process.stderr.write(r.stderr ?? '');
-            console.log('CHECK_RESULT', JSON.stringify({label,status:r.status,error:r.error?.message,seconds:(performance.now()-start)/1000}));
-            if (r.status !== 0 || r.error) failed = true;
-            return r;
-          }
-          const originals = new Map(files.map(f=>[f,fs.readFileSync(f)]));
-          const format = check('changed format','pnpm',['format:check',...files]);
-          if (format.status !== 0) {
-            check('canonical format diagnostics','pnpm',['exec','oxfmt',...files]);
-            for (const f of files) {
-              const bytes = fs.readFileSync(f);
-              if (!bytes.equals(originals.get(f))) console.log('FORMAT_REPAIR',JSON.stringify({path:f,sha256:createHash('sha256').update(bytes).digest('hex'),base64:bytes.toString('base64')}));
-              fs.writeFileSync(f, originals.get(f));
-            }
-          }
-          check('production extension types','node',['scripts/run-tsgo.mjs','-p','tsconfig.extensions.json','--incremental','--tsBuildInfoFile','.artifacts/tsgo-cache/extensions.tsbuildinfo']);
-          check('extension test types','node',['scripts/run-tsgo.mjs','-p','test/tsconfig/tsconfig.extensions.test.json','--incremental','--tsBuildInfoFile','.artifacts/tsgo-cache/extensions-test.tsbuildinfo']);
-          check('scoped extension lint','node',['scripts/run-oxlint.mjs','--tsconfig','extensions/tsconfig.json',...files]);
-          check('whitespace','git',['diff','--check','02f671cd22a7b4be9aca038ce5bc1d4a58b3809c','00023baa1e5c979657caa113c3390b410c573a57']);
-          check('fetch exact proof workflow','curl',['--fail','--location','--max-time','60','--silent','--show-error',`https://raw.githubusercontent.com/KhanCold/openclaw/${process.env.GITHUB_SHA}/.github/workflows/proof-wiki-apply.yml`,'--output','.github/workflows/proof-wiki-apply.yml']);
-          check('workflow guards','pnpm',['check:workflows']);
-          process.exitCode = failed ? 1 : 0;
-          CHECKS_DRIVER
-          node /tmp/wiki-apply-checks.mjs
+          pnpm format:check extensions/memory-wiki/src/cli.ts extensions/memory-wiki/src/gateway.ts extensions/memory-wiki/src/source-sync.ts extensions/memory-wiki/src/tool.ts extensions/memory-wiki/src/gateway.test.ts extensions/memory-wiki/src/apply-entrypoints.compile.test.ts
+          git diff --check 02f671cd22a7b4be9aca038ce5bc1d4a58b3809c 7b8531758a3fff16d3261baab0ab693089820b1a
+          git diff --exit-code
+          sha256sum extensions/memory-wiki/src/apply-entrypoints.compile.test.ts extensions/memory-wiki/src/source-sync.ts
+          curl --fail --location --silent --show-error --max-time 60 "https://raw.githubusercontent.com/KhanCold/openclaw/${GITHUB_SHA}/.github/workflows/proof-wiki-apply.yml" --output .github/workflows/proof-wiki-apply.yml
+          pnpm check:workflows
