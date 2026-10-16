@@ -92,23 +92,33 @@ jobs:
           }
           function stage(name, tool, args, verify) {
             const offset = fs.existsSync(requestLog) ? fs.readFileSync(requestLog, 'utf8').split('\n').filter(Boolean).length : 0;
-            fs.writeFileSync(control, JSON.stringify({ scriptVersion:name, responses:[{events:functionEvents(name,tool,args)}, {text:`WORKBOARD_${name}_DONE`}]}));
+            fs.writeFileSync(control, JSON.stringify({ scriptVersion:name, responses:[{events:functionEvents(`${name}_search`,'tool_search',{query:tool,limit:1})},{events:functionEvents(`${name}_describe`,'tool_describe',{id:tool})},{events:functionEvents(`${name}_dispatch`,'dispatch_action',{id:tool,args})},{text:`WORKBOARD_${name}_DONE`}]}));
             const result = command(name, ['agent','--local','--agent','main','--session-id',`workboard-proof-${name}`,'--message',`Perform this Workboard operation using ${tool}: ${JSON.stringify(args)}. Then report completion.`,'--thinking','off','--timeout','180','--json']);
             const response = JSON.parse(result.stdout);
             const requests = fs.readFileSync(requestLog,'utf8').split('\n').filter(Boolean).slice(offset).map(line=>JSON.parse(line));
             const bodies = requests.filter(x=>x.path==='/v1/responses').map(x=>{ assert.equal(typeof x.body, 'string', 'official request record must contain complete JSON text'); return JSON.parse(x.body); });
-            assert.ok(bodies.length >= 2, 'real agent must consume model response and return tool output');
-            assert.ok(bodies.every(x=>x && !x.truncated), 'request evidence must be complete');
-            const declared = bodies.flatMap(x=>x.tools ?? []).find(x=>x.name===tool);
-            console.log('ACTUAL_REQUEST_FACTS', JSON.stringify({stage:name, requests:bodies.length, declaredTools:bodies.flatMap(x=>(x.tools ?? []).map(t=>t.name))}));
-            assert.ok(declared, `${tool} must be declared by the actual agent`);
-            if (tool==='workboard_board_create') assert.ok(declared.parameters?.properties?.clearAppearance, 'actual agent schema must expose clearAppearance');
-            const outputs = bodies.flatMap(x=>x.input ?? []).filter(x=>x.type==='function_call_output' && x.call_id===`call_${name}`);
-            assert.ok(outputs.length > 0, 'actual tool result must reach the provider');
-            const actual = decodeToolOutput(outputs.at(-1).output);
+            assert.ok(bodies.length >= 4, 'real agent must discover, describe, dispatch, and return tool output');
+            const declared = bodies.flatMap(x=>x.tools ?? []);
+            for (const control of ['tool_search','tool_describe','dispatch_action']) assert.ok(declared.some(x=>x.name===control), `${control} must be declared by actual agent`);
+            function output(suffix) {
+              const values=bodies.flatMap(x=>x.input ?? []).filter(x=>x.type==='function_call_output' && x.call_id===`call_${name}_${suffix}`);
+              assert.ok(values.length, `actual ${suffix} output must reach provider`);
+              const result=decodeToolOutput(values.at(-1).output);
+              console.log('ACTUAL_CONTROL_RESULT',JSON.stringify({stage:name,control:suffix,result}));
+              return result;
+            }
+            const search=output('search');
+            assert.ok(Array.isArray(search) && search.some(x=>x.name===tool), 'actual search must discover target');
+            const description=output('describe');
+            assert.equal(description.name,tool);
+            if (tool==='workboard_board_create') assert.ok(description.parameters?.properties?.clearAppearance, 'actual described schema must expose clearAppearance');
+            const dispatched=output('dispatch');
+            assert.equal(dispatched.tool?.name,tool);
+            assert.notEqual(dispatched.result?.isError,true);
+            const actual=decodeToolOutput(dispatched.result.content);
             verify(actual);
             console.log('ACTUAL_TOOL_RESULT', JSON.stringify({ stage:name, tool, arguments:args, result:actual }));
-            console.log('ACTUAL_AGENT_REPLY', redact(JSON.stringify({stage:name, reply:response})));
+            console.log('ACTUAL_AGENT_REPLY', redact(JSON.stringify({stage:name, payloads:response.payloads,toolSummary:response.meta?.toolSummary})));
           }
           
           assert.equal(spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim(), head);
