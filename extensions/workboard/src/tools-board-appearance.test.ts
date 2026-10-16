@@ -67,6 +67,7 @@ describe("registered Workboard board appearance tool", () => {
     { clearAppearance: ["icon"], icon: undefined, color: "blue" },
     { clearAppearance: ["color"], icon: "rocket", color: undefined },
     { clearAppearance: ["icon", "color"], icon: undefined, color: undefined },
+    { clearAppearance: "icon", icon: undefined, color: "blue" },
   ])(
     "clears $clearAppearance through validated tool calls",
     async ({ clearAppearance, icon, color }) => {
@@ -106,7 +107,7 @@ describe("registered Workboard board appearance tool", () => {
     const tool = createRegisteredBoardTool();
     const id = "invalid-clear";
     await tool.update({ id, ...initialAppearance });
-    for (const clearAppearance of [["name"], ["icon", "name"], "icon", null, {}]) {
+    for (const clearAppearance of [["name"], ["icon", "name"], "name", null, {}]) {
       expect(() => tool.update({ id, clearAppearance })).toThrow(/clearAppearance/);
     }
     expect(await tool.read(id)).toMatchObject({ id, ...initialAppearance });
