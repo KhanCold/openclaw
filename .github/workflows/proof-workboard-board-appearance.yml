@@ -17,9 +17,9 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git c22221d0e6b9f3b529b71d5be48a7cc3e1e5c85b
-          test "$(git rev-parse FETCH_HEAD^{tree})" = b29389bc557da1e2504cf38a230f2c3e0ef9b62a
-          git checkout --detach c22221d0e6b9f3b529b71d5be48a7cc3e1e5c85b
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git 48aca9512fcf33ba75093d8d1e95d9705d58c7c9
+          test "$(git rev-parse FETCH_HEAD^{tree})" = b16da6e2bac1627c8aa735951c89bcc423d6736b
+          git checkout --detach 48aca9512fcf33ba75093d8d1e95d9705d58c7c9
           git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 75a5207363f0a82c974a7ec5ac22644635897874
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
       - name: Pinned Node
@@ -43,7 +43,7 @@ jobs:
           import { spawnSync } from "node:child_process";
           
           const base = "75a5207363f0a82c974a7ec5ac22644635897874";
-          const candidate = "c22221d0e6b9f3b529b71d5be48a7cc3e1e5c85b";
+          const candidate = "48aca9512fcf33ba75093d8d1e95d9705d58c7c9";
           const test = "extensions/workboard/src/tools-board-appearance.test.ts";
           const bytes = fs.readFileSync(test);
           const testHash = createHash("sha256").update(bytes).digest("hex");
@@ -67,12 +67,12 @@ jobs:
             const report = JSON.parse(fs.readFileSync(output, "utf8"));
             const assertions = report.testResults.flatMap(file => file.assertionResults);
             const failures = assertions.filter(item => item.status === "failed");
-            assert.equal(assertions.length, 6, "all six contract scenarios collected");
+            assert.equal(assertions.length, 7, "all seven contract scenarios collected");
             assert.equal(result.status, baseline ? 1 : 0);
-            assert.equal(failures.length, baseline ? 4 : 0);
+            assert.equal(failures.length, baseline ? 5 : 0);
             assert.ok(assertions.every(item => item.status === "passed" || item.status === "failed"));
             if (baseline) {
-              assert.equal(failures.filter(item => item.title.startsWith("clears ")).length, 3);
+              assert.equal(failures.filter(item => item.title.startsWith("clears ")).length, 4);
               assert.ok(failures.some(item => item.title === "preserves appearance when the clear list is empty"));
               for (const item of failures) {
                 assert.match(item.failureMessages.join("\n"), /Validation failed for tool "workboard_board_create"/);
@@ -95,8 +95,38 @@ jobs:
           run("candidate exact tree", "git", ["diff", "--exit-code", candidate]);
           focused("head", false);
           run("Workboard owner and sibling lane", "pnpm", ["test:extension", "workboard", "--maxWorkers=1"]);
-          run("targeted native changed checks", "pnpm", ["check:changed", "--base", base, "--head", candidate, "--timed"]);
           run("whitespace", "git", ["diff", "--check", base, candidate]);
           console.log("PROOF_COMPLETE", JSON.stringify({ base, candidate, testHash }));
           PROOF_DRIVER
           node /tmp/openclaw-workboard-proof-driver.mjs
+  checks:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-workboard-appearance-corepack
+    steps:
+      - name: Anonymous immutable candidate checkout
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git 48aca9512fcf33ba75093d8d1e95d9705d58c7c9
+          test "$(git rev-parse FETCH_HEAD^{tree})" = b16da6e2bac1627c8aa735951c89bcc423d6736b
+          git checkout --detach 48aca9512fcf33ba75093d8d1e95d9705d58c7c9
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 75a5207363f0a82c974a7ec5ac22644635897874
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+      - name: Pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent physical dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Targeted native checks
+        run: pnpm check:changed --base 75a5207363f0a82c974a7ec5ac22644635897874 --head 48aca9512fcf33ba75093d8d1e95d9705d58c7c9 --timed
