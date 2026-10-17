@@ -1,11 +1,11 @@
-name: OC Path frontmatter baseline proof
+name: OC Path frontmatter candidate proof
 on:
   push:
     branches: [proof/oc-path-frontmatter-sequence]
 permissions:
   contents: read
 jobs:
-  baseline:
+  candidate:
     if: github.repository == 'KhanCold/openclaw'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -18,9 +18,9 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git f2556399319acf29b519f0178f98d473c8f8a895
-          test "$(git rev-parse FETCH_HEAD^{tree})" = 01b5a9449684d3cdeed8aefde2bdfb1de564ce59
-          git checkout --detach f2556399319acf29b519f0178f98d473c8f8a895
+          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git 74c1ac2baa18b365f572f5ea0e3879659cbe2a27
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 44b13f93cfdaf6a11c11341998db4dddee878ea5
+          git checkout --detach 74c1ac2baa18b365f572f5ea0e3879659cbe2a27
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
       - name: Pinned Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -38,9 +38,34 @@ jobs:
         run: |
           curl --fail --location --silent --show-error --max-time 60 "https://raw.githubusercontent.com/KhanCold/openclaw/${GITHUB_SHA}/.github/workflows/proof-oc-path-frontmatter-sequence.yml" --output .github/workflows/proof-oc-path-frontmatter-sequence.yml
           pnpm check:workflows
+      - name: Unchanged regression tests fail against baseline production
+        run: |
+          git show f2556399319acf29b519f0178f98d473c8f8a895:extensions/oc-path/src/oc-path/frontmatter-format.ts > extensions/oc-path/src/oc-path/frontmatter-format.ts
+          set +e
+          /usr/bin/time -v pnpm test extensions/oc-path/src/cli.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/baseline-tests.json > /tmp/baseline-tests.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/baseline-tests.log
+          git restore extensions/oc-path/src/oc-path/frontmatter-format.ts
+          test "$result" = 1
+          python3 - <<'CHECK_TESTS'
+          import json,pathlib
+          data=json.loads(pathlib.Path('/tmp/baseline-tests.json').read_text())
+          failed=[a for t in data['testResults'] for a in t['assertionResults'] if a['status']=='failed']
+          assert len(failed)==3, data
+          assert all('as a YAML string scalar' in a['fullName'] and 'YAMLParseError' in '\n'.join(a['failureMessages']) for a in failed), failed
+          print('UNCHANGED_TEST_f2556399319acf29b519f0178f98d473c8f8a895LINE_RED', json.dumps({'failed':len(failed),'passed':data['numPassedTests'],'names':[a['fullName'] for a in failed]}))
+          CHECK_TESTS
+          git diff --exit-code
+      - name: Focused CLI regression suite
+        run: /usr/bin/time -v pnpm test extensions/oc-path/src/cli.test.ts --maxWorkers=1
+      - name: OC Path sibling suites
+        run: /usr/bin/time -v pnpm test extensions/oc-path --maxWorkers=1
+      - name: Changed type lint format and guard checks
+        run: /usr/bin/time -v pnpm check:changed --base f2556399319acf29b519f0178f98d473c8f8a895
       - name: Build actual product runtime
         run: /usr/bin/time -v pnpm build:runtime
-      - name: Establish real CLI baseline failure and passing controls
+      - name: Prove unchanged real CLI fixture and controls on candidate
         run: |
           cat > /tmp/oc-path-frontmatter-driver.mjs <<'PATH_PROOF'
           import assert from 'node:assert/strict';
@@ -131,20 +156,5 @@ jobs:
           assert.equal(failures.length, 0, 'PATH_FRONTMATTER_LITERAL_CONTRACT: CLI writes valid YAML string leaves');
           PATH_PROOF
           git diff --exit-code
-          set +e
-          node /tmp/oc-path-frontmatter-driver.mjs > /tmp/oc-path-proof.log 2>&1
-          result=$?
-          set -e
-          cat /tmp/oc-path-proof.log
-          test "$result" = 1
-          python3 - <<'CHECK_BASELINE'
-          import json,pathlib
-          log=pathlib.Path('/tmp/oc-path-proof.log').read_text()
-          lines=[line.removeprefix('PATH_PROOF_COMPLETE ') for line in log.splitlines() if line.startswith('PATH_PROOF_COMPLETE ')]
-          assert len(lines)==1
-          result=json.loads(lines[0])
-          assert {x['label'] for x in result['invalidYamlCases']} == {'edit-space-preview','edit-space','edit-tab','edit-bare','insert-space','insert-new-frontmatter'}, result
-          assert result['controls']==2 and result['noProviderCalls']
-          assert 'PATH_FRONTMATTER_LITERAL_CONTRACT' in log
-          print('BASELINE_RED_CONFIRMED: six actual CLI artifact failures; two controls passed')
-          CHECK_BASELINE
+          node /tmp/oc-path-frontmatter-driver.mjs
+          git diff --exit-code
