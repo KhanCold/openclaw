@@ -502,6 +502,29 @@ describe("openclaw path CLI", () => {
   });
 
   describe("set", () => {
+    it.each([
+      { target: "note", value: "- draft" },
+      { target: "note", value: "-" },
+      { target: "+note", value: "-\tdraft" },
+    ])("writes $target=$value as a YAML string scalar", async ({ target, value }) => {
+      const workspaceDir = tempDirs.make("oc-path-cli-");
+      const filePath = join(workspaceDir, "AGENTS.md");
+      const body = "\n## Tasks\n- Keep this item\n";
+      writeFileSync(
+        filePath,
+        `---\n${target === "note" ? "note: old\n" : ""}keep: stable\n---${body}`,
+      );
+      const rt = createTestRuntime();
+      await invokePathCli(
+        ["set", "--json", "--file", filePath, `oc://AGENTS.md/[frontmatter]/${target}`, "--", value],
+        rt,
+      );
+      expect(rt.exitCode, stderrText(rt)).toBe(0);
+      const written = readFileSync(filePath, "utf8");
+      expect(parseYaml(written.split("---")[1] ?? "")).toEqual({ note: value, keep: "stable" });
+      expect(written.endsWith(`---${body}`)).toBe(true);
+    });
+
     it("preserves an existing quoted frontmatter value when editing another field", async () => {
       const workspaceDir = tempDirs.make("oc-path-cli-");
       const filePath = join(workspaceDir, "AGENTS.md");
