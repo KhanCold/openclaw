@@ -399,8 +399,9 @@ describe("handleModelsCommand", () => {
       [...text.matchAll(/^- openai\/(model-\d+)/gm)].map((match) => match[1]),
     );
     expect(rows).toEqual(
-      Array.from({ length: Math.min(total, pageSize * 2) }, (_, index) =>
-        `model-${String(index + 1).padStart(3, "0")}`,
+      Array.from(
+        { length: Math.min(total, pageSize * 2) },
+        (_, index) => `model-${String(index + 1).padStart(3, "0")}`,
       ),
     );
     expect(secondText).toContain(
