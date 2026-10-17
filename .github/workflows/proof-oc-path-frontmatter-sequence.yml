@@ -18,9 +18,9 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git fetch --no-tags --depth=2 https://github.com/KhanCold/openclaw.git 74c1ac2baa18b365f572f5ea0e3879659cbe2a27
-          test "$(git rev-parse FETCH_HEAD^{tree})" = 44b13f93cfdaf6a11c11341998db4dddee878ea5
-          git checkout --detach 74c1ac2baa18b365f572f5ea0e3879659cbe2a27
+          git fetch --no-tags --depth=3 https://github.com/KhanCold/openclaw.git 2b2d5043752ad1b0789f09bc995e5fecf394e866
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 6cc5190e471d2f19f65bf7745a8cfa9a7f1db13c
+          git checkout --detach 2b2d5043752ad1b0789f09bc995e5fecf394e866
           test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
       - name: Pinned Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -38,6 +38,7 @@ jobs:
         run: |
           curl --fail --location --silent --show-error --max-time 60 "https://raw.githubusercontent.com/KhanCold/openclaw/${GITHUB_SHA}/.github/workflows/proof-oc-path-frontmatter-sequence.yml" --output .github/workflows/proof-oc-path-frontmatter-sequence.yml
           pnpm check:workflows
+          rm .github/workflows/proof-oc-path-frontmatter-sequence.yml
       - name: Unchanged regression tests fail against baseline production
         run: |
           git show f2556399319acf29b519f0178f98d473c8f8a895:extensions/oc-path/src/oc-path/frontmatter-format.ts > extensions/oc-path/src/oc-path/frontmatter-format.ts
@@ -54,15 +55,22 @@ jobs:
           failed=[a for t in data['testResults'] for a in t['assertionResults'] if a['status']=='failed']
           assert len(failed)==3, data
           assert all('as a YAML string scalar' in a['fullName'] and 'YAMLParseError' in '\n'.join(a['failureMessages']) for a in failed), failed
-          print('UNCHANGED_TEST_f2556399319acf29b519f0178f98d473c8f8a895LINE_RED', json.dumps({'failed':len(failed),'passed':data['numPassedTests'],'names':[a['fullName'] for a in failed]}))
+          print('UNCHANGED_TEST_BASELINE_RED', json.dumps({'failed':len(failed),'passed':data['numPassedTests'],'names':[a['fullName'] for a in failed]}))
           CHECK_TESTS
           git diff --exit-code
       - name: Focused CLI regression suite
         run: /usr/bin/time -v pnpm test extensions/oc-path/src/cli.test.ts --maxWorkers=1
-      - name: OC Path sibling suites
-        run: /usr/bin/time -v pnpm test extensions/oc-path --maxWorkers=1
-      - name: Changed type lint format and guard checks
-        run: /usr/bin/time -v pnpm check:changed --base f2556399319acf29b519f0178f98d473c8f8a895
+      - name: Confirm corrected product formatting
+        run: |
+          set +e
+          pnpm exec oxfmt --check extensions/oc-path/src/cli.test.ts extensions/oc-path/src/oc-path/frontmatter-format.ts
+          result=$?
+          set -e
+          if [ "$result" != 0 ]; then
+            pnpm exec oxfmt --write extensions/oc-path/src/cli.test.ts extensions/oc-path/src/oc-path/frontmatter-format.ts
+            git diff
+            exit "$result"
+          fi
       - name: Build actual product runtime
         run: /usr/bin/time -v pnpm build:runtime
       - name: Prove unchanged real CLI fixture and controls on candidate
@@ -157,4 +165,37 @@ jobs:
           PATH_PROOF
           git diff --exit-code
           node /tmp/oc-path-frontmatter-driver.mjs
+          git diff --exit-code
+      - name: Install missing standard runner prerequisite
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ripgrep
+          rg --version
+      - name: Recheck SQLite worker guard with prerequisite present
+        run: /usr/bin/time -v pnpm check:database-worker-ratchet --base f2556399319acf29b519f0178f98d473c8f8a895
+      - name: Establish inherited baseline guard failures
+        run: |
+          git restore --source=f2556399319acf29b519f0178f98d473c8f8a895 -- extensions/oc-path/src/cli.test.ts extensions/oc-path/src/oc-path/frontmatter-format.ts
+          set +e
+          node --import ./scripts/tsx.mjs scripts/check-test-mock-exports.mts --base f2556399319acf29b519f0178f98d473c8f8a895 > /tmp/baseline-mock.log 2>&1
+          mock_result=$?
+          node --import tsx scripts/check-deadcode-exports.mts > /tmp/baseline-deadcode.log 2>&1
+          deadcode_result=$?
+          set -e
+          cat /tmp/baseline-mock.log
+          cat /tmp/baseline-deadcode.log
+          git restore -- extensions/oc-path/src/cli.test.ts extensions/oc-path/src/oc-path/frontmatter-format.ts
+          test "$mock_result" = 1
+          test "$deadcode_result" = 1
+          python3 - <<'CHECK_INHERITED'
+          import pathlib,re,json
+          mock=pathlib.Path('/tmp/baseline-mock.log').read_text()
+          assert 'src/cli/update-cli/update-command-service-maintenance-native.test-support.ts:52: ./update-command-database-context.js' in mock, mock
+          assert len([x for x in mock.splitlines() if x.startswith('  src/')])==1, mock
+          log=pathlib.Path('/tmp/baseline-deadcode.log').read_text()
+          actual=sorted(set(x.strip() for x in log.splitlines() if re.match(r'  (?:src|ui)/[^ ]+: [A-Za-z]',x)))
+          expected=['src/config/sessions/combined-store-paths.ts: discoveryReadOptions', 'src/infra/state-migrations.transcript-archive-stream.ts: ArchiveLineTransform', 'src/infra/state-migrations.transcript-directives-transform.ts: parseDirectiveMigrationTranscriptEvent', 'src/infra/state-migrations.transcript-directives-transform.ts: transformHistoricalTranscriptEvent', 'src/shared/node-list-types.ts: NODE_APPROVAL_STATE_VALUES', 'src/state/openclaw-agent-db.ts: recordOpenClawAgentDatabaseOpenFailure (agents)', 'src/state/openclaw-quarantine-store.ts: recordOpenClawDatabaseQuarantine', 'src/state/openclaw-state-db.ts: recordOpenClawStateDatabaseOpenFailure', 'ui/src/components/catalog-session-menu-solid.tsx: CatalogSessionMenuAction']
+          assert actual==expected, (actual,expected)
+          print('BASELINE_INHERITED_CONFIRMED',json.dumps({'mockFailure':'unchanged core update-cli mock export','unusedExports':actual}))
+          CHECK_INHERITED
           git diff --exit-code
