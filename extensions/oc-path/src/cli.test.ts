@@ -516,7 +516,15 @@ describe("openclaw path CLI", () => {
       );
       const rt = createTestRuntime();
       await invokePathCli(
-        ["set", "--json", "--file", filePath, `oc://AGENTS.md/[frontmatter]/${target}`, "--", value],
+        [
+          "set",
+          "--json",
+          "--file",
+          filePath,
+          `oc://AGENTS.md/[frontmatter]/${target}`,
+          "--",
+          value,
+        ],
         rt,
       );
       expect(rt.exitCode, stderrText(rt)).toBe(0);
