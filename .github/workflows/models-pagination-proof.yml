@@ -1,0 +1,72 @@
+name: Models pagination isolated proof
+on:
+  push:
+    branches: [proof/models-pagination-format-20261017]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+      OPENCLAW_VITEST_RUNTIME: node
+    steps:
+      - name: Anonymous pinned source checkout
+        run: |
+          git init "$GITHUB_WORKSPACE/source"
+          cd "$GITHUB_WORKSPACE/source"
+          git remote add origin https://github.com/KhanCold/openclaw.git
+          git -c credential.helper= fetch --depth=3 origin e680022e7b5fdfbebd7901cf9ec000e7578749cc
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = e680022e7b5fdfbebd7901cf9ec000e7578749cc
+          test "$(git rev-parse HEAD^{tree})" = 20b81ea0921b5d2882e9bd6c53b35c5613e308f4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+          token: ''
+      - name: Pinned toolchain and frozen dependencies
+        id: install
+        working-directory: source
+        run: |
+          npm install --global corepack@0.34.6
+          corepack enable
+          corepack prepare pnpm@12.11.1 --activate
+          pnpm install --frozen-lockfile
+          if ! command -v rg >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y ripgrep; fi
+      - name: Canonical formatting repair and exact tree
+        working-directory: source
+        run: |
+          pnpm format -- src/auto-reply/reply/commands-models.test.ts
+          git diff --check
+          git diff -- src/auto-reply/reply/commands-models.test.ts > "$RUNNER_TEMP/format.patch"
+          echo "FORMAT_PATCH_BASE64=$(base64 -w0 "$RUNNER_TEMP/format.patch")"
+          git add src/auto-reply/reply/commands-models.test.ts
+          echo "FORMATTED_HEAD_TREE=$(git write-tree)"
+          git diff --cached -- src/auto-reply/reply/commands-models.test.ts
+          pnpm format:check -- src/auto-reply/reply/commands-models.ts src/auto-reply/reply/commands-models.test.ts
+      - name: Formatted head identical regression
+        id: head
+        continue-on-error: true
+        working-directory: source
+        run: /usr/bin/time -p pnpm test src/auto-reply/reply/commands-models.test.ts --maxWorkers=1
+      - name: Restore baseline production only
+        working-directory: source
+        run: |
+          git show e520ccc98bcaa45a3834442f8141de075629639c:src/auto-reply/reply/commands-models.ts > src/auto-reply/reply/commands-models.ts
+          echo "FORMATTED_TEST_BLOB=$(git hash-object src/auto-reply/reply/commands-models.test.ts)"
+      - name: Formatted baseline identical regression
+        id: baseline
+        continue-on-error: true
+        working-directory: source
+        run: /usr/bin/time -p pnpm test src/auto-reply/reply/commands-models.test.ts --maxWorkers=1
+      - name: Verify expected outcomes
+        if: always()
+        run: |
+          echo 'FORMATTED_OUTCOMES head=${{ steps.head.outcome }} baseline=${{ steps.baseline.outcome }}'
+          test "${{ steps.head.outcome }}" = success
+          test "${{ steps.baseline.outcome }}" = failure
