@@ -1,0 +1,150 @@
+name: OC Path frontmatter baseline proof
+on:
+  push:
+    branches: [proof/oc-path-frontmatter-sequence]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/oc-path-proof-corepack
+      OPENCLAW_VITEST_RUNTIME: node
+    steps:
+      - name: Anonymous immutable product checkout
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git f2556399319acf29b519f0178f98d473c8f8a895
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 01b5a9449684d3cdeed8aefde2bdfb1de564ce59
+          git checkout --detach f2556399319acf29b519f0178f98d473c8f8a895
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+      - name: Pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Pinned package manager
+        run: |
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          pnpm --version
+      - name: Independent frozen dependency install
+        run: pnpm install --frozen-lockfile
+      - name: Validate proof workflow
+        run: |
+          curl --fail --location --silent --show-error --max-time 60 "https://raw.githubusercontent.com/KhanCold/openclaw/${GITHUB_SHA}/.github/workflows/proof-oc-path-frontmatter-sequence.yml" --output .github/workflows/proof-oc-path-frontmatter-sequence.yml
+          pnpm check:workflows
+      - name: Build actual product runtime
+        run: /usr/bin/time -v pnpm build:runtime
+      - name: Establish real CLI baseline failure and passing controls
+        run: |
+          cat > /tmp/oc-path-frontmatter-driver.mjs <<'PATH_PROOF'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          import { createRequire } from 'node:module';
+          import { spawnSync } from 'node:child_process';
+
+          const require = createRequire(path.join(process.cwd(), 'package.json'));
+          const { parseDocument } = require('yaml');
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-path-sequence-'));
+          const state = path.join(root, 'state');
+          fs.mkdirSync(state);
+          const configPath = path.join(state, 'openclaw.json');
+          fs.writeFileSync(configPath, JSON.stringify({ plugins: { allow: ['oc-path'], entries: { 'oc-path': { enabled: true } } } }));
+          const env = { ...process.env, OPENCLAW_STATE_DIR: state, OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_DISABLE_UPDATE_CHECK: '1', NO_COLOR: '1' };
+          const failures = [];
+          const body = '\n## Tasks\n- Keep this item\n';
+
+          function cli(label, args) {
+            const r = spawnSync(process.execPath, ['openclaw.mjs', ...args], { env, encoding: 'utf8', timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+            fs.writeFileSync(path.join(root, `${label}.stdout`), r.stdout ?? '');
+            fs.writeFileSync(path.join(root, `${label}.stderr`), r.stderr ?? '');
+            console.log('PATH_CLI', JSON.stringify({ label, args, status: r.status, signal: r.signal }));
+            if (r.status !== 0 || r.error) {
+              console.log('PATH_CLI_DIAGNOSTIC', (r.stdout ?? '').slice(-6000), (r.stderr ?? '').slice(-6000));
+            }
+            assert.equal(r.error, undefined, label);
+            assert.equal(r.status, 0, `${label}: real CLI must reach the requested operation`);
+            return JSON.parse(r.stdout);
+          }
+
+          function inspect(label, bytes, value, keep) {
+            const match = /^---\r?\n([\s\S]*?)\r?\n---([\s\S]*)$/.exec(bytes);
+            assert.ok(match, `${label}: frontmatter delimiters`);
+            assert.equal(match[2], body, `${label}: preserve body bytes`);
+            const doc = parseDocument(match[1]);
+            const errors = doc.errors.map(e => e.code);
+            console.log('PATH_ARTIFACT', JSON.stringify({ label, frontmatter: match[1], yamlErrors: errors, bodyUnchanged: true }));
+            if (errors.length) {
+              failures.push({ label, errors });
+              return false;
+            }
+            assert.equal(doc.get('note'), value, `${label}: exact string value`);
+            if (keep !== undefined) assert.equal(doc.get('keep'), keep);
+            return true;
+          }
+
+          console.log('PATH_PROOF_IDENTITY', JSON.stringify({
+            productSha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(),
+            workflowSha: process.env.GITHUB_SHA,
+            driverSha256: createHash('sha256').update(fs.readFileSync(import.meta.filename)).digest('hex'),
+            fixtures: 'synthetic local Markdown only',
+          }));
+          cli('config', ['config', 'validate', '--json']);
+          for (const [label, value, insertion, missingFrontmatter] of [
+            ['edit-space', '- draft', false, false],
+            ['edit-tab', '-\tdraft', false, false],
+            ['edit-bare', '-', false, false],
+            ['insert-space', '- draft', true, false],
+            ['insert-new-frontmatter', '- draft', true, true],
+            ['control-hyphen-word', '-draft', false, false],
+            ['control-quotes', '"hello"', false, false],
+          ]) {
+            const file = path.join(root, `${label}.md`);
+            const before = missingFrontmatter ? body.slice(1) : `---\n${insertion ? '' : 'note: old\n'}keep: stable\n---${body}`;
+            fs.writeFileSync(file, before);
+            const target = `oc://fixture.md/[frontmatter]/${insertion ? '+note' : 'note'}`;
+            if (label === 'edit-space') {
+              const preview = cli(`${label}-preview`, ['path', 'set', '--json', '--dry-run', '--file', file, target, '--', value]);
+              assert.equal(preview.dryRun, true);
+              assert.equal(fs.readFileSync(file, 'utf8'), before, 'dry-run never writes');
+              inspect(`${label}-preview`, preview.bytes, value, 'stable');
+            }
+            const result = cli(`${label}-set`, ['path', 'set', '--json', '--file', file, target, '--', value]);
+            assert.equal(result.ok, true);
+            const valid = inspect(label, fs.readFileSync(file, 'utf8'), value, missingFrontmatter ? undefined : 'stable');
+            const read = cli(`${label}-read`, ['path', 'resolve', '--json', '--file', file, 'oc://fixture.md/[frontmatter]/note']);
+            assert.equal(read.match.valueText, value, `${label}: real CLI readback`);
+            if (valid && !missingFrontmatter) {
+              cli(`${label}-second-edit`, ['path', 'set', '--json', '--file', file, 'oc://fixture.md/[frontmatter]/keep', 'updated']);
+              assert.ok(inspect(`${label}-after-second-edit`, fs.readFileSync(file, 'utf8'), value, 'updated'));
+            }
+          }
+          console.log('PATH_PROOF_COMPLETE', JSON.stringify({ invalidYamlCases: failures, controls: 2, noProviderCalls: true }));
+          assert.equal(failures.length, 0, 'PATH_FRONTMATTER_LITERAL_CONTRACT: CLI writes valid YAML string leaves');
+          PATH_PROOF
+          git diff --exit-code
+          set +e
+          node /tmp/oc-path-frontmatter-driver.mjs > /tmp/oc-path-proof.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/oc-path-proof.log
+          test "$result" = 1
+          python3 - <<'CHECK_BASELINE'
+          import json,pathlib
+          log=pathlib.Path('/tmp/oc-path-proof.log').read_text()
+          lines=[line.removeprefix('PATH_PROOF_COMPLETE ') for line in log.splitlines() if line.startswith('PATH_PROOF_COMPLETE ')]
+          assert len(lines)==1
+          result=json.loads(lines[0])
+          assert {x['label'] for x in result['invalidYamlCases']} == {'edit-space-preview','edit-space','edit-tab','edit-bare','insert-space','insert-new-frontmatter'}, result
+          assert result['controls']==2 and result['noProviderCalls']
+          assert 'PATH_FRONTMATTER_LITERAL_CONTRACT' in log
+          print('BASELINE_RED_CONFIRMED: six actual CLI artifact failures; two controls passed')
+          CHECK_BASELINE
