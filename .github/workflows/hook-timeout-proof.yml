@@ -1,0 +1,106 @@
+name: Hook timeout proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: Test-only commit SHA
+        required: true
+        type: string
+      head_sha:
+        description: Fixed commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Validate immutable refs
+        env:
+          BASELINE_SHA: ${{ inputs.baseline_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+  prove:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [baseline, fixed]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      OPENCLAW_VITEST_RUNTIME: node
+      NPM_CONFIG_USERCONFIG: /dev/null
+      NPM_CONFIG_GLOBALCONFIG: /dev/null
+      GH_TOKEN: ""
+      GITHUB_TOKEN: ""
+    steps:
+      - name: Checkout selected immutable commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.phase == 'baseline' && inputs.baseline_sha || inputs.head_sha }}
+          fetch-depth: 3
+          persist-credentials: false
+
+      - name: Verify selected commit and ancestry
+        env:
+          PHASE: ${{ matrix.phase }}
+          BASELINE_SHA: ${{ inputs.baseline_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          selected="$BASELINE_SHA"
+          if [[ "$PHASE" == fixed ]]; then selected="$HEAD_SHA"; fi
+          test "$(git rev-parse HEAD)" = "$selected"
+          if [[ "$PHASE" == fixed ]]; then
+            test "$(git rev-parse HEAD^)" = "$BASELINE_SHA"
+            git diff HEAD^^ HEAD --check
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+
+      - name: Install dependencies without lifecycle scripts or caches
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts --no-audit --no-fund pnpm@12.11.1
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Prove unchanged-source regression
+        if: matrix.phase == 'baseline'
+        run: |
+          set -euo pipefail
+          set +e
+          node scripts/run-vitest.mjs src/gateway/server.hooks.test.ts --maxWorkers=1 -t 'ignores hook timeouts that floor to zero' > /tmp/hook-timeout-baseline.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/hook-timeout-baseline.log
+          test "$status" -ne 0
+          grep -Fq 'expected +0 to be undefined' /tmp/hook-timeout-baseline.log
+
+      - name: Prove fixed HTTP path and controls
+        if: matrix.phase == 'fixed'
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs src/gateway/server.hooks.test.ts src/gateway/hooks.test.ts --maxWorkers=1
+
+      - name: Check changed source and types
+        if: matrix.phase == 'fixed'
+        run: |
+          set -euo pipefail
+          pnpm exec oxfmt --check src/gateway/hooks.ts src/gateway/server.hooks.test.ts
+          pnpm exec oxlint src/gateway/hooks.ts src/gateway/server.hooks.test.ts
+          pnpm tsgo:core
+          pnpm tsgo:core:test
