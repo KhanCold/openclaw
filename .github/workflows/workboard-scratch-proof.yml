@@ -36,14 +36,14 @@ jobs:
           path: subject
           persist-credentials: false
           fetch-depth: 3
-      - name: Verify source revision and install proof harness
+      - name: Verify source revision and install CLI proof harness
         shell: bash
         run: |
           set -euo pipefail
           actual="$(git -C subject rev-parse HEAD)"
           test "$actual" = "${{ matrix.subject_sha }}"
-          install -D proof/src/gateway/gateway.server-workboard-scratch-prompt.test.ts \
-            subject/src/gateway/gateway.server-workboard-scratch-prompt.test.ts
+          install -D proof/scripts/workboard-scratch-cli-proof.mjs \
+            subject/scripts/workboard-scratch-cli-proof.mjs
           printf 'Source SHA: %s\n' "$actual"
           printf 'Proof harness SHA: %s\n' "$(git -C proof rev-parse HEAD)"
       - name: Set up pinned Node
@@ -57,51 +57,10 @@ jobs:
           npm install --global pnpm@12.11.1
           test "$(pnpm --version)" = "12.11.1"
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Prove fixed baseline fails only on retained scratch path
-        if: matrix.expected == 'baseline'
+      - name: Prove CLI-started Gateway worktree-to-scratch behavior
         working-directory: subject
         shell: bash
+        env:
+          WORKBOARD_PROOF_EXPECTED: ${{ matrix.expected }}
         run: |
-          set +e
-          node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.gateway-server.config.ts \
-            src/gateway/gateway.server-workboard-scratch-prompt.test.ts \
-            --maxWorkers=1 \
-            --reporter=json \
-            --outputFile="$RUNNER_TEMP/workboard-entrypoint-baseline.json"
-          test_status=$?
-          set -e
-          if [[ "$test_status" -eq 0 ]]; then
-            echo 'Baseline unexpectedly passed the shipped-entry-point proof.' >&2
-            exit 1
-          fi
-          node --input-type=module - "$RUNNER_TEMP/workboard-entrypoint-baseline.json" <<'NODE'
-          import { readFileSync } from "node:fs";
-          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          const results = report.testResults ?? [];
-          const failed = results.flatMap((result) =>
-            (result.assertionResults ?? []).filter((assertion) => assertion.status === "failed"),
-          );
-          const failureText = failed.flatMap((assertion) => assertion.failureMessages ?? []).join("\n");
-          if (
-            report.numFailedTests !== 1 ||
-            report.numPassedTests !== 0 ||
-            results.length !== 1 ||
-            results[0].status !== "failed" ||
-            failed.length !== 1 ||
-            !failed[0].fullName.endsWith("ships a scratch worker prompt through the real Gateway Workboard dispatch path") ||
-            !failureText.includes("WORKBOARD_SCRATCH_RETAINED_PATH_PRESENT")
-          ) {
-            throw new Error("Baseline failed outside the intended retained-path assertion.");
-          }
-          console.log("Expected baseline red: real Gateway dispatch sent the synthetic retained path to the local model stub.");
-          NODE
-      - name: Prove fixed candidate omits retained path at the Gateway entry point
-        if: matrix.expected == 'candidate'
-        working-directory: subject
-        shell: bash
-        run: |
-          node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.gateway-server.config.ts \
-            src/gateway/gateway.server-workboard-scratch-prompt.test.ts \
-            --maxWorkers=1
+          node scripts/workboard-scratch-cli-proof.mjs
