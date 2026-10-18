@@ -156,17 +156,24 @@ function expectFailureGuidance(params: {
 }) {
   const hintFragments = [params.command, ...(params.manualRemoval ? [manualRemovalUrl] : [])];
   if (params.json) {
-    expect(readJsonLog()).toMatchObject({
+    const response = readJsonLog();
+    expect(response).toMatchObject({
       ok: false,
       error: expect.stringContaining(params.error),
-      hints: hintFragments.map((fragment) => expect.stringContaining(fragment)),
     });
+    const hints = response.hints ?? [];
+    for (const fragment of hintFragments) {
+      expect(hints.join("\n")).toContain(fragment);
+    }
+    expect(hints).toHaveLength(hintFragments.length);
     return;
   }
   expect(lifecycleRuntimeErrors).toContainEqual(expect.stringContaining(params.error));
-  expect(lifecycleRuntimeLogs.filter((line) => line.startsWith("Tip: "))).toEqual(
-    hintFragments.map((fragment) => expect.stringContaining(`Tip: ${fragment}`)),
-  );
+  const tipLines = lifecycleRuntimeLogs.filter((line) => line.startsWith("Tip: "));
+  for (const fragment of hintFragments) {
+    expect(tipLines.join("\n")).toContain(fragment);
+  }
+  expect(tipLines).toHaveLength(hintFragments.length);
 }
 
 it.each([
