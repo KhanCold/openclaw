@@ -1,151 +1,39 @@
-name: Workboard Scratch Prompt Proof
-
+name: Issue 176223 Isolated Proof
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   baseline:
-    name: Test-only baseline must fail at the scratch prompt assertion
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 12
     steps:
-      - name: Checkout fixed test-only baseline
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: dd5cd23457c80a7281d242b38ea1f22e0df457e3
-          fetch-depth: 3
+          ref: f01290d3ade52c2b240e9578957db86db1064040
           persist-credentials: false
-      - name: Verify baseline checkout SHA
-        shell: bash
-        run: test "$(git rev-parse HEAD)" = "dd5cd23457c80a7281d242b38ea1f22e0df457e3"
-      - name: Set up pinned Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24.21.0"
-      - name: Install pinned pnpm and frozen dependencies without scripts or cache
-        shell: bash
+          package-manager-cache: false
+      - name: Install frozen physical dependencies
         run: |
           npm install --global pnpm@12.11.1
-          test "$(pnpm --version)" = "12.11.1"
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Verify the precise baseline regression fails for the retained path
-        shell: bash
+      - name: Prove expected baseline failure at actual tool entry
+        env:
+          OPENCLAW_VITEST_RUNTIME: node
         run: |
           set +e
-          node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.extension-database-workers.config.ts \
-            extensions/workboard/src/dispatcher.test.ts \
-            -t 'keeps a retained path out of the actual scratch worker prompt' \
-            --maxWorkers=1 \
-            --reporter=json \
-            --outputFile="$RUNNER_TEMP/workboard-baseline.json"
-          test_status=$?
+          pnpm test extensions/workboard/src/tools.test.ts --maxWorkers=1 --testNamePattern 'refreshes diagnostics without making inactive cards look edited' > "$RUNNER_TEMP/baseline.log" 2>&1
+          status=$?
           set -e
-          if [[ "$test_status" -eq 0 ]]; then
-            echo 'Baseline unexpectedly passed the regression.' >&2
-            exit 1
-          fi
-          node --input-type=module - "$RUNNER_TEMP/workboard-baseline.json" <<'NODE'
-          import { readFileSync } from "node:fs";
-          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          const results = report.testResults;
-          const expectedName = "keeps a retained path out of the actual scratch worker prompt";
-          const expectedPath = "/workspace/repository";
-          const failed = results.flatMap((result) =>
-            result.assertionResults.filter((assertion) => assertion.status === "failed"),
-          );
-          const failureText = failed.flatMap((assertion) => assertion.failureMessages).join("\n");
-          const expectedPathMessage = /not to contain ['"]\/workspace\/repository['"]/s;
-          console.log(
-            "Baseline report diagnostic:",
-            JSON.stringify({
-              numFailedTests: report.numFailedTests,
-              numPassedTests: report.numPassedTests,
-              testResults: results.map((result) => ({
-                name: result.name,
-                status: result.status,
-                message: result.message,
-                assertions: result.assertionResults.map((assertion) => ({
-                  fullName: assertion.fullName,
-                  status: assertion.status,
-                  failureMessages: assertion.failureMessages,
-                })),
-              })),
-            }),
-          );
-          if (
-            report.numFailedTests !== 1 ||
-            report.numPassedTests !== 0 ||
-            results.length !== 1 ||
-            !results[0].name.endsWith("extensions/workboard/src/dispatcher.test.ts") ||
-            results[0].status !== "failed" ||
-            (results[0].message ?? "").trim() !== "" ||
-            failed.length !== 1 ||
-            !failed[0].fullName.endsWith(expectedName) ||
-            !expectedPathMessage.test(failureText)
-          ) {
-            throw new Error("Baseline failed outside the intended retained-path assertion.");
-          }
-          console.log("Expected baseline failure:", failed[0].fullName);
-          console.log("Failure is the not.toContain assertion for", expectedPath);
-          NODE
-
-  candidate:
-    name: Candidate owner tests and scoped static checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    steps:
-      - name: Checkout fixed candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 65ec5109d48f1a77f168bb99776a1ae7bf6a56a1
-          fetch-depth: 3
-          persist-credentials: false
-      - name: Verify candidate checkout SHA
-        shell: bash
-        run: test "$(git rev-parse HEAD)" = "65ec5109d48f1a77f168bb99776a1ae7bf6a56a1"
-      - name: Set up pinned Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24.21.0"
-      - name: Install pinned pnpm and frozen dependencies without scripts or cache
-        shell: bash
-        run: |
-          npm install --global pnpm@12.11.1
-          test "$(pnpm --version)" = "12.11.1"
-          pnpm install --frozen-lockfile --ignore-scripts
-      - name: Check exact candidate diff
-        shell: bash
-        run: |
-          git diff --check 5cb47d16571b59cfadd57bd7928c30df857478b0 HEAD
-      - name: Run dispatcher and SQLite store owner tests
-        shell: bash
-        run: |
-          node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.extension-database-workers.config.ts \
-            extensions/workboard/src/dispatcher.test.ts \
-            extensions/workboard/src/store.test.ts \
-            --maxWorkers=1
-      - name: Run changed-scope static checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          base=5cb47d16571b59cfadd57bd7928c30df857478b0
-          git cat-file -e "$base^{commit}"
-          git merge-base --is-ancestor "$base" HEAD
-          expected_paths=$'extensions/workboard/src/dispatcher.test.ts\nextensions/workboard/src/store-card-helpers.ts\nextensions/workboard/src/store.test.ts'
-          actual_paths="$(git diff --name-only "$base"...HEAD)"
-          printf 'Changed candidate paths:\n%s\n' "$actual_paths"
-          if [[ "$actual_paths" != "$expected_paths" ]]; then
-            echo 'Candidate path scope differs from the reviewed three-file change.' >&2
-            exit 1
-          fi
-          started=$SECONDS
-          node scripts/check-changed.mjs \
-            --base "$base" \
-            --head HEAD \
-            --timed
-          printf 'Changed-scope check elapsed: %ss\n' "$((SECONDS - started))"
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$status" -eq 1
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          text = (Path(os.environ['RUNNER_TEMP']) / 'baseline.log').read_text()
+          assert 'AssertionError' in text and 'updatedAt' in text, 'not the expected product failure'
+          assert '1 failed' in text, 'expected one failed regression'
+          PY
