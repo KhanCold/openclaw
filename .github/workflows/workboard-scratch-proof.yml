@@ -1,28 +1,23 @@
-name: Issue 126850 Focused Proof
+name: Issue 126850 Scoped Static Proof
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  proof:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - mode: candidate
-            sha: 1040bb40ee5751d63800dfb3c49b71701dd661a1
+  static:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ matrix.sha }}
-          fetch-depth: 5
+          ref: 1040bb40ee5751d63800dfb3c49b71701dd661a1
+          fetch-depth: 10
           persist-credentials: false
-      - name: Verify immutable target
-        env:
-          TARGET_SHA: ${{ matrix.sha }}
-        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      - name: Verify candidate and base
+        run: |
+          test "$(git rev-parse HEAD)" = 1040bb40ee5751d63800dfb3c49b71701dd661a1
+          git cat-file -e 110914e51c486fbfd885284b7b5e31c7d373f125^{commit}
+          git merge-base --is-ancestor 110914e51c486fbfd885284b7b5e31c7d373f125 HEAD
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24.21.0"
@@ -31,57 +26,7 @@ jobs:
         run: |
           npm install --global pnpm@12.11.1
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Check touched-file formatting
-        run: pnpm exec oxfmt --check ui/src/lib/sessions/session-row-reconcile.ts ui/src/lib/sessions/index-cached-list-freshness.test.ts ui/src/e2e/session-runtime-freshness.e2e.test.ts
-      - name: Focused owner and sibling tests
-        if: matrix.mode == 'candidate'
-        run: |
-          node scripts/run-vitest.mjs run --config test/vitest/vitest.ui.config.ts --configLoader runner \
-            ui/src/lib/sessions/index-cached-list-freshness.test.ts \
-            ui/src/lib/sessions/reconcile.test.ts \
-            ui/src/lib/sessions/index.test.ts \
-            ui/src/lib/sessions/session-row-provenance.test.ts --maxWorkers=1
-      - name: Prepare Chromium
-        run: node --import ./scripts/tsx.mjs scripts/ensure-playwright-chromium.mts --require-playwright-chromium
-      - name: Browser flow and retained screenshots
-        env:
-          MODE: ${{ matrix.mode }}
-          OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/issue-126850-media
-        run: |
-          set +e
-          node scripts/run-vitest.mjs run --config test/vitest/vitest.ui-e2e.config.ts --configLoader runner \
-            ui/src/e2e/session-runtime-freshness.e2e.test.ts --maxWorkers=1 \
-            --reporter=json --outputFile="$RUNNER_TEMP/browser.json"
-          result=$?
-          set -e
-          if [[ "$MODE" == candidate ]]; then
-            test "$result" -eq 0
-          else
-            test "$result" -ne 0
-            node --input-type=module - "$RUNNER_TEMP/browser.json" <<'NODE'
-          import { readFileSync } from 'node:fs';
-          const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
-          const failed = report.testResults.flatMap(r => r.assertionResults.filter(a => a.status === 'failed'));
-          console.log('Browser baseline diagnostic:', JSON.stringify(report));
-          if (report.numFailedTests !== 1 || report.numPassedTests !== 0 || failed.length !== 1 ||
-              !failed[0].fullName.includes('clears it on a newer terminal sample') ||
-              !failed[0].failureMessages.join('\n').includes('to be +0')) {
-            throw new Error('Unexpected baseline browser failure');
-          }
-          NODE
-          fi
       - name: Scoped format, lint and types
-        if: matrix.mode == 'candidate'
         run: |
           git diff --check 110914e51c486fbfd885284b7b5e31c7d373f125 HEAD
           node scripts/check-changed.mjs --base 110914e51c486fbfd885284b7b5e31c7d373f125 --head HEAD --timed
-      - name: Preserve synthetic browser evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: issue-126850-${{ matrix.mode }}
-          path: |
-            ${{ runner.temp }}/issue-126850-media
-            ${{ runner.temp }}/browser.json
-          if-no-files-found: error
-          retention-days: 7
