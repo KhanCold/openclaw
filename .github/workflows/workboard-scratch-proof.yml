@@ -18,13 +18,19 @@ jobs:
           ref: dd5cd23457c80a7281d242b38ea1f22e0df457e3
           fetch-depth: 3
           persist-credentials: false
-      - name: Set up Node and dependencies without cache
-        uses: ./.github/actions/setup-node-env
+      - name: Verify baseline checkout SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "dd5cd23457c80a7281d242b38ea1f22e0df457e3"
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.x"
-          install-bun: "false"
-          cache-mode: "off"
-          dependency-cache: "false"
+          node-version: "24.21.0"
+      - name: Install pinned pnpm and frozen dependencies without scripts or cache
+        shell: bash
+        run: |
+          npm install --global pnpm@12.11.1
+          test "$(pnpm --version)" = "12.11.1"
+          pnpm install --frozen-lockfile --ignore-scripts
       - name: Verify the precise baseline regression fails for the retained path
         shell: bash
         run: |
@@ -45,19 +51,29 @@ jobs:
           node --input-type=module - "$RUNNER_TEMP/workboard-baseline.json" <<'NODE'
           import { readFileSync } from "node:fs";
           const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          const assertions = report.testResults.flatMap((result) => result.assertionResults);
+          const results = report.testResults;
           const expectedName = "keeps a retained path out of the actual scratch worker prompt";
+          const expectedPath = "/workspace/repository";
+          const failed = results.flatMap((result) =>
+            result.assertionResults.filter((assertion) => assertion.status === "failed"),
+          );
+          const failureText = failed.flatMap((assertion) => assertion.failureMessages).join("\n");
+          const expectedPathMessage = /not to contain ['"]\/workspace\/repository['"]/s;
           if (
             report.numFailedTests !== 1 ||
-            assertions.length !== 1 ||
-            assertions[0].status !== "failed" ||
-            !assertions[0].fullName.includes(expectedName) ||
-            !assertions[0].failureMessages.join("\n").includes("/workspace/repository")
+            report.numPassedTests !== 0 ||
+            results.length !== 1 ||
+            !results[0].name.endsWith("extensions/workboard/src/dispatcher.test.ts") ||
+            results[0].status !== "failed" ||
+            (results[0].message ?? "").trim() !== "" ||
+            failed.length !== 1 ||
+            !failed[0].fullName.endsWith(expectedName) ||
+            !expectedPathMessage.test(failureText)
           ) {
             throw new Error("Baseline failed outside the intended retained-path assertion.");
           }
-          console.log("Expected baseline failure:", assertions[0].fullName);
-          console.log("Retained path appears in the failed assertion message.");
+          console.log("Expected baseline failure:", failed[0].fullName);
+          console.log("Failure is the not.toContain assertion for", expectedPath);
           NODE
 
   candidate:
@@ -71,28 +87,40 @@ jobs:
           ref: 65ec5109d48f1a77f168bb99776a1ae7bf6a56a1
           fetch-depth: 3
           persist-credentials: false
-      - name: Set up Node and dependencies without cache
-        uses: ./.github/actions/setup-node-env
+      - name: Verify candidate checkout SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "65ec5109d48f1a77f168bb99776a1ae7bf6a56a1"
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.x"
-          install-bun: "false"
-          cache-mode: "off"
-          dependency-cache: "false"
+          node-version: "24.21.0"
+      - name: Install pinned pnpm and frozen dependencies without scripts or cache
+        shell: bash
+        run: |
+          npm install --global pnpm@12.11.1
+          test "$(pnpm --version)" = "12.11.1"
+          pnpm install --frozen-lockfile --ignore-scripts
       - name: Check exact candidate diff
         shell: bash
         run: |
           git diff --check 5cb47d16571b59cfadd57bd7928c30df857478b0 HEAD
-      - name: Run dispatcher and SQLite store owner tests
+      - name: Run changed-scope tests and static checks
         shell: bash
         run: |
-          node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.unit.config.ts \
-            extensions/workboard/src/dispatcher.test.ts \
-            extensions/workboard/src/store.test.ts \
-            --maxWorkers=1
-      - name: Check changed formatting, lint, and types
-        shell: bash
-        run: |
+          set -euo pipefail
+          base=5cb47d16571b59cfadd57bd7928c30df857478b0
+          git cat-file -e "$base^{commit}"
+          git merge-base --is-ancestor "$base" HEAD
+          expected_paths=$'extensions/workboard/src/dispatcher.test.ts\nextensions/workboard/src/store-card-helpers.ts\nextensions/workboard/src/store.test.ts'
+          actual_paths="$(git diff --name-only "$base"...HEAD)"
+          printf 'Changed candidate paths:\n%s\n' "$actual_paths"
+          if [[ "$actual_paths" != "$expected_paths" ]]; then
+            echo 'Candidate path scope differs from the reviewed three-file change.' >&2
+            exit 1
+          fi
+          started=$SECONDS
           node scripts/check-changed.mjs \
-            --base 5cb47d16571b59cfadd57bd7928c30df857478b0 \
-            --head HEAD
+            --base "$base" \
+            --head HEAD \
+            --timed
+          printf 'Changed-scope check elapsed: %ss\n' "$((SECONDS - started))"
