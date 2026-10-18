@@ -13,7 +13,7 @@ import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts"
 const suite = createControlUiE2eSuite({ name: "Session runtime freshness" });
 
 suite.define(() => {
-  it("keeps an unopened thread's spinner through a cached list and clears it on a newer terminal sample", async () => {
+  it("keeps a spinner through cached rows and clears it on a newer terminal sample", async () => {
     const artifactDir = createControlUiE2eArtifactDir("session-runtime-freshness");
     await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
       const now = Date.now();
