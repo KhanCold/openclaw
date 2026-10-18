@@ -57,9 +57,9 @@ jobs:
           npm install --global pnpm@12.11.1
           test "$(pnpm --version)" = "12.11.1"
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Build the CLI from the fixed source revision
+      - name: Build the CLI and runtime assets from the fixed source revision
         working-directory: subject
-        run: pnpm build
+        run: pnpm build:docker
       - name: Prove CLI-started Gateway worktree-to-scratch behavior
         working-directory: subject
         shell: bash

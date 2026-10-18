@@ -118,7 +118,8 @@ try {
   let switched;
   try {
     await fixtureClient.request("workboard.cards.update", { id: cardId, patch: { workspace: { kind: "worktree", path: retainedPath, branch: "main" } } });
-    switched = await fixtureClient.request("workboard.cards.update", { id: cardId, patch: { workspace: { kind: "scratch" } } });
+    const updateResult = await fixtureClient.request("workboard.cards.update", { id: cardId, patch: { workspace: { kind: "scratch" } } });
+    switched = updateResult.card;
   } catch (error) {
     throw new Error(`Gateway Workboard workspace switch failed: ${redactMessage(error)}`);
   }
