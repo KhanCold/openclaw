@@ -99,11 +99,18 @@ async function failServiceNotLoaded(
   );
 }
 
-function renderServiceStatusHints(serviceNoun: string): string[] {
+function renderServiceStatusHints(serviceNoun: string, stillLoadedAfterUninstall = false): string[] {
   const serviceName = serviceNoun.toLowerCase();
   const deep = serviceName === "gateway" ? " --deep" : "";
   const command = formatCliCommand(`openclaw ${serviceName} status${deep}`);
-  return [`Inspect the service with ${command} to determine its state and recovery path.`];
+  return [
+    `Inspect the service with ${command} to determine its state and recovery path.`,
+    ...(stillLoadedAfterUninstall && serviceName === "gateway"
+      ? [
+          "If it remains loaded, follow the platform-specific manual service removal steps at https://docs.openclaw.ai/install/uninstall#manual-service-removal-cli-not-installed.",
+        ]
+      : []),
+  ];
 }
 
 async function resolveServiceLoadedOrFail(
@@ -193,7 +200,7 @@ export async function runServiceUninstall(params: {
   if (loaded && params.assertNotLoadedAfterUninstall) {
     fail(
       `${params.serviceNoun} service still loaded after uninstall.`,
-      renderServiceStatusHints(params.serviceNoun),
+      renderServiceStatusHints(params.serviceNoun, true),
     );
     return;
   }
