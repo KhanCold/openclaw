@@ -1,0 +1,89 @@
+name: Focused lifecycle static follow-up
+
+on:
+  push:
+    branches: [proof/176268-focused-safe]
+    paths: [.github/workflows/zz-176268-static-followup.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle-static:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      COREPACK_HOME: /tmp/openclaw-static-corepack
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      COREPACK_ENABLE_AUTO_PIN: "0"
+      PROOF_BASE_SHA: b2e85fadecb2d19aa4a501e9729b508c3975eb22
+      PROOF_CANDIDATE_SHA: b47ea6f50d8c525c9b17f49f0aceb7801cf96cbc
+    steps:
+      - name: Fetch immutable base and candidate sources
+        run: |
+          set -euo pipefail
+          for entry in "base:$PROOF_BASE_SHA" "candidate:$PROOF_CANDIDATE_SHA"; do
+            name="${entry%%:*}"
+            sha="${entry#*:}"
+            target="$RUNNER_TEMP/openclaw-$name"
+            git init "$target"
+            git -C "$target" fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git "$sha"
+            git -C "$target" checkout --detach FETCH_HEAD
+            test "$(git -C "$target" rev-parse HEAD)" = "$sha"
+          done
+          test "$(git -C "$RUNNER_TEMP/openclaw-candidate" rev-parse HEAD:src/cli/daemon-cli/lifecycle-core.test.ts)" = daf16d8b492a80d085137486bb60e34022e0ee10
+          test "$(git -C "$RUNNER_TEMP/openclaw-candidate" rev-parse HEAD:src/cli/daemon-cli/test-helpers/lifecycle-core-harness.ts)" = 1d72286176b22400917bb03a5b13eef82a84a29d
+      - name: Setup standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      - name: Setup pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          expected_package_manager="pnpm@12.11.1+sha512.5b0e3288239a7ea4155d2094f547066e122a1376b3cd785a680c9112e116913e64aaaecf20dd83cc34030fa67013f5c5511f9cf430dd8384188b4c60b8a2ad1e"
+          test "$(node -p "require('./package.json').packageManager")" = "$expected_package_manager"
+          corepack prepare "$expected_package_manager" --activate
+          test "$(pnpm --version)" = "12.11.1"
+      - name: Install base dependencies without lifecycle scripts
+        working-directory: ${{ runner.temp }}/openclaw-base
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install candidate dependencies without lifecycle scripts
+        working-directory: ${{ runner.temp }}/openclaw-candidate
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Compare baseline and candidate unused-export findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          (cd "$RUNNER_TEMP/openclaw-base" && pnpm deadcode:exports) > "$RUNNER_TEMP/base-deadcode.log" 2>&1
+          base_status=$?
+          (cd "$RUNNER_TEMP/openclaw-candidate" && pnpm deadcode:exports) > "$RUNNER_TEMP/candidate-deadcode.log" 2>&1
+          candidate_status=$?
+          set -e
+          base_findings="$RUNNER_TEMP/base-deadcode-findings.txt"
+          candidate_findings="$RUNNER_TEMP/candidate-deadcode-findings.txt"
+          rg '^  src/logging/[^:]+: ' "$RUNNER_TEMP/base-deadcode.log" | sort > "$base_findings"
+          rg '^  src/logging/[^:]+: ' "$RUNNER_TEMP/candidate-deadcode.log" | sort > "$candidate_findings"
+          echo "base deadcode:exports exit=$base_status"
+          cat "$base_findings"
+          echo "candidate deadcode:exports exit=$candidate_status"
+          cat "$candidate_findings"
+          diff -u "$base_findings" "$candidate_findings"
+          test "$base_status" -eq "$candidate_status"
+          test "$base_status" -ne 0
+          test "$(wc -l < "$candidate_findings")" -eq 7
+          echo "The seven production export findings are identical on base and candidate."
+      - name: Check formatting of changed source files
+        working-directory: ${{ runner.temp }}/openclaw-candidate
+        run: pnpm format:check -- src/cli/daemon-cli/lifecycle-core.ts src/cli/daemon-cli/lifecycle-core.test.ts src/cli/daemon-cli/test-helpers/lifecycle-core-harness.ts
+      - name: Lint changed source files
+        working-directory: ${{ runner.temp }}/openclaw-candidate
+        run: node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/cli/daemon-cli/lifecycle-core.ts src/cli/daemon-cli/lifecycle-core.test.ts src/cli/daemon-cli/test-helpers/lifecycle-core-harness.ts
+      - name: Check candidate diff whitespace
+        working-directory: ${{ runner.temp }}/openclaw-candidate
+        run: |
+          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git "$PROOF_BASE_SHA"
+          git diff --check "$PROOF_BASE_SHA"...HEAD
