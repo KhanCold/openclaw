@@ -131,6 +131,8 @@ function isOlderSessionSnapshot(
 ): boolean {
   if (
     incoming.hasActiveRun === false &&
+    incoming.sessionId !== undefined &&
+    incoming.sessionId === existing?.sessionId &&
     incoming.snapshotAt !== undefined &&
     existing?.snapshotAt !== undefined &&
     incoming.snapshotAt > existing.snapshotAt

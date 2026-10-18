@@ -95,6 +95,21 @@ it("admits a newer terminal session sample when its persisted timestamp moves ba
 
   emitRuntime(harness, {
     ...running,
+    sessionId: "retired-session",
+    updatedAt: 150,
+    snapshotAt: 500,
+    hasActiveRun: false,
+    activeRunIds: [],
+    status: "done",
+  });
+  expect(sessions.state.result?.sessions[0]).toMatchObject({
+    sessionId: running.sessionId,
+    hasActiveRun: true,
+    status: "running",
+  });
+
+  emitRuntime(harness, {
+    ...running,
     updatedAt: 150,
     snapshotAt: 250,
     hasActiveRun: false,
