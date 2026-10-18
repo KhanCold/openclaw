@@ -9,6 +9,7 @@ import {
   lifecycleTestRuntime,
   resetLifecycleRuntimeLogs,
   resetLifecycleServiceMocks,
+  lifecycleRuntimeErrors,
   lifecycleRuntimeLogs,
   service,
   stubEmptyGatewayEnv,
@@ -85,12 +86,8 @@ vi.mock("./lifecycle-audit.js", () => ({
 
 // The runtime mock consumes the initialized lifecycle harness, not an early static import.
 const { ExitError } = await import("../../runtime.js");
-const {
-  runServiceRestart,
-  runServiceStart,
-  runServiceStop,
-  runServiceUninstall,
-} = await import("./lifecycle-core.js");
+const { runServiceRestart, runServiceStart, runServiceStop, runServiceUninstall } =
+  await import("./lifecycle-core.js");
 type StartArgs = Parameters<typeof runServiceStart>[0];
 type RestartArgs = Parameters<typeof runServiceRestart>[0];
 
@@ -148,68 +145,129 @@ async function expectReportedExit(code: number, run: () => Promise<unknown>) {
   );
 }
 
-const serviceStatusHint = expect.stringContaining("openclaw gateway status --deep");
+const manualRemovalUrl =
+  "https://docs.openclaw.ai/install/uninstall#manual-service-removal-cli-not-installed";
+
+function expectFailureGuidance(params: {
+  json: boolean;
+  error: string;
+  command: string;
+  manualRemoval?: boolean;
+}) {
+  const hintFragments = [params.command, ...(params.manualRemoval ? [manualRemovalUrl] : [])];
+  if (params.json) {
+    expect(readJsonLog()).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(params.error),
+      hints: hintFragments.map((fragment) => expect.stringContaining(fragment)),
+    });
+    return;
+  }
+  expect(lifecycleRuntimeErrors).toContainEqual(expect.stringContaining(params.error));
+  expect(lifecycleRuntimeLogs.filter((line) => line.startsWith("Tip: "))).toEqual(
+    hintFragments.map((fragment) => expect.stringContaining(`Tip: ${fragment}`)),
+  );
+}
 
 it.each([
-  ["stop failure", () => runServiceStop(createServiceRunArgs())],
-  [
-    "uninstall failure",
-    () =>
-      runServiceUninstall({
-        ...createServiceRunArgs(),
-        stopBeforeUninstall: false,
-        assertNotLoadedAfterUninstall: true,
-      }),
-  ],
-] as const)("includes an inspection hint on %s", async (_name, run) => {
+  ["stop failure", true],
+  ["stop failure", false],
+  ["uninstall failure", true],
+  ["uninstall failure", false],
+] as const)("includes an inspection hint on %s (json=%s)", async (action, json) => {
   service.stop.mockRejectedValueOnce(new Error("permission denied"));
   service.uninstall.mockRejectedValueOnce(new Error("permission denied"));
 
+  const run =
+    action === "stop failure"
+      ? () => runServiceStop({ ...createServiceRunArgs(), opts: { json } })
+      : () =>
+          runServiceUninstall({
+            ...createServiceRunArgs(),
+            opts: { json },
+            stopBeforeUninstall: false,
+            assertNotLoadedAfterUninstall: true,
+          });
   await expectReportedExit(1, run);
 
-  expect(readJsonLog()).toMatchObject({
-    ok: false,
-    error: expect.stringContaining("permission denied"),
-    hints: [serviceStatusHint],
+  expectFailureGuidance({
+    json,
+    error: "permission denied",
+    command: "openclaw gateway status --deep",
   });
 });
 
-it("includes an inspection hint when a stop recovery callback fails", async () => {
-  service.isLoaded.mockResolvedValueOnce(false);
+it.each([true, false])(
+  "includes an inspection hint when a stop recovery callback fails (json=%s)",
+  async (json) => {
+    service.isLoaded.mockResolvedValueOnce(false);
 
-  await expectReportedExit(1, () =>
-    runServiceStop({
-      ...createServiceRunArgs(),
-      onNotLoaded: async () => {
-        throw new Error("recovery failed");
-      },
-    }),
-  );
+    await expectReportedExit(1, () =>
+      runServiceStop({
+        ...createServiceRunArgs(),
+        opts: { json },
+        onNotLoaded: async () => {
+          throw new Error("recovery failed");
+        },
+      }),
+    );
 
-  expect(readJsonLog()).toMatchObject({
-    action: "stop",
-    error: expect.stringContaining("recovery failed"),
-    hints: [serviceStatusHint],
-  });
-});
+    expectFailureGuidance({
+      json,
+      error: "recovery failed",
+      command: "openclaw gateway status --deep",
+    });
+  },
+);
 
-it("includes an inspection hint when the service remains loaded after uninstall", async () => {
-  service.isLoaded.mockResolvedValue(true);
+it.each([true, false])(
+  "uses the node status command for node service failures (json=%s)",
+  async (json) => {
+    service.stop.mockRejectedValueOnce(new Error("permission denied"));
 
-  await expectReportedExit(1, () =>
-    runServiceUninstall({
-      ...createServiceRunArgs(),
-      stopBeforeUninstall: false,
-      assertNotLoadedAfterUninstall: true,
-    }),
-  );
+    await expectReportedExit(1, () =>
+      runServiceStop({
+        serviceNoun: "Node",
+        service,
+        opts: { json },
+      }),
+    );
 
-  expect(readJsonLog()).toMatchObject({
-    action: "uninstall",
-    error: expect.stringContaining("service still loaded after uninstall"),
-    hints: [serviceStatusHint],
-  });
-});
+    expectFailureGuidance({
+      json,
+      error: "permission denied",
+      command: "openclaw node status",
+    });
+    if (json) {
+      expect(readJsonLog().hints?.[0]).not.toContain("--deep");
+    } else {
+      expect(lifecycleRuntimeLogs.join("\n")).not.toContain("--deep");
+    }
+  },
+);
+
+it.each([true, false])(
+  "includes inspection and manual removal hints when the service remains loaded after uninstall (json=%s)",
+  async (json) => {
+    service.isLoaded.mockResolvedValue(true);
+
+    await expectReportedExit(1, () =>
+      runServiceUninstall({
+        ...createServiceRunArgs(),
+        opts: { json },
+        stopBeforeUninstall: false,
+        assertNotLoadedAfterUninstall: true,
+      }),
+    );
+
+    expectFailureGuidance({
+      json,
+      error: "service still loaded after uninstall",
+      command: "openclaw gateway status --deep",
+      manualRemoval: true,
+    });
+  },
+);
 
 it.each(["native-start", "recovered-start", "repaired-start", "restart-repair-refused"] as const)(
   "preserves the single reported outcome through %s catch boundaries",

@@ -6,6 +6,7 @@ import { createCliRuntimeCapture } from "../../test-runtime-capture.js";
 
 const lifecycleRuntimeCapture = createCliRuntimeCapture();
 export const lifecycleRuntimeLogs = lifecycleRuntimeCapture.runtimeLogs;
+export const lifecycleRuntimeErrors = lifecycleRuntimeCapture.runtimeErrors;
 type LifecycleRuntimeHarness = typeof lifecycleRuntimeCapture.defaultRuntime;
 
 type LifecycleServiceHarness = GatewayService & {
