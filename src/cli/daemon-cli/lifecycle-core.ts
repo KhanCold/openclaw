@@ -103,7 +103,7 @@ function renderServiceStatusHints(serviceNoun: string): string[] {
   const serviceName = serviceNoun.toLowerCase();
   const deep = serviceName === "gateway" ? " --deep" : "";
   const command = formatCliCommand(`openclaw ${serviceName} status${deep}`);
-  return [`Inspect the service state with ${command} before retrying.`];
+  return [`Inspect the service with ${command} to determine its state and recovery path.`];
 }
 
 async function resolveServiceLoadedOrFail(
