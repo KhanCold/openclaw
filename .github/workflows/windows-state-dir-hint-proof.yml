@@ -1,0 +1,50 @@
+name: Windows state-dir hint proof
+
+on:
+  push:
+    branches:
+      - proof/windows-state-dir-hint
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout fixed test-only baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5428b0214c7d7269eeaa919c7cdc441362ed7855
+          persist-credentials: false
+      - name: Check exact checkout
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne '5428b0214c7d7269eeaa919c7cdc441362ed7855') { throw 'Wrong baseline SHA' }
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+      - name: Install frozen dependencies without scripts
+        shell: pwsh
+        run: |
+          npm install --global pnpm@12.11.1
+          if ((pnpm --version) -ne '12.11.1') { throw 'Wrong pnpm version' }
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency install failed' }
+      - name: Verify native PowerShell baseline fails at the repair command assertion
+        shell: pwsh
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP 'state-dir-baseline.json'
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.cli-process.config.ts src/cli/state-dir-gateway-check.server.test.ts -t 'runs the suggested PowerShell repair command for a real Gateway mismatch' --maxWorkers=1 --reporter=json --outputFile="$reportPath"
+          $exit = $LASTEXITCODE
+          if ($exit -eq 0) { throw 'Baseline unexpectedly passed' }
+          if (-not (Test-Path $reportPath)) { throw 'Test never produced a report' }
+          $report = Get-Content -Raw $reportPath | ConvertFrom-Json
+          $tests = @($report.testResults | ForEach-Object { $_.assertionResults } | Where-Object { $_.status -eq 'failed' })
+          if ($report.numFailedTests -ne 1 -or $tests.Count -ne 1 -or $tests[0].fullName -notlike '*runs the suggested PowerShell repair command for a real Gateway mismatch') {
+            throw 'Baseline failed outside the precise Windows repair assertion'
+          }
+          Write-Output "Expected baseline failure: $($tests[0].fullName)"
+          Write-Output (($tests[0].failureMessages | Out-String).Substring(0, [Math]::Min(600, ($tests[0].failureMessages | Out-String).Length)))
