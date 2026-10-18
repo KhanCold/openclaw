@@ -36,10 +36,21 @@ describe("workboard tools", () => {
     const now = Math.max(...cards.map((card) => card.updatedAt)) + 2 * 24 * 60 * 60 * 1000;
     using clock = vi.spyOn(Date, "now").mockReturnValue(now);
     for (let observation = 1; observation <= 2; observation++) {
-      await list.execute(`diagnostics-${observation}`, { refreshDiagnostics: true });
+      const result = readPayload(
+        await list.execute(`diagnostics-${observation}`, { refreshDiagnostics: true }),
+      );
       for (const [index, card] of cards.entries()) {
         const current = await store.get(card.id);
         expect(current).toMatchObject({ updatedAt: card.updatedAt, events: card.events });
+        expect(result.cards).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: card.id,
+              updatedAt: card.updatedAt,
+              diagnostics: [expect.objectContaining({ count: observation })],
+            }),
+          ]),
+        );
         expect(current?.metadata?.diagnostics).toEqual([
           expect.objectContaining({
             kind: ["stranded_ready", "blocked_too_long", "missing_proof"][index],
@@ -53,7 +64,7 @@ describe("workboard tools", () => {
     }
     const edited = await store.update(cards[0]!.id, { notes: "Operator update" });
     expect(edited.updatedAt).toBeGreaterThan(cards[0]!.updatedAt);
-    expect(edited.events.length).toBeGreaterThan(cards[0]!.events.length);
+    expect(edited.events?.length).toBeGreaterThan(cards[0]!.events?.length ?? 0);
     await list.execute("after-edit", { refreshDiagnostics: true });
     expect((await store.get(edited.id))?.metadata?.diagnostics).toBeUndefined();
     const archived = await store.archive(cards[1]!.id, true);
