@@ -1,0 +1,91 @@
+name: Issue 126850 Baseline Red Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Newer terminal snapshot regression fails on upstream baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout fixed test-only baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 535cd1f41e007b30df6e11d382d0c7c555d35db0
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify baseline checkout SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "535cd1f41e007b30df6e11d382d0c7c555d35db0"
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Install pinned pnpm and frozen dependencies without scripts or cache
+        shell: bash
+        run: |
+          npm install --global pnpm@12.11.1
+          test "$(pnpm --version)" = "12.11.1"
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify the precise baseline regression fails
+        shell: bash
+        run: |
+          set +e
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.ui.config.ts \
+            --configLoader runner \
+            ui/src/lib/sessions/index-cached-list-freshness.test.ts \
+            -t 'admits a newer terminal session sample when its persisted timestamp moves backward' \
+            --maxWorkers=1 \
+            --reporter=json \
+            --outputFile="$RUNNER_TEMP/issue-126850-baseline.json"
+          test_status=$?
+          set -e
+          if [[ "$test_status" -eq 0 ]]; then
+            echo 'Baseline unexpectedly passed the regression.' >&2
+            exit 1
+          fi
+          node --input-type=module - "$RUNNER_TEMP/issue-126850-baseline.json" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const testName = "admits a newer terminal session sample when its persisted timestamp moves backward";
+          const results = report.testResults;
+          const failed = results.flatMap((result) =>
+            result.assertionResults.filter((assertion) => assertion.status === "failed"),
+          );
+          console.log(
+            "Baseline report diagnostic:",
+            JSON.stringify({
+              numFailedTests: report.numFailedTests,
+              numPassedTests: report.numPassedTests,
+              testResults: results.map((result) => ({
+                name: result.name,
+                status: result.status,
+                message: result.message,
+                assertions: result.assertionResults.map((assertion) => ({
+                  fullName: assertion.fullName,
+                  status: assertion.status,
+                  failureMessages: assertion.failureMessages,
+                })),
+              })),
+            }),
+          );
+          if (
+            report.numFailedTests !== 1 ||
+            report.numPassedTests !== 0 ||
+            results.length !== 1 ||
+            !results[0].name.endsWith("ui/src/lib/sessions/index-cached-list-freshness.test.ts") ||
+            results[0].status !== "failed" ||
+            (results[0].message ?? "").trim() !== "" ||
+            failed.length !== 1 ||
+            !failed[0].fullName.endsWith(testName)
+          ) {
+            throw new Error("Baseline failed outside the intended newer-terminal-sample assertion.");
+          }
+          console.log("Expected baseline failure:", failed[0].fullName);
+          NODE
