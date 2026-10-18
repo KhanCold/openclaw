@@ -1,0 +1,42 @@
+name: State-dir candidate scoped type proof
+
+on:
+  push:
+    branches:
+      - proof/windows-state-dir-static
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-types:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout fixed candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 1d52bd4309643ad3b3b72c0f708ead47b9319b17
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify candidate checkout and diff
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "1d52bd4309643ad3b3b72c0f708ead47b9319b17"
+          git diff --check e2a97a7e0dba6d16cc5833873c36497f4e575d47 HEAD
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+      - name: Install frozen dependencies without scripts
+        shell: bash
+        run: |
+          npm install --global pnpm@12.11.1
+          test "$(pnpm --version)" = "12.11.1"
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Typecheck core source
+        shell: bash
+        run: pnpm tsgo:core
+      - name: Typecheck owning config and CLI test graph
+        shell: bash
+        run: node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.config-cli.json --incremental
