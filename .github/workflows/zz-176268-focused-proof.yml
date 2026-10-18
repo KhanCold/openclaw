@@ -108,12 +108,6 @@ jobs:
             for (const test of selected) assert.equal(test.status, "passed");
           }
           NODE
-      - name: Check changed formatting, lint and types once
-        if: matrix.case == 'candidate'
-        run: pnpm check:changed --base "$PROOF_BASE_SHA" --head HEAD
-      - name: Check candidate diff whitespace
-        if: matrix.case == 'candidate'
-        run: git diff --check "$PROOF_BASE_SHA"...HEAD
       - name: Build source runtime for the real CLI entry
         env:
           OPENCLAW_BUILD_CACHE: "0"
@@ -137,20 +131,25 @@ jobs:
           for (const action of ["stop", "uninstall"]) {
             for (const json of [true, false]) {
               const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-lifecycle-cli-proof-"));
+              const accountHome = os.userInfo().homedir;
+              assert.equal(path.resolve(process.env.HOME ?? ""), accountHome);
+              const profile = `proof176268${path.basename(root).replace(/[^a-z0-9]/gi, "").toLowerCase()}`;
+              const state = path.join(accountHome, `.openclaw-${profile}`);
+              const unitPath = path.join(accountHome, ".config", "systemd", "user", `openclaw-gateway-${profile}.service`);
+              assert.ok(!fs.existsSync(state) && !fs.existsSync(unitPath), "Proof profile must be new");
               try {
                 const bin = path.join(root, "bin");
                 const run = path.join(root, "run");
-                const state = path.join(root, "state");
-                const unitDir = path.join(root, ".config", "systemd", "user");
+                const unitDir = path.dirname(unitPath);
                 for (const directory of [bin, run, state, unitDir]) {
                   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
                 }
                 const calls = path.join(root, "manager-calls.log");
-                const config = path.join(root, "openclaw.json");
+                const config = path.join(state, "openclaw.json");
                 fs.writeFileSync(config, JSON.stringify({ gateway: { mode: "local" } }));
                 fs.writeFileSync(
-                  path.join(unitDir, "openclaw-gateway.service"),
-                  `[Unit]\nDescription=Synthetic OpenClaw Gateway\n[Service]\nExecStart=${process.execPath} ${path.join(process.cwd(), "openclaw.mjs")} gateway run\n[Install]\nWantedBy=default.target\n`,
+                  unitPath,
+                  `[Unit]\nDescription=Synthetic OpenClaw Gateway\n[Service]\nExecStart=${process.execPath} ${path.join(process.cwd(), "openclaw.mjs")} --profile ${profile} gateway run\n[Install]\nWantedBy=default.target\n`,
                 );
                 fs.writeFileSync(
                   path.join(bin, "busctl"),
@@ -187,23 +186,29 @@ jobs:
                 );
                 const env = {
                   ...process.env,
-                  HOME: root,
+                  HOME: accountHome,
                   XDG_CONFIG_HOME: path.join(root, ".config"),
                   XDG_RUNTIME_DIR: run,
                   DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(run, "bus")}`,
-                  OPENCLAW_STATE_DIR: state,
-                  OPENCLAW_CONFIG_PATH: config,
-                  OPENCLAW_SYSTEMD_UNIT: "openclaw-gateway",
                   PROOF_CALL_LOG: calls,
                   PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
                 };
-                for (const key of ["SUDO_USER", "OPENCLAW_PROFILE", "OPENCLAW_HOME"]) {
+                for (const key of [
+                  "SUDO_USER",
+                  "OPENCLAW_PROFILE",
+                  "OPENCLAW_HOME",
+                  "OPENCLAW_STATE_DIR",
+                  "OPENCLAW_CONFIG_PATH",
+                  "OPENCLAW_SYSTEMD_UNIT",
+                ]) {
                   delete env[key];
                 }
                 const child = spawnSync(
                   process.execPath,
                   [
                     "openclaw.mjs",
+                    "--profile",
+                    profile,
                     "gateway",
                     action,
                     ...(action === "stop" ? ["--force"] : []),
@@ -214,12 +219,12 @@ jobs:
                 assert.equal(child.signal, null, `CLI timed out or was signaled: ${child.error}`);
                 assert.equal(child.status, 1, `CLI did not fail at the expected boundary: ${child.stderr}`);
                 if (!fs.existsSync(calls)) {
-                            throw new Error(
-                              `Synthetic manager not reached; exit=${child.status}; stdout=${child.stdout.slice(-2000)}; stderr=${child.stderr.slice(-3000)}`
-                                .replaceAll(root, "<fixture>"),
-                            );
-                          }
-                          const managerCalls = fs.readFileSync(calls, "utf8");
+                  throw new Error(
+                    `Synthetic manager not reached; exit=${child.status}; stdout=${child.stdout.slice(-2000)}; stderr=${child.stderr.slice(-3000)}`
+                      .replaceAll(root, "<fixture>"),
+                  );
+                }
+                const managerCalls = fs.readFileSync(calls, "utf8");
                 assert.match(managerCalls, /systemctl .*is-enabled/);
                 assert.match(managerCalls, action === "stop" ? /systemctl .*stop/ : /systemctl .*disable --now/);
                 const marker = action === "stop" ? "synthetic-stop-refusal" : "synthetic-disable-refusal";
@@ -247,12 +252,20 @@ jobs:
                 results.push({ action, json, reachedSyntheticManager: true, expectedHintState: proofCase });
               } finally {
                 fs.rmSync(root, { recursive: true, force: true });
+                fs.rmSync(state, { recursive: true, force: true });
+                fs.rmSync(unitPath, { force: true });
               }
             }
           }
           fs.writeFileSync("lifecycle-cli-entry-proof.json", JSON.stringify(results, null, 2));
           NODE
           node "$RUNNER_TEMP/lifecycle-cli-proof.mjs"
+      - name: Check changed formatting, lint and types once
+        if: matrix.case == 'candidate'
+        run: pnpm check:changed --base "$PROOF_BASE_SHA" --head HEAD
+      - name: Check candidate diff whitespace
+        if: matrix.case == 'candidate'
+        run: git diff --check "$PROOF_BASE_SHA"...HEAD
       - name: Retain test result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
