@@ -129,6 +129,15 @@ function isOlderSessionSnapshot(
   incoming: GatewaySessionRow,
   existing: GatewaySessionRow | undefined,
 ): boolean {
+  if (
+    incoming.hasActiveRun === false &&
+    incoming.snapshotAt !== undefined &&
+    existing?.snapshotAt !== undefined &&
+    incoming.snapshotAt > existing.snapshotAt
+  ) {
+    // A sampled terminal state can be newer even when persisted metadata regresses.
+    return false;
+  }
   return (
     incoming.updatedAt != null &&
     existing?.updatedAt != null &&
