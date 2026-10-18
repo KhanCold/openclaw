@@ -78,7 +78,11 @@ function redactMessage(value) {
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[redacted-ip]");
 }
 function waitForRequest(ms = 90000) {
-  return Promise.race([captured, new Promise((_, reject) => setTimeout(() => reject(new Error("timed out waiting for synthetic model request")), ms))]);
+  let timer;
+  return Promise.race([
+    captured,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out waiting for synthetic model request")), ms); }),
+  ]).finally(() => clearTimeout(timer));
 }
 try {
   gateway = spawn(process.execPath, [path.join(repo, "openclaw.mjs"), "gateway", "run", "--port", String(gatewayPort), "--bind", "loopback", "--auth", "token", "--token", token, "--allow-unconfigured"], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -127,9 +131,10 @@ try {
   fixtureClient = undefined;
   if (switched.metadata?.automation?.workspace?.kind !== "scratch" || switched.metadata?.automation?.workspace?.path !== retainedPath) throw new Error("CLI Gateway did not retain the synthetic path across the scratch switch");
   console.log("CLI proof: Gateway CLI RPC changed workspace from worktree to scratch while retaining stored path metadata.");
-  const dispatch = cli(["workboard", "dispatch", "--max-starts", "1", "--json"], { timeout: 60000 });
-  const request = await waitForRequest();
-  const dispatchOut = await dispatch;
+  const [dispatchOut, request] = await Promise.all([
+    cli(["workboard", "dispatch", "--max-starts", "1", "--url", `ws://127.0.0.1:${gatewayPort}`, "--token", token, "--json"], { timeout: 60000 }),
+    waitForRequest(),
+  ]);
   const dispatched = JSON.parse(dispatchOut);
   if (!Array.isArray(dispatched.started) || dispatched.started.length !== 1) throw new Error("official Workboard CLI did not dispatch one worker");
   const serialized = JSON.stringify(request);
