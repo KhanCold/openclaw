@@ -1,0 +1,98 @@
+name: Workboard Scratch Prompt Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Test-only baseline must fail at the scratch prompt assertion
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout fixed test-only baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dd5cd23457c80a7281d242b38ea1f22e0df457e3
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Set up Node and dependencies without cache
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          cache-mode: "off"
+          dependency-cache: "false"
+      - name: Verify the precise baseline regression fails for the retained path
+        shell: bash
+        run: |
+          set +e
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.unit.config.ts \
+            extensions/workboard/src/dispatcher.test.ts \
+            -t 'keeps a retained path out of the actual scratch worker prompt' \
+            --maxWorkers=1 \
+            --reporter=json \
+            --outputFile="$RUNNER_TEMP/workboard-baseline.json"
+          test_status=$?
+          set -e
+          if [[ "$test_status" -eq 0 ]]; then
+            echo 'Baseline unexpectedly passed the regression.' >&2
+            exit 1
+          fi
+          node --input-type=module - "$RUNNER_TEMP/workboard-baseline.json" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const assertions = report.testResults.flatMap((result) => result.assertionResults);
+          const expectedName = "keeps a retained path out of the actual scratch worker prompt";
+          if (
+            report.numFailedTests !== 1 ||
+            assertions.length !== 1 ||
+            assertions[0].status !== "failed" ||
+            !assertions[0].fullName.includes(expectedName) ||
+            !assertions[0].failureMessages.join("\n").includes("/workspace/repository")
+          ) {
+            throw new Error("Baseline failed outside the intended retained-path assertion.");
+          }
+          console.log("Expected baseline failure:", assertions[0].fullName);
+          console.log("Retained path appears in the failed assertion message.");
+          NODE
+
+  candidate:
+    name: Candidate owner tests and scoped static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout fixed candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 65ec5109d48f1a77f168bb99776a1ae7bf6a56a1
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Set up Node and dependencies without cache
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          cache-mode: "off"
+          dependency-cache: "false"
+      - name: Check exact candidate diff
+        shell: bash
+        run: |
+          git diff --check 5cb47d16571b59cfadd57bd7928c30df857478b0 HEAD
+      - name: Run dispatcher and SQLite store owner tests
+        shell: bash
+        run: |
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.unit.config.ts \
+            extensions/workboard/src/dispatcher.test.ts \
+            extensions/workboard/src/store.test.ts \
+            --maxWorkers=1
+      - name: Check changed formatting, lint, and types
+        shell: bash
+        run: |
+          node scripts/check-changed.mjs \
+            --base 5cb47d16571b59cfadd57bd7928c30df857478b0 \
+            --head HEAD
