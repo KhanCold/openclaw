@@ -24,7 +24,7 @@ jobs:
             target_sha: 9c14a847f8a2a9f270e1b2bb745bf7a2bb31c108
     env:
       CI: "true"
-      COREPACK_HOME: ${{ runner.temp }}/openclaw-focused-corepack
+      COREPACK_HOME: /tmp/openclaw-focused-corepack
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       COREPACK_ENABLE_AUTO_PIN: "0"
       OPENCLAW_CI_TEST_RUNTIME_POLICY: node
