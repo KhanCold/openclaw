@@ -250,7 +250,7 @@ jobs:
                     assert.ok(!payload.hints?.length);
                   } else {
                     assert.equal(payload.hints.length, 1);
-                    assert.match(payload.hints[0], /openclaw gateway status --deep/);
+                    assert.ok(payload.hints[0].includes(`openclaw --profile ${profile} gateway status --deep`));
                   }
                 } else {
                   assert.match(child.stderr, new RegExp(expectedError));
@@ -258,7 +258,8 @@ jobs:
                   if (proofCase === "baseline") {
                     assert.doesNotMatch(child.stdout, /Tip:/);
                   } else {
-                    assert.match(child.stdout, /Tip: .*openclaw gateway status --deep/);
+                    assert.match(child.stdout, /Tip:/);
+                    assert.ok(child.stdout.includes(`openclaw --profile ${profile} gateway status --deep`));
                   }
                 }
                 results.push({ action, json, reachedSyntheticManager: true, expectedHintState: proofCase });
