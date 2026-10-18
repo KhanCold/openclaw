@@ -99,7 +99,10 @@ async function failServiceNotLoaded(
   );
 }
 
-function renderServiceStatusHints(serviceNoun: string, stillLoadedAfterUninstall = false): string[] {
+function renderServiceStatusHints(
+  serviceNoun: string,
+  stillLoadedAfterUninstall = false,
+): string[] {
   const serviceName = serviceNoun.toLowerCase();
   const deep = serviceName === "gateway" ? " --deep" : "";
   const command = formatCliCommand(`openclaw ${serviceName} status${deep}`);
