@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { resolveAgentTimeoutMs } from "../agents/timeout.js";
 import { resolveMainSessionKeyFromConfig as resolveMainKey } from "../config/sessions.js";
 import type { HooksConfig, HookMappingConfig } from "../config/types.hooks.js";
 import {
@@ -245,6 +246,59 @@ test("handles auth, wake, and agent flows", async () => {
     await post("wake", { text: " " }, { status: 400 });
     await post("agent", { message: " " }, { status: 400 });
     await post("wake", "{", { status: 400 });
+  });
+});
+
+test("ignores hook timeouts that floor to zero and retains whole-second overrides", async () => {
+  setHookAgentRoster();
+  testState.agentConfig = { ...testState.agentConfig, timeoutSeconds: 7 };
+  await withHooksServer(async (post) => {
+    mockIsolatedRunOk();
+
+    await post("agent", { message: "Sub-second timeout", timeoutSeconds: 0.5 });
+    await waitForCronIsolatedRuns(1);
+    const subSecondRun = cronRunCall();
+    expect(subSecondRun.cfg.agents?.defaults?.timeoutSeconds).toBe(7);
+    expect(subSecondRun.job.payload.timeoutSeconds).toBeUndefined();
+    expect(
+      resolveAgentTimeoutMs({
+        cfg: subSecondRun.cfg,
+        overrideSeconds: subSecondRun.job.payload.timeoutSeconds,
+      }),
+    ).toBe(7_000);
+
+    await post("agent", { message: "Whole-second timeout", timeoutSeconds: 1.9 });
+    await waitForCronIsolatedRuns(2);
+    const wholeSecondRun = cronRunCall(1);
+    expect(wholeSecondRun.job.payload.timeoutSeconds).toBe(1);
+    expect(
+      resolveAgentTimeoutMs({
+        cfg: wholeSecondRun.cfg,
+        overrideSeconds: wholeSecondRun.job.payload.timeoutSeconds,
+      }),
+    ).toBe(1_000);
+
+    await post("agent", { message: "No timeout override" });
+    await waitForCronIsolatedRuns(3);
+    const defaultRun = cronRunCall(2);
+    expect(defaultRun.job.payload.timeoutSeconds).toBeUndefined();
+    expect(
+      resolveAgentTimeoutMs({
+        cfg: defaultRun.cfg,
+        overrideSeconds: defaultRun.job.payload.timeoutSeconds,
+      }),
+    ).toBe(7_000);
+
+    await post("agent", { message: "Zero timeout override", timeoutSeconds: 0 });
+    await waitForCronIsolatedRuns(4);
+    const zeroRun = cronRunCall(3);
+    expect(zeroRun.job.payload.timeoutSeconds).toBeUndefined();
+    expect(
+      resolveAgentTimeoutMs({
+        cfg: zeroRun.cfg,
+        overrideSeconds: zeroRun.job.payload.timeoutSeconds,
+      }),
+    ).toBe(7_000);
   });
 });
 
