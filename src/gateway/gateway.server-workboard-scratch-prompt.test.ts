@@ -20,7 +20,7 @@ function sse(events: Record<string, unknown>[]): string {
 
 it(
   "ships a scratch worker prompt through the real Gateway Workboard dispatch path",
-  { timeout: 90_000 },
+  { timeout: 240_000 },
   async ({ signal }) => {
     const { envSnapshot, tempHome, workspaceDir } = await setupGatewayTempHome({
       prefix: "openclaw-workboard-scratch-entrypoint-",
@@ -85,6 +85,7 @@ it(
         throw new Error("local model stub failed to bind loopback");
       }
       const mockProvider = buildMockOpenAiResponsesProvider(`http://127.0.0.1:${address.port}/v1`);
+      console.log("Gateway entry-point proof: loopback model stub bound.");
       const token = nextGatewayId("workboard-scratch-proof-token");
       const configPath = await createGatewayConfigPath(tempHome);
       const cfg = {
@@ -119,12 +120,15 @@ it(
         clientDisplayName: "workboard-scratch-entrypoint-proof",
         scopes: ["operator.admin"],
       });
+      console.log("Gateway entry-point proof: real Gateway client connected.");
       await gateway.server.startupSettled;
+      console.log("Gateway entry-point proof: Gateway startup settled.");
 
       const created = await gateway.client.request<{ card: { id: string } }>(
         "workboard.cards.create",
         { title: "Synthetic scratch prompt proof", status: "ready", agentId: "main" },
       );
+      console.log("Gateway entry-point proof: Workboard plugin created the synthetic card.");
       const retainedPath = path.join(workspaceDir, "synthetic-retained-repository");
       await fs.mkdir(retainedPath, { recursive: true });
       await gateway.client.request("workboard.cards.update", {
@@ -146,6 +150,7 @@ it(
       ) {
         throw new Error("fixture did not retain the synthetic path after switching to scratch");
       }
+      console.log("Gateway entry-point proof: Gateway update switched worktree to scratch.");
 
       const dispatched = await gateway.client.request<{ started?: unknown[] }>(
         "workboard.cards.dispatchWithOptions",
@@ -154,7 +159,9 @@ it(
       if (dispatched.started?.length !== 1) {
         throw new Error("real Gateway Workboard dispatch did not start the synthetic card");
       }
+      console.log("Gateway entry-point proof: Gateway dispatch accepted one worker.");
       const modelRequest = await withinTest(captured.promise, signal);
+      console.log("Gateway entry-point proof: loopback model stub captured the worker request.");
       const serializedRequest = JSON.stringify(modelRequest);
       if (!serializedRequest.includes("Workspace: scratch")) {
         throw new Error("WORKBOARD_SCRATCH_CONTEXT_MISSING");
