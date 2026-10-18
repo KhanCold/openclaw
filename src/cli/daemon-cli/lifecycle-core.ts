@@ -99,6 +99,13 @@ async function failServiceNotLoaded(
   );
 }
 
+function renderServiceStatusHints(serviceNoun: string): string[] {
+  const serviceName = serviceNoun.toLowerCase();
+  const deep = serviceName === "gateway" ? " --deep" : "";
+  const command = formatCliCommand(`openclaw ${serviceName} status${deep}`);
+  return [`Inspect the service state with ${command} before retrying.`];
+}
+
 async function resolveServiceLoadedOrFail(
   params: ServiceTarget,
   fail: ReturnType<typeof createDaemonActionContext>["fail"],
@@ -171,7 +178,10 @@ export async function runServiceUninstall(params: {
   try {
     await params.service.uninstall({ env: process.env, stdout });
   } catch (err) {
-    fail(`${params.serviceNoun} uninstall failed: ${String(err)}`);
+    fail(
+      `${params.serviceNoun} uninstall failed: ${String(err)}`,
+      renderServiceStatusHints(params.serviceNoun),
+    );
     return;
   }
   loaded = await resolveServiceLoadedOrFail(params, fail, {
@@ -181,7 +191,10 @@ export async function runServiceUninstall(params: {
     return;
   }
   if (loaded && params.assertNotLoadedAfterUninstall) {
-    fail(`${params.serviceNoun} service still loaded after uninstall.`);
+    fail(
+      `${params.serviceNoun} service still loaded after uninstall.`,
+      renderServiceStatusHints(params.serviceNoun),
+    );
     return;
   }
   warnServiceConfig(await getServiceActionPreflightFailure("uninstall"), { json, warnings });
@@ -402,7 +415,10 @@ export async function runServiceStop(params: {
       if (err instanceof ExitError) {
         throw err;
       }
-      fail(`${params.serviceNoun} stop failed: ${String(err)}`);
+      fail(
+        `${params.serviceNoun} stop failed: ${String(err)}`,
+        renderServiceStatusHints(params.serviceNoun),
+      );
       return;
     }
     warnServiceConfig(await getServiceActionPreflightFailure("stop"), { json, warnings });
@@ -422,7 +438,10 @@ export async function runServiceStop(params: {
       onMutation: gatewayStopAudit,
     });
   } catch (err) {
-    fail(`${params.serviceNoun} stop failed: ${String(err)}`);
+    fail(
+      `${params.serviceNoun} stop failed: ${String(err)}`,
+      renderServiceStatusHints(params.serviceNoun),
+    );
     return;
   }
 

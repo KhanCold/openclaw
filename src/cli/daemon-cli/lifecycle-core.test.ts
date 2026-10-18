@@ -193,6 +193,24 @@ it("includes an inspection hint when a stop recovery callback fails", async () =
   });
 });
 
+it("uses the node status command for node service failures", async () => {
+  service.stop.mockRejectedValueOnce(new Error("permission denied"));
+
+  await expectReportedExit(1, () =>
+    runServiceStop({
+      serviceNoun: "Node",
+      service,
+      opts: { json: true },
+    }),
+  );
+
+  expect(readJsonLog()).toMatchObject({
+    action: "stop",
+    hints: [expect.stringContaining("openclaw node status")],
+  });
+  expect(readJsonLog().hints?.[0]).not.toContain("--deep");
+});
+
 it("includes an inspection hint when the service remains loaded after uninstall", async () => {
   service.isLoaded.mockResolvedValue(true);
 
