@@ -1,0 +1,62 @@
+name: Hook timeout remaining type shards
+
+on:
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: Fixed candidate commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  remaining-core-test-types:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI: "true"
+      OPENCLAW_CI_STATIC_EVIDENCE: "1"
+      NPM_CONFIG_USERCONFIG: /dev/null
+      GH_TOKEN: ""
+      GITHUB_TOKEN: ""
+    steps:
+      - name: Validate immutable ref
+        env:
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout fixed candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify selected commit
+        env:
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+
+      - name: Install dependencies without lifecycle scripts or caches
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts --no-audit --no-fund pnpm@12.11.1
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Check only the remaining canonical core test type shards
+        run: |
+          set -euo pipefail
+          node scripts/run-tsgo-core-test-shards.mjs \
+            --ci-graphs-json '["core-test-messaging","core-test-services","core-test-other","core-test-ui-pages","core-test-ui-e2e","core-test-ui-other","core-test-packages","core-test-plugin-sdk","core-test-commands-doctor","core-test-cli-update","core-test-gateway-methods","core-test-ui-chat","core-test-agents-sessions","core-test-services-cron","core-test-ui-app","core-test-ui-components","core-test-claws","core-test-ui-e2e-chat"]' \
+            --concurrency 2
