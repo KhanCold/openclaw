@@ -101,7 +101,10 @@ it("admits a newer terminal session sample when its persisted timestamp moves ba
     activeRunIds: [],
     status: "done",
   });
-  expect(sessions.state.result?.sessions[0]).toMatchObject({ hasActiveRun: true, status: "running" });
+  expect(sessions.state.result?.sessions[0]).toMatchObject({
+    hasActiveRun: true,
+    status: "running",
+  });
 
   emitRuntime(harness, {
     ...running,
