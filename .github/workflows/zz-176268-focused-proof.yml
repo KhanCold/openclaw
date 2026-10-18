@@ -193,6 +193,9 @@ jobs:
                   DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(run, "bus")}`,
                   TMPDIR: root,
                   PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+                  // The normal CLI PATH bootstrap puts /usr/bin before test shims.
+                  // Keep this fixture's manager commands first for host safety.
+                  OPENCLAW_PATH_BOOTSTRAPPED: "1",
                 };
                 for (const key of [
                   "SUDO_USER",
