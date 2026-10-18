@@ -54,8 +54,17 @@ function cli(args, options = {}) {
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error(`CLI timed out: ${args[0]} ${args[1] ?? ""}`)); }, options.timeout ?? 30000);
     child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("close", (code) => { clearTimeout(timer); if (code === 0) resolve(stdout); else reject(new Error(`CLI failed (${code}): ${args[0]} ${args[1] ?? ""}; stderr=${stderr.slice(-1000)}`)); });
+    child.once("close", (code) => { clearTimeout(timer); if (code === 0) resolve(stdout); else reject(new Error(`CLI failed (${code}): ${args[0]} ${args[1] ?? ""}`)); });
   });
+}
+function sanitizedGatewayTail() {
+  return log.join("").split("\n").slice(-30).map((line) => line
+    .replaceAll(token, "[redacted-token]")
+    .replaceAll(temp, "[redacted-temp-path]")
+    .replaceAll(repo, "[redacted-repo-path]")
+    .replaceAll(`http://127.0.0.1:${providerPort}/v1`, "[redacted-loopback-endpoint]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[redacted-ip]")
+  ).join("\n");
 }
 function waitForRequest(ms = 90000) {
   return Promise.race([captured, new Promise((_, reject) => setTimeout(() => reject(new Error("timed out waiting for synthetic model request")), ms))]);
@@ -67,11 +76,11 @@ try {
   let ready = false;
   const deadline = Date.now() + 90000;
   while (!ready && Date.now() < deadline) {
-    if (gateway.exitCode !== null) throw new Error("CLI Gateway exited before readiness");
+    if (gateway.exitCode !== null) throw new Error(`CLI Gateway exited before readiness. Sanitized Gateway output:\n${sanitizedGatewayTail()}`);
     try { await cli(["gateway", "call", "health", "--port", String(gatewayPort), "--token", token], { timeout: 5000 }); ready = true; }
     catch { await new Promise((resolve) => setTimeout(resolve, 500)); }
   }
-  if (!ready) throw new Error("CLI Gateway readiness timed out");
+  if (!ready) throw new Error(`CLI Gateway readiness timed out. Sanitized Gateway output:\n${sanitizedGatewayTail()}`);
   console.log("CLI proof: repository openclaw.mjs started a separate Gateway process; health RPC succeeded.");
   const createOut = await cli(["workboard", "create", "Synthetic scratch prompt proof", "--status", "ready", "--agent", "main", "--json"]);
   const cardId = JSON.parse(createOut).card.id;
