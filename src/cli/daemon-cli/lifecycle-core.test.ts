@@ -85,12 +85,8 @@ vi.mock("./lifecycle-audit.js", () => ({
 
 // The runtime mock consumes the initialized lifecycle harness, not an early static import.
 const { ExitError } = await import("../../runtime.js");
-const {
-  runServiceRestart,
-  runServiceStart,
-  runServiceStop,
-  runServiceUninstall,
-} = await import("./lifecycle-core.js");
+const { runServiceRestart, runServiceStart, runServiceStop, runServiceUninstall } =
+  await import("./lifecycle-core.js");
 type StartArgs = Parameters<typeof runServiceStart>[0];
 type RestartArgs = Parameters<typeof runServiceRestart>[0];
 
