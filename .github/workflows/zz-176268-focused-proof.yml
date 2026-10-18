@@ -1,0 +1,261 @@
+name: Focused lifecycle hint proof
+
+on:
+  push:
+    branches: [proof/176268-focused-safe]
+    paths: [.github/workflows/zz-176268-focused-proof.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle-hints:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: baseline
+            target_sha: c2a4996b604505d0d8ba9eb9b698da14a000f1b6
+          - case: candidate
+            target_sha: 9c14a847f8a2a9f270e1b2bb745bf7a2bb31c108
+    env:
+      CI: "true"
+      COREPACK_HOME: ${{ runner.temp }}/openclaw-focused-corepack
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      COREPACK_ENABLE_AUTO_PIN: "0"
+      OPENCLAW_CI_TEST_RUNTIME_POLICY: node
+      PROOF_BASE_SHA: b2e85fadecb2d19aa4a501e9729b508c3975eb22
+      PROOF_TARGET_SHA: ${{ matrix.target_sha }}
+      PROOF_TEST_BLOB: b2bdea1f6e30eb2058ca8473ac3e1200d4f5c1f4
+      PROOF_HARNESS_BLOB: 1d72286176b22400917bb03a5b13eef82a84a29d
+    steps:
+      - name: Anonymous checkout of immutable target and base
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=8 https://github.com/KhanCold/openclaw.git "$PROOF_TARGET_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$PROOF_TARGET_SHA"
+          git cat-file -e "$PROOF_BASE_SHA^{commit}"
+          test "$(git rev-parse HEAD:src/cli/daemon-cli/lifecycle-core.test.ts)" = "$PROOF_TEST_BLOB"
+          test "$(git rev-parse HEAD:src/cli/daemon-cli/test-helpers/lifecycle-core-harness.ts)" = "$PROOF_HARNESS_BLOB"
+      - name: Setup standard Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      - name: Setup pinned package manager
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          expected_package_manager="pnpm@12.11.1+sha512.5b0e3288239a7ea4155d2094f547066e122a1376b3cd785a680c9112e116913e64aaaecf20dd83cc34030fa67013f5c5511f9cf430dd8384188b4c60b8a2ad1e"
+          actual_package_manager="$(node -p "require('./package.json').packageManager")"
+          test "$actual_package_manager" = "$expected_package_manager"
+          corepack prepare "$expected_package_manager" --activate
+          test "$(pnpm --version)" = "12.11.1"
+      - name: Install frozen dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Run focused lifecycle and neighboring output suites
+        continue-on-error: true
+        run: |
+          pnpm exec vitest run src/cli/daemon-cli/lifecycle-core.test.ts \
+            src/cli/daemon-cli/response.test.ts \
+            src/cli/daemon-cli/lifecycle-core.config-guard.test.ts \
+            src/cli/node-cli/daemon.test.ts --maxWorkers=1 \
+            --reporter=json --outputFile=lifecycle-hints-vitest.json
+      - name: Verify target assertions and exclude setup failures
+        env:
+          PROOF_CASE: ${{ matrix.case }}
+        run: |
+          node --input-type=commonjs <<'NODE'
+          const fs = require("node:fs");
+          const assert = require("node:assert/strict");
+          const report = JSON.parse(fs.readFileSync("lifecycle-hints-vitest.json", "utf8"));
+          assert.ok(Array.isArray(report.testResults) && report.testResults.length > 0);
+          const tests = report.testResults.flatMap((file) => file.assertionResults ?? []);
+          const expected = [
+            ...["true", "false"].flatMap((json) => [
+              new RegExp(`includes an inspection hint on stop failure \\(json=${json}\\)$`),
+              new RegExp(`includes an inspection hint on uninstall failure \\(json=${json}\\)$`),
+              new RegExp(`includes an inspection hint when a stop recovery callback fails \\(json=${json}\\)$`),
+              new RegExp(`includes inspection and manual removal hints when the service remains loaded after uninstall \\(json=${json}\\)$`),
+              new RegExp(`uses the node status command for node service failures \\(json=${json}\\)$`),
+            ]),
+          ];
+          const selected = expected.map((pattern) => {
+            const matches = tests.filter((test) => pattern.test(test.fullName));
+            assert.equal(matches.length, 1, `Expected one test for ${pattern}`);
+            return matches[0];
+          });
+          if (process.env.PROOF_CASE === "baseline") {
+            assert.equal(report.numFailedTests, 10, "Only ten targeted regressions may fail");
+            for (const test of selected) {
+              assert.equal(test.status, "failed");
+              const failure = (test.failureMessages ?? []).join("\n");
+              assert.match(failure, test.fullName.includes("json=true") ? /hints/ : /Tip:/);
+              assert.match(
+                failure,
+                test.fullName.includes("node service")
+                  ? /openclaw node status/
+                  : /openclaw gateway status --deep/,
+              );
+              if (test.fullName.includes("remains loaded")) {
+                assert.match(failure, /manual-service-removal-cli-not-installed/);
+              }
+            }
+          } else {
+            assert.equal(report.numFailedTests, 0, "All four focused suites must pass");
+            for (const test of selected) assert.equal(test.status, "passed");
+          }
+          NODE
+      - name: Prove real CLI entry failures through synthetic service managers
+        env:
+          PROOF_CASE: ${{ matrix.case }}
+        run: |
+          cat > "$RUNNER_TEMP/lifecycle-cli-proof.mjs" <<'NODE'
+          // Review-only fixture: run from the pinned repository checkout on Ubuntu Actions.
+          // All systemctl/busctl calls resolve to scripts in a temporary PATH prefix.
+          import assert from "node:assert/strict";
+          import { spawnSync } from "node:child_process";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+
+          const proofCase = process.env.PROOF_CASE;
+          assert.ok(proofCase === "baseline" || proofCase === "candidate");
+          const results = [];
+          for (const action of ["stop", "uninstall"]) {
+            for (const json of [true, false]) {
+              const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-lifecycle-cli-proof-"));
+              try {
+                const bin = path.join(root, "bin");
+                const run = path.join(root, "run");
+                const state = path.join(root, "state");
+                const unitDir = path.join(root, ".config", "systemd", "user");
+                for (const directory of [bin, run, state, unitDir]) {
+                  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+                }
+                const calls = path.join(root, "manager-calls.log");
+                const config = path.join(root, "openclaw.json");
+                fs.writeFileSync(config, JSON.stringify({ gateway: { mode: "local" } }));
+                fs.writeFileSync(
+                  path.join(unitDir, "openclaw-gateway.service"),
+                  `[Unit]\nDescription=Synthetic OpenClaw Gateway\n[Service]\nExecStart=${process.execPath} ${path.join(process.cwd(), "openclaw.mjs")} gateway run\n[Install]\nWantedBy=default.target\n`,
+                );
+                fs.writeFileSync(
+                  path.join(bin, "busctl"),
+                  `#!/bin/sh
+          printf 'busctl %s\\n' "$*" >> "$PROOF_CALL_LOG"
+          if [ "$*" = "--user --auto-start=no get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Version" ]; then
+            printf 's "252.39"\\n'
+            exit 0
+          fi
+          printf 'unexpected synthetic busctl call: %s\\n' "$*" >&2
+          exit 79
+          `,
+                  { mode: 0o700 },
+                );
+                fs.writeFileSync(
+                  path.join(bin, "systemctl"),
+                  `#!/bin/sh
+          printf 'systemctl %s\\n' "$*" >> "$PROOF_CALL_LOG"
+          case "$*" in
+            *--version*) printf 'systemd 252\\n'; exit 0 ;;
+            *is-enabled*) printf 'enabled\\n'; exit 0 ;;
+            *status*) printf 'running\\n'; exit 0 ;;
+            *disable*) printf 'synthetic-disable-refusal\\n' >&2; exit 73 ;;
+            *stop*) printf 'synthetic-stop-refusal\\n' >&2; exit 73 ;;
+            *) printf 'unexpected synthetic systemctl call: %s\\n' "$*" >&2; exit 79 ;;
+          esac
+          `,
+                  { mode: 0o700 },
+                );
+                fs.writeFileSync(
+                  path.join(bin, "loginctl"),
+                  "#!/bin/sh\nprintf 'unexpected synthetic loginctl call: %s\\n' \"$*\" >&2\nexit 79\n",
+                  { mode: 0o700 },
+                );
+                const env = {
+                  ...process.env,
+                  HOME: root,
+                  XDG_CONFIG_HOME: path.join(root, ".config"),
+                  XDG_RUNTIME_DIR: run,
+                  DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(run, "bus")}`,
+                  OPENCLAW_STATE_DIR: state,
+                  OPENCLAW_CONFIG_PATH: config,
+                  OPENCLAW_SYSTEMD_UNIT: "openclaw-gateway",
+                  PROOF_CALL_LOG: calls,
+                  PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+                };
+                for (const key of ["SUDO_USER", "OPENCLAW_PROFILE", "OPENCLAW_HOME"]) {
+                  delete env[key];
+                }
+                const child = spawnSync(
+                  process.execPath,
+                  [
+                    "--import",
+                    "tsx",
+                    "src/entry.ts",
+                    "gateway",
+                    action,
+                    ...(action === "stop" ? ["--force"] : []),
+                    ...(json ? ["--json"] : []),
+                  ],
+                  { cwd: process.cwd(), env, encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024 },
+                );
+                assert.equal(child.signal, null, `CLI timed out or was signaled: ${child.error}`);
+                assert.equal(child.status, 1, `CLI did not fail at the expected boundary: ${child.stderr}`);
+                const managerCalls = fs.readFileSync(calls, "utf8");
+                assert.match(managerCalls, /systemctl .*is-enabled/);
+                assert.match(managerCalls, action === "stop" ? /systemctl .*stop/ : /systemctl .*disable --now/);
+                const marker = action === "stop" ? "synthetic-stop-refusal" : "synthetic-disable-refusal";
+                const expectedError = `Gateway ${action} failed`;
+                if (json) {
+                  const payload = JSON.parse(child.stdout.trim());
+                  assert.equal(payload.ok, false);
+                  assert.match(payload.error, new RegExp(expectedError));
+                  assert.match(payload.error, new RegExp(marker));
+                  if (proofCase === "baseline") {
+                    assert.ok(!payload.hints?.length);
+                  } else {
+                    assert.equal(payload.hints.length, 1);
+                    assert.match(payload.hints[0], /openclaw gateway status --deep/);
+                  }
+                } else {
+                  assert.match(child.stderr, new RegExp(expectedError));
+                  assert.match(child.stderr, new RegExp(marker));
+                  if (proofCase === "baseline") {
+                    assert.doesNotMatch(child.stdout, /Tip:/);
+                  } else {
+                    assert.match(child.stdout, /Tip: .*openclaw gateway status --deep/);
+                  }
+                }
+                results.push({ action, json, reachedSyntheticManager: true, expectedHintState: proofCase });
+              } finally {
+                fs.rmSync(root, { recursive: true, force: true });
+              }
+            }
+          }
+          fs.writeFileSync("lifecycle-cli-entry-proof.json", JSON.stringify(results, null, 2));
+          NODE
+          node "$RUNNER_TEMP/lifecycle-cli-proof.mjs"
+      - name: Check changed formatting, lint and types once
+        if: matrix.case == 'candidate'
+        run: pnpm check:changed --base "$PROOF_BASE_SHA" --head HEAD
+      - name: Check candidate diff whitespace
+        if: matrix.case == 'candidate'
+        run: git diff --check "$PROOF_BASE_SHA"...HEAD
+      - name: Retain test result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lifecycle-hints-${{ matrix.case }}-${{ matrix.target_sha }}
+          path: |
+            lifecycle-hints-vitest.json
+            lifecycle-cli-entry-proof.json
+          if-no-files-found: warn
+          retention-days: 7
