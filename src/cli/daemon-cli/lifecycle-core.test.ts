@@ -85,7 +85,12 @@ vi.mock("./lifecycle-audit.js", () => ({
 
 // The runtime mock consumes the initialized lifecycle harness, not an early static import.
 const { ExitError } = await import("../../runtime.js");
-const { runServiceRestart, runServiceStart, runServiceStop } = await import("./lifecycle-core.js");
+const {
+  runServiceRestart,
+  runServiceStart,
+  runServiceStop,
+  runServiceUninstall,
+} = await import("./lifecycle-core.js");
 type StartArgs = Parameters<typeof runServiceStart>[0];
 type RestartArgs = Parameters<typeof runServiceRestart>[0];
 
@@ -142,6 +147,69 @@ async function expectReportedExit(code: number, run: () => Promise<unknown>) {
     },
   );
 }
+
+const serviceStatusHint = expect.stringContaining("openclaw gateway status --deep");
+
+it.each([
+  ["stop failure", () => runServiceStop(createServiceRunArgs())],
+  [
+    "uninstall failure",
+    () =>
+      runServiceUninstall({
+        ...createServiceRunArgs(),
+        stopBeforeUninstall: false,
+        assertNotLoadedAfterUninstall: true,
+      }),
+  ],
+] as const)("includes an inspection hint on %s", async (_name, run) => {
+  service.stop.mockRejectedValueOnce(new Error("permission denied"));
+  service.uninstall.mockRejectedValueOnce(new Error("permission denied"));
+
+  await expectReportedExit(1, run);
+
+  expect(readJsonLog()).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("permission denied"),
+    hints: [serviceStatusHint],
+  });
+});
+
+it("includes an inspection hint when a stop recovery callback fails", async () => {
+  service.isLoaded.mockResolvedValueOnce(false);
+
+  await expectReportedExit(1, () =>
+    runServiceStop({
+      ...createServiceRunArgs(),
+      onNotLoaded: async () => {
+        throw new Error("recovery failed");
+      },
+    }),
+  );
+
+  expect(readJsonLog()).toMatchObject({
+    action: "stop",
+    error: expect.stringContaining("recovery failed"),
+    hints: [serviceStatusHint],
+  });
+});
+
+it("includes an inspection hint when the service remains loaded after uninstall", async () => {
+  service.isLoaded.mockResolvedValue(true);
+
+  await expectReportedExit(1, () =>
+    runServiceUninstall({
+      ...createServiceRunArgs(),
+      stopBeforeUninstall: false,
+      assertNotLoadedAfterUninstall: true,
+    }),
+  );
+
+  expect(readJsonLog()).toMatchObject({
+    action: "uninstall",
+    error: expect.stringContaining("service still loaded after uninstall"),
+    hints: [serviceStatusHint],
+  });
+});
 
 it.each(["native-start", "recovered-start", "repaired-start", "restart-repair-refused"] as const)(
   "preserves the single reported outcome through %s catch boundaries",
