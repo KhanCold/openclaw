@@ -108,6 +108,16 @@ jobs:
             for (const test of selected) assert.equal(test.status, "passed");
           }
           NODE
+      - name: Check changed formatting, lint and types once
+        if: matrix.case == 'candidate'
+        run: pnpm check:changed --base "$PROOF_BASE_SHA" --head HEAD
+      - name: Check candidate diff whitespace
+        if: matrix.case == 'candidate'
+        run: git diff --check "$PROOF_BASE_SHA"...HEAD
+      - name: Build source runtime for the real CLI entry
+        env:
+          OPENCLAW_BUILD_CACHE: "0"
+        run: pnpm build:runtime
       - name: Prove real CLI entry failures through synthetic service managers
         env:
           PROOF_CASE: ${{ matrix.case }}
@@ -193,9 +203,7 @@ jobs:
                 const child = spawnSync(
                   process.execPath,
                   [
-                    "--import",
-                    "tsx",
-                    "src/entry.ts",
+                    "openclaw.mjs",
                     "gateway",
                     action,
                     ...(action === "stop" ? ["--force"] : []),
@@ -205,7 +213,13 @@ jobs:
                 );
                 assert.equal(child.signal, null, `CLI timed out or was signaled: ${child.error}`);
                 assert.equal(child.status, 1, `CLI did not fail at the expected boundary: ${child.stderr}`);
-                const managerCalls = fs.readFileSync(calls, "utf8");
+                if (!fs.existsSync(calls)) {
+                            throw new Error(
+                              `Synthetic manager not reached; exit=${child.status}; stdout=${child.stdout.slice(-2000)}; stderr=${child.stderr.slice(-3000)}`
+                                .replaceAll(root, "<fixture>"),
+                            );
+                          }
+                          const managerCalls = fs.readFileSync(calls, "utf8");
                 assert.match(managerCalls, /systemctl .*is-enabled/);
                 assert.match(managerCalls, action === "stop" ? /systemctl .*stop/ : /systemctl .*disable --now/);
                 const marker = action === "stop" ? "synthetic-stop-refusal" : "synthetic-disable-refusal";
@@ -239,12 +253,6 @@ jobs:
           fs.writeFileSync("lifecycle-cli-entry-proof.json", JSON.stringify(results, null, 2));
           NODE
           node "$RUNNER_TEMP/lifecycle-cli-proof.mjs"
-      - name: Check changed formatting, lint and types once
-        if: matrix.case == 'candidate'
-        run: pnpm check:changed --base "$PROOF_BASE_SHA" --head HEAD
-      - name: Check candidate diff whitespace
-        if: matrix.case == 'candidate'
-        run: git diff --check "$PROOF_BASE_SHA"...HEAD
       - name: Retain test result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
