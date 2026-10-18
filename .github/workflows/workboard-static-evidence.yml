@@ -1,0 +1,141 @@
+name: Workboard Static Evidence Supplement
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-worker-ratchet:
+    name: Run the rg-dependent worker ratchet on fixed candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout fixed candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 65ec5109d48f1a77f168bb99776a1ae7bf6a56a1
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify candidate and base commits
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "65ec5109d48f1a77f168bb99776a1ae7bf6a56a1"
+          git cat-file -e '5cb47d16571b59cfadd57bd7928c30df857478b0^{commit}'
+          git merge-base --is-ancestor 5cb47d16571b59cfadd57bd7928c30df857478b0 HEAD
+      - name: Install Ubuntu ripgrep for the inventory scanner
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+          rg --version
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      - name: Install pinned pnpm and frozen dependencies without scripts or cache
+        shell: bash
+        run: |
+          npm install --global pnpm@12.11.1
+          test "$(pnpm --version)" = "12.11.1"
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Run only the previously blocked SQLite worker ratchet
+        shell: bash
+        run: |
+          node --import ./scripts/tsx.mjs scripts/check-database-worker-ratchet.mts \
+            --base 5cb47d16571b59cfadd57bd7928c30df857478b0
+
+  compare-knip:
+    name: Compare unchanged Knip diagnostics on fixed base and candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout fixed baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5cb47d16571b59cfadd57bd7928c30df857478b0
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout fixed candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 65ec5109d48f1a77f168bb99776a1ae7bf6a56a1
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify both checkout SHAs
+        shell: bash
+        run: |
+          test "$(git -C baseline rev-parse HEAD)" = "5cb47d16571b59cfadd57bd7928c30df857478b0"
+          test "$(git -C candidate rev-parse HEAD)" = "65ec5109d48f1a77f168bb99776a1ae7bf6a56a1"
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+      - name: Install pinned pnpm and frozen dependencies without scripts or cache
+        shell: bash
+        run: |
+          npm install --global pnpm@12.11.1
+          test "$(pnpm --version)" = "12.11.1"
+          pnpm --dir baseline install --frozen-lockfile --ignore-scripts
+          pnpm --dir candidate install --frozen-lockfile --ignore-scripts
+      - name: Compare the exact deadcode exports check at base and candidate
+        shell: bash
+        run: |
+          set +e
+          (cd baseline && pnpm deadcode:exports) > "$RUNNER_TEMP/knip-baseline.log" 2>&1
+          baseline_status=$?
+          (cd candidate && pnpm deadcode:exports) > "$RUNNER_TEMP/knip-candidate.log" 2>&1
+          candidate_status=$?
+          set -e
+          node --input-type=module - \
+            "$RUNNER_TEMP/knip-baseline.log" \
+            "$baseline_status" \
+            "$RUNNER_TEMP/knip-candidate.log" \
+            "$candidate_status" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const [baselinePath, baselineCode, candidatePath, candidateCode] = process.argv.slice(2);
+          const readReport = (file) => {
+            const text = readFileSync(file, "utf8");
+            const start = text.indexOf("Unused exports are not allowed:");
+            const end = text.indexOf("Delete the exports or model their real production consumers in Knip.", start);
+            const findings = start < 0 || end < 0
+              ? []
+              : text.slice(start, end).split(/\r?\n/u)
+                  .slice(1)
+                  .map((line) => line.trim())
+                  .filter(Boolean);
+            return {
+              text,
+              findings,
+              fullTreePassed: text.includes("[deadcode] Knip full-tree unused-export scan passed with 0 entries."),
+              scriptsPassed: text.includes("[deadcode] Knip script unused-export scan passed with 0 entries."),
+            };
+          };
+          const baseline = readReport(baselinePath);
+          const candidate = readReport(candidatePath);
+          console.log("Baseline Knip status:", baselineCode);
+          console.log("Candidate Knip status:", candidateCode);
+          console.log("Baseline unused exports:\n" + baseline.findings.join("\n"));
+          console.log("Candidate unused exports:\n" + candidate.findings.join("\n"));
+          const sameFindings = JSON.stringify(baseline.findings) === JSON.stringify(candidate.findings);
+          const scanFailures = (report) =>
+            /could not resolve workspace modules|deadcode .* failed:|ERROR: Error loading /u.test(report.text);
+          if (
+            baselineCode !== "1" ||
+            candidateCode !== "1" ||
+            baseline.findings.length === 0 ||
+            !sameFindings ||
+            !baseline.fullTreePassed ||
+            !candidate.fullTreePassed ||
+            !baseline.scriptsPassed ||
+            !candidate.scriptsPassed ||
+            scanFailures(baseline) ||
+            scanFailures(candidate)
+          ) {
+            throw new Error("Knip baseline and candidate diagnostics did not match cleanly.");
+          }
+          console.log(`Knip diagnostics are identical (${baseline.findings.length} unused exports).`);
+          NODE
