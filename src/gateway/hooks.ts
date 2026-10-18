@@ -662,9 +662,13 @@ export function normalizeAgentPayload(
   }
   const thinking = normalizeOptionalString(payload.thinking);
   const timeoutRaw = payload.timeoutSeconds;
-  const timeoutSeconds =
-    typeof timeoutRaw === "number" && Number.isFinite(timeoutRaw) && timeoutRaw > 0
+  const flooredTimeoutSeconds =
+    typeof timeoutRaw === "number" && Number.isFinite(timeoutRaw)
       ? Math.floor(timeoutRaw)
+      : undefined;
+  const timeoutSeconds =
+    flooredTimeoutSeconds !== undefined && flooredTimeoutSeconds > 0
+      ? flooredTimeoutSeconds
       : undefined;
   return {
     ok: true,
