@@ -39,6 +39,7 @@ jobs:
         with:
           node-version: "24.21.0"
       - name: Setup pinned package manager
+        working-directory: ${{ runner.temp }}/openclaw-candidate
         run: |
           set -euo pipefail
           npm install --global --ignore-scripts corepack@0.34.6
