@@ -55,7 +55,7 @@ describe("workboard tools", () => {
     expect(edited.updatedAt).toBeGreaterThan(cards[0]!.updatedAt);
     expect(edited.events.length).toBeGreaterThan(cards[0]!.events.length);
     await list.execute("after-edit", { refreshDiagnostics: true });
-    expect((await store.get(edited.id))?.metadata?.diagnostics).toEqual([]);
+    expect((await store.get(edited.id))?.metadata?.diagnostics).toBeUndefined();
     const archived = await store.archive(cards[1]!.id, true);
     await list.execute("after-archive", { refreshDiagnostics: true });
     expect(await store.get(archived.id)).toEqual(archived);
