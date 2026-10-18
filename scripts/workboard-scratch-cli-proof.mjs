@@ -75,6 +75,7 @@ function redactMessage(value) {
     .replaceAll(token, "[redacted-token]")
     .replaceAll(temp, "[redacted-temp-path]")
     .replaceAll(repo, "[redacted-repo-path]")
+    .replace(/(?:https?|wss?):\/\/[^\s"'<>]+/g, "[redacted-endpoint]")
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[redacted-ip]");
 }
 function waitForRequest(ms = 90000) {
@@ -135,7 +136,10 @@ try {
     const result = JSON.parse(output);
     const startedCount = Array.isArray(result.started) ? result.started.length : 0;
     const failureCount = Array.isArray(result.startFailures) ? result.startFailures.length : 0;
-    console.log(JSON.stringify({ dispatchStartedCount: startedCount, dispatchStartFailureCount: failureCount, gatewayUnavailableFallback: result.gatewayUnavailable === true }));
+    const failureMessages = Array.isArray(result.startFailures)
+      ? result.startFailures.slice(0, 3).map((failure) => redactMessage(failure.error ?? failure.reason ?? "unspecified"))
+      : [];
+    console.log(JSON.stringify({ dispatchStartedCount: startedCount, dispatchStartFailureCount: failureCount, gatewayUnavailableFallback: result.gatewayUnavailable === true, sanitizedStartFailureMessages: failureMessages }));
     if (startedCount !== 1) throw new Error("official Workboard CLI did not start exactly one worker");
     return output;
   });
