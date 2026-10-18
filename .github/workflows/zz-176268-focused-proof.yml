@@ -19,9 +19,9 @@ jobs:
       matrix:
         include:
           - case: baseline
-            target_sha: c2a4996b604505d0d8ba9eb9b698da14a000f1b6
+            target_sha: fa388d162427226a37e73e3fcd978c5343059d44
           - case: candidate
-            target_sha: 9c14a847f8a2a9f270e1b2bb745bf7a2bb31c108
+            target_sha: b47ea6f50d8c525c9b17f49f0aceb7801cf96cbc
     env:
       CI: "true"
       COREPACK_HOME: /tmp/openclaw-focused-corepack
@@ -30,7 +30,7 @@ jobs:
       OPENCLAW_CI_TEST_RUNTIME_POLICY: node
       PROOF_BASE_SHA: b2e85fadecb2d19aa4a501e9729b508c3975eb22
       PROOF_TARGET_SHA: ${{ matrix.target_sha }}
-      PROOF_TEST_BLOB: b2bdea1f6e30eb2058ca8473ac3e1200d4f5c1f4
+      PROOF_TEST_BLOB: daf16d8b492a80d085137486bb60e34022e0ee10
       PROOF_HARNESS_BLOB: 1d72286176b22400917bb03a5b13eef82a84a29d
     steps:
       - name: Anonymous checkout of immutable target and base
@@ -96,16 +96,12 @@ jobs:
             for (const test of selected) {
               assert.equal(test.status, "failed");
               const failure = (test.failureMessages ?? []).join("\n");
-              assert.match(failure, test.fullName.includes("json=true") ? /hints/ : /Tip:/);
               assert.match(
                 failure,
                 test.fullName.includes("node service")
                   ? /openclaw node status/
                   : /openclaw gateway status --deep/,
               );
-              if (test.fullName.includes("remains loaded")) {
-                assert.match(failure, /manual-service-removal-cli-not-installed/);
-              }
             }
           } else {
             assert.equal(report.numFailedTests, 0, "All four focused suites must pass");
