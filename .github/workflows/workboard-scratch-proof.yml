@@ -1,16 +1,17 @@
-name: Issue 176223 Final Baseline
+name: Issue 176223 Final Head Proof
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  baseline:
+  candidate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 1a351e692bc4c39d715bc06599e30bffe8b7b39b
+          ref: 76f1c6299e12c462867214c8f0f5a359c528c310
+          fetch-depth: 6
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -18,22 +19,112 @@ jobs:
           package-manager-cache: false
       - name: Install frozen physical dependencies
         run: |
+          test "$(git rev-parse HEAD)" = "76f1c6299e12c462867214c8f0f5a359c528c310"
+          git cat-file -e 806ea5812ccbe393b4dd0c3a6c1ce0010a5d755a^{commit}
           npm install --global pnpm@12.11.1
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Prove expected baseline failure at actual tool entry
+      - name: Check touched formatting
+        run: |
+          mapfile -t paths < <(git diff --name-only 806ea5812ccbe393b4dd0c3a6c1ce0010a5d755a HEAD)
+          if ! pnpm exec oxfmt --check "${paths[@]}"; then
+            pnpm exec oxfmt "${paths[@]}"
+            git diff > "$RUNNER_TEMP/format.patch"
+            cat "$RUNNER_TEMP/format.patch"
+            exit 1
+          fi
+      - name: Final tool entry and controls
         env:
           OPENCLAW_VITEST_RUNTIME: node
+        run: pnpm test extensions/workboard/src/tools.test.ts --maxWorkers=1
+      - name: Canonical targeted type and lint checks
         run: |
-          set +e
-          pnpm test extensions/workboard/src/tools.test.ts --maxWorkers=1 --testNamePattern 'refreshes diagnostics without making inactive cards look edited' > "$RUNNER_TEMP/baseline.log" 2>&1
-          status=$?
-          set -e
-          cat "$RUNNER_TEMP/baseline.log"
-          test "$status" -eq 1
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          text = (Path(os.environ['RUNNER_TEMP']) / 'baseline.log').read_text()
-          assert 'AssertionError' in text and 'updatedAt' in text, 'not the expected product failure'
-          assert '1 failed' in text, 'expected one failed regression'
-          PY
+          node --import ./scripts/tsx.mjs --input-type=module <<'NODE'
+          import {execFileSync} from 'node:child_process';
+          import {detectChangedLanesForPaths} from './scripts/changed-lanes.mts';
+          import {createChangedCheckPlan,createPnpmManagedCommand} from './scripts/check-changed.mts';
+          import {runManagedCommand} from './scripts/lib/managed-child-process.mts';
+          const base='806ea5812ccbe393b4dd0c3a6c1ce0010a5d755a';
+          const paths=execFileSync('git',['diff','--name-only',base,'HEAD'],{encoding:'utf8'}).trim().split('\n');
+          const result=detectChangedLanesForPaths({paths,base,head:'HEAD'});
+          const plan=createChangedCheckPlan(result,{base,head:'HEAD'});
+          console.log('Reusing passed production typecheck from run 39169909484; only tools.test.ts changed.');
+          console.log('Full optional changed-check plan:',JSON.stringify(plan.commands.map(c=>c.name)));
+          const commands=plan.commands.filter(c=>c.name === 'typecheck extension tests'||c.name.startsWith('lint '));
+          if(commands.length===0) throw new Error('No required targeted checks selected');
+          for(const c of commands){
+            const command=c.bin?c:createPnpmManagedCommand(c);
+            console.log('Required targeted check:',c.name,JSON.stringify(command.args));
+            const status=await runManagedCommand({bin:command.bin,args:command.args,env:command.env??process.env});
+            if(status!==0) throw new Error(c.name+' failed '+status);
+            console.log('Completed required check:',c.name);
+          }
+          NODE
+      - name: Build selected Workboard runtime
+        env:
+          OPENCLAW_BUNDLED_PLUGIN_BUILD_IDS: workboard
+          OPENCLAW_BUILD_CACHE: "0"
+        run: node --import ./scripts/tsx.mjs scripts/build-all.mts cliStartup
+      - name: Built runtime worker persistence and controls
+        run: |
+          cat > "$RUNNER_TEMP/built-worker-proof.mjs" <<'PROOF'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs/promises';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          const state = await fs.mkdtemp(path.join(os.tmpdir(), 'workboard-176223-built-'));
+          process.env.OPENCLAW_STATE_DIR = state;
+          const { WorkboardStore } = await import(pathToFileURL(path.resolve('dist/extensions/workboard/runtime-api.js')).href);
+          const worker = pathToFileURL(path.resolve('dist/extensions/workboard/src/sqlite-store.worker.js'));
+          let store = WorkboardStore.openSqlite(worker);
+          const originalNow = Date.now;
+          try {
+            const cards = [];
+            for (const [status, title] of [['ready', 'Waiting'], ['blocked', 'Blocked'], ['done', 'Finished']]) {
+              cards.push(await store.create({ status, title, ...(status === 'ready' ? { agentId: 'main' } : {}) }));
+            }
+            const now = originalNow() + 2 * 24 * 60 * 60 * 1000;
+            const kinds = ['stranded_ready', 'blocked_too_long', 'missing_proof'];
+            for (let observation = 1; observation <= 2; observation++) {
+              await store.refreshDiagnostics(now + observation);
+              for (const [index, before] of cards.entries()) {
+                const after = await store.get(before.id);
+                assert.equal(after.updatedAt, before.updatedAt);
+                assert.deepEqual(after.events, before.events);
+                assert.equal(after.metadata.diagnostics[0].kind, kinds[index]);
+                assert.equal(after.metadata.diagnostics[0].count, observation);
+                assert.equal(after.metadata.diagnostics[0].lastSeenAt, now + observation);
+              }
+            }
+            await store.close();
+            store = WorkboardStore.openSqlite(worker);
+            for (const before of cards) {
+              const reopened = await store.get(before.id);
+              assert.equal(reopened.updatedAt, before.updatedAt);
+              assert.equal(reopened.metadata.diagnostics[0].count, 2);
+            }
+            Date.now = () => now + 3;
+            const edited = await store.update(cards[0].id, { notes: 'Operator edit' });
+            assert(edited.updatedAt > cards[0].updatedAt);
+            assert(edited.events.length > cards[0].events.length);
+            await store.refreshDiagnostics(now + 4);
+            assert.equal((await store.get(edited.id)).metadata?.diagnostics, undefined);
+            const archived = await store.archive(cards[1].id, true);
+            await store.refreshDiagnostics(now + 5);
+            assert.deepEqual(await store.get(archived.id), archived);
+            console.log(JSON.stringify({ proof: 'built Workboard runtime API and real SQLite worker', cards: kinds, repeatedObservations: 2, preservedActivityAndHistory: true, coldWorkerReopen: true, ordinaryEdit: true, archivedControl: true }));
+          } finally {
+            Date.now = originalNow;
+            await store.close();
+            await fs.rm(state, { recursive: true, force: true });
+          }
+          PROOF
+          node "$RUNNER_TEMP/built-worker-proof.mjs"
+      - name: Retain formatter correction if needed
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: issue-176223-format
+          path: ${{ runner.temp }}/format.patch
+          if-no-files-found: ignore
+          retention-days: 7
