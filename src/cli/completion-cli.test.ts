@@ -359,7 +359,7 @@ ${cases
     const command = program.command("group").command(name).alias(`alias-${name}`);
     command.addOption(new Option("--mode <mode>").choices(["local"]));
 
-    expect(await powerShellCompletion.complete(program, "openclaw --value al")).toEqual(["alpha"]);
+    expect(await powershell.complete(program, "openclaw --value al")).toEqual(["alpha"]);
   });
 
   itWithFish.each([
