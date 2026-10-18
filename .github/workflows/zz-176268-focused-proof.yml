@@ -154,11 +154,11 @@ jobs:
                 fs.writeFileSync(
                   path.join(bin, "busctl"),
                   `#!/bin/sh
-          printf 'busctl %s\\n' "$*" >> "$PROOF_CALL_LOG"
-          if [ "$*" = "--user --auto-start=no get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Version" ]; then
-            printf 's "252.39"\\n'
-            exit 0
-          fi
+          set -eu
+          printf 'busctl %s\\n' "$*" >> "$TMPDIR/manager-calls.log"
+          case "$*" in
+            *get-property*Version*) printf 's "252.39"\\n'; exit 0 ;;
+          esac
           printf 'unexpected synthetic busctl call: %s\\n' "$*" >&2
           exit 79
           `,
@@ -167,7 +167,8 @@ jobs:
                 fs.writeFileSync(
                   path.join(bin, "systemctl"),
                   `#!/bin/sh
-          printf 'systemctl %s\\n' "$*" >> "$PROOF_CALL_LOG"
+          set -eu
+          printf 'systemctl %s\\n' "$*" >> "$TMPDIR/manager-calls.log"
           case "$*" in
             *--version*) printf 'systemd 252\\n'; exit 0 ;;
             *is-enabled*) printf 'enabled\\n'; exit 0 ;;
@@ -181,7 +182,7 @@ jobs:
                 );
                 fs.writeFileSync(
                   path.join(bin, "loginctl"),
-                  "#!/bin/sh\nprintf 'unexpected synthetic loginctl call: %s\\n' \"$*\" >&2\nexit 79\n",
+                  "#!/bin/sh\nset -eu\nprintf 'unexpected synthetic loginctl call: %s\\n' \"$*\" >&2\nexit 79\n",
                   { mode: 0o700 },
                 );
                 const env = {
@@ -190,7 +191,7 @@ jobs:
                   XDG_CONFIG_HOME: path.join(root, ".config"),
                   XDG_RUNTIME_DIR: run,
                   DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(run, "bus")}`,
-                  PROOF_CALL_LOG: calls,
+                  TMPDIR: root,
                   PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
                 };
                 for (const key of [
@@ -203,6 +204,14 @@ jobs:
                 ]) {
                   delete env[key];
                 }
+                const probe = spawnSync(
+                  "busctl",
+                  ["--user", "--auto-start=no", "get-property", "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "Version"],
+                  { env, encoding: "utf8" },
+                );
+                assert.equal(probe.status, 0, `Synthetic busctl preflight failed: ${probe.stderr}`);
+                assert.match(fs.readFileSync(calls, "utf8"), /busctl .*Manager Version/);
+                fs.writeFileSync(calls, "");
                 const child = spawnSync(
                   process.execPath,
                   [
@@ -218,13 +227,13 @@ jobs:
                 );
                 assert.equal(child.signal, null, `CLI timed out or was signaled: ${child.error}`);
                 assert.equal(child.status, 1, `CLI did not fail at the expected boundary: ${child.stderr}`);
-                if (!fs.existsSync(calls)) {
+                const managerCalls = fs.readFileSync(calls, "utf8");
+                if (!managerCalls.trim()) {
                   throw new Error(
                     `Synthetic manager not reached; exit=${child.status}; stdout=${child.stdout.slice(-2000)}; stderr=${child.stderr.slice(-3000)}`
                       .replaceAll(root, "<fixture>"),
                   );
                 }
-                const managerCalls = fs.readFileSync(calls, "utf8");
                 assert.match(managerCalls, /systemctl .*is-enabled/);
                 assert.match(managerCalls, action === "stop" ? /systemctl .*stop/ : /systemctl .*disable --now/);
                 const marker = action === "stop" ? "synthetic-stop-refusal" : "synthetic-disable-refusal";
