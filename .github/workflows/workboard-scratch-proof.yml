@@ -36,7 +36,7 @@ jobs:
         run: |
           set +e
           node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.unit.config.ts \
+            --config test/vitest/vitest.extensions.config.ts \
             extensions/workboard/src/dispatcher.test.ts \
             -t 'keeps a retained path out of the actual scratch worker prompt' \
             --maxWorkers=1 \
@@ -59,6 +59,23 @@ jobs:
           );
           const failureText = failed.flatMap((assertion) => assertion.failureMessages).join("\n");
           const expectedPathMessage = /not to contain ['"]\/workspace\/repository['"]/s;
+          console.log(
+            "Baseline report diagnostic:",
+            JSON.stringify({
+              numFailedTests: report.numFailedTests,
+              numPassedTests: report.numPassedTests,
+              testResults: results.map((result) => ({
+                name: result.name,
+                status: result.status,
+                message: result.message,
+                assertions: result.assertionResults.map((assertion) => ({
+                  fullName: assertion.fullName,
+                  status: assertion.status,
+                  failureMessages: assertion.failureMessages,
+                })),
+              })),
+            }),
+          );
           if (
             report.numFailedTests !== 1 ||
             report.numPassedTests !== 0 ||
@@ -108,7 +125,7 @@ jobs:
         shell: bash
         run: |
           node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.unit.config.ts \
+            --config test/vitest/vitest.extensions.config.ts \
             extensions/workboard/src/dispatcher.test.ts \
             extensions/workboard/src/store.test.ts \
             --maxWorkers=1
