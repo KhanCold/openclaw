@@ -66,8 +66,8 @@ jobs:
           set -e
           base_findings="$RUNNER_TEMP/base-deadcode-findings.txt"
           candidate_findings="$RUNNER_TEMP/candidate-deadcode-findings.txt"
-          rg '^  src/logging/[^:]+: ' "$RUNNER_TEMP/base-deadcode.log" | sort > "$base_findings"
-          rg '^  src/logging/[^:]+: ' "$RUNNER_TEMP/candidate-deadcode.log" | sort > "$candidate_findings"
+          grep -E '^  src/logging/[^:]+: ' "$RUNNER_TEMP/base-deadcode.log" | sort > "$base_findings"
+          grep -E '^  src/logging/[^:]+: ' "$RUNNER_TEMP/candidate-deadcode.log" | sort > "$candidate_findings"
           echo "base deadcode:exports exit=$base_status"
           cat "$base_findings"
           echo "candidate deadcode:exports exit=$candidate_status"
