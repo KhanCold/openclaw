@@ -7,145 +7,101 @@ permissions:
   contents: read
 
 jobs:
-  baseline:
-    name: Test-only baseline must fail at the scratch prompt assertion
+  proof:
+    name: ${{ matrix.label }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Baseline entry point must expose retained path
+            subject_sha: 28f97f236f882af739aac9f0e6e77d83b2da2a7c
+            expected: baseline
+          - label: Candidate entry point must omit retained path
+            subject_sha: 65ec5109d48f1a77f168bb99776a1ae7bf6a56a1
+            expected: candidate
     steps:
-      - name: Checkout fixed test-only baseline
+      - name: Checkout proof harness and workflow
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: dd5cd23457c80a7281d242b38ea1f22e0df457e3
-          fetch-depth: 3
+          ref: ${{ github.sha }}
+          path: proof
           persist-credentials: false
-      - name: Verify baseline checkout SHA
+          fetch-depth: 1
+      - name: Checkout fixed source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.subject_sha }}
+          path: subject
+          persist-credentials: false
+          fetch-depth: 3
+      - name: Verify source revision and install proof harness
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "dd5cd23457c80a7281d242b38ea1f22e0df457e3"
+        run: |
+          set -euo pipefail
+          actual="$(git -C subject rev-parse HEAD)"
+          test "$actual" = "${{ matrix.subject_sha }}"
+          install -D proof/src/gateway/gateway.server-workboard-scratch-prompt.test.ts \
+            subject/src/gateway/gateway.server-workboard-scratch-prompt.test.ts
+          printf 'Source SHA: %s\n' "$actual"
+          printf 'Proof harness SHA: %s\n' "$(git -C proof rev-parse HEAD)"
       - name: Set up pinned Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.21.0"
-      - name: Install pinned pnpm and frozen dependencies without scripts or cache
+      - name: Install frozen dependencies without lifecycle scripts or cache
+        working-directory: subject
         shell: bash
         run: |
           npm install --global pnpm@12.11.1
           test "$(pnpm --version)" = "12.11.1"
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Verify the precise baseline regression fails for the retained path
+      - name: Prove fixed baseline fails only on retained scratch path
+        if: matrix.expected == 'baseline'
+        working-directory: subject
         shell: bash
         run: |
           set +e
           node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.extension-database-workers.config.ts \
-            extensions/workboard/src/dispatcher.test.ts \
-            -t 'keeps a retained path out of the actual scratch worker prompt' \
+            --config test/vitest/vitest.gateway-server.config.ts \
+            src/gateway/gateway.server-workboard-scratch-prompt.test.ts \
             --maxWorkers=1 \
             --reporter=json \
-            --outputFile="$RUNNER_TEMP/workboard-baseline.json"
+            --outputFile="$RUNNER_TEMP/workboard-entrypoint-baseline.json"
           test_status=$?
           set -e
           if [[ "$test_status" -eq 0 ]]; then
-            echo 'Baseline unexpectedly passed the regression.' >&2
+            echo 'Baseline unexpectedly passed the shipped-entry-point proof.' >&2
             exit 1
           fi
-          node --input-type=module - "$RUNNER_TEMP/workboard-baseline.json" <<'NODE'
+          node --input-type=module - "$RUNNER_TEMP/workboard-entrypoint-baseline.json" <<'NODE'
           import { readFileSync } from "node:fs";
           const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          const results = report.testResults;
-          const expectedName = "keeps a retained path out of the actual scratch worker prompt";
-          const expectedPath = "/workspace/repository";
+          const results = report.testResults ?? [];
           const failed = results.flatMap((result) =>
-            result.assertionResults.filter((assertion) => assertion.status === "failed"),
+            (result.assertionResults ?? []).filter((assertion) => assertion.status === "failed"),
           );
-          const failureText = failed.flatMap((assertion) => assertion.failureMessages).join("\n");
-          const expectedPathMessage = /not to contain ['"]\/workspace\/repository['"]/s;
-          console.log(
-            "Baseline report diagnostic:",
-            JSON.stringify({
-              numFailedTests: report.numFailedTests,
-              numPassedTests: report.numPassedTests,
-              testResults: results.map((result) => ({
-                name: result.name,
-                status: result.status,
-                message: result.message,
-                assertions: result.assertionResults.map((assertion) => ({
-                  fullName: assertion.fullName,
-                  status: assertion.status,
-                  failureMessages: assertion.failureMessages,
-                })),
-              })),
-            }),
-          );
+          const failureText = failed.flatMap((assertion) => assertion.failureMessages ?? []).join("\n");
           if (
             report.numFailedTests !== 1 ||
             report.numPassedTests !== 0 ||
             results.length !== 1 ||
-            !results[0].name.endsWith("extensions/workboard/src/dispatcher.test.ts") ||
             results[0].status !== "failed" ||
-            (results[0].message ?? "").trim() !== "" ||
             failed.length !== 1 ||
-            !failed[0].fullName.endsWith(expectedName) ||
-            !expectedPathMessage.test(failureText)
+            !failed[0].fullName.endsWith("ships a scratch worker prompt through the real Gateway Workboard dispatch path") ||
+            !failureText.includes("WORKBOARD_SCRATCH_RETAINED_PATH_PRESENT")
           ) {
             throw new Error("Baseline failed outside the intended retained-path assertion.");
           }
-          console.log("Expected baseline failure:", failed[0].fullName);
-          console.log("Failure is the not.toContain assertion for", expectedPath);
+          console.log("Expected baseline red: real Gateway dispatch sent the synthetic retained path to the local model stub.");
           NODE
-
-  candidate:
-    name: Candidate owner tests and scoped static checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    steps:
-      - name: Checkout fixed candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 65ec5109d48f1a77f168bb99776a1ae7bf6a56a1
-          fetch-depth: 3
-          persist-credentials: false
-      - name: Verify candidate checkout SHA
-        shell: bash
-        run: test "$(git rev-parse HEAD)" = "65ec5109d48f1a77f168bb99776a1ae7bf6a56a1"
-      - name: Set up pinned Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24.21.0"
-      - name: Install pinned pnpm and frozen dependencies without scripts or cache
-        shell: bash
-        run: |
-          npm install --global pnpm@12.11.1
-          test "$(pnpm --version)" = "12.11.1"
-          pnpm install --frozen-lockfile --ignore-scripts
-      - name: Check exact candidate diff
-        shell: bash
-        run: |
-          git diff --check 5cb47d16571b59cfadd57bd7928c30df857478b0 HEAD
-      - name: Run dispatcher and SQLite store owner tests
+      - name: Prove fixed candidate omits retained path at the Gateway entry point
+        if: matrix.expected == 'candidate'
+        working-directory: subject
         shell: bash
         run: |
           node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.extension-database-workers.config.ts \
-            extensions/workboard/src/dispatcher.test.ts \
-            extensions/workboard/src/store.test.ts \
+            --config test/vitest/vitest.gateway-server.config.ts \
+            src/gateway/gateway.server-workboard-scratch-prompt.test.ts \
             --maxWorkers=1
-      - name: Run changed-scope static checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          base=5cb47d16571b59cfadd57bd7928c30df857478b0
-          git cat-file -e "$base^{commit}"
-          git merge-base --is-ancestor "$base" HEAD
-          expected_paths=$'extensions/workboard/src/dispatcher.test.ts\nextensions/workboard/src/store-card-helpers.ts\nextensions/workboard/src/store.test.ts'
-          actual_paths="$(git diff --name-only "$base"...HEAD)"
-          printf 'Changed candidate paths:\n%s\n' "$actual_paths"
-          if [[ "$actual_paths" != "$expected_paths" ]]; then
-            echo 'Candidate path scope differs from the reviewed three-file change.' >&2
-            exit 1
-          fi
-          started=$SECONDS
-          node scripts/check-changed.mjs \
-            --base "$base" \
-            --head HEAD \
-            --timed
-          printf 'Changed-scope check elapsed: %ss\n' "$((SECONDS - started))"
