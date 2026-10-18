@@ -6,7 +6,7 @@ permissions:
 jobs:
   static:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -26,7 +26,31 @@ jobs:
         run: |
           npm install --global pnpm@12.11.1
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Scoped format, lint and types
+      - name: Complete exact interrupted check-plan suffix
         run: |
-          git diff --check 110914e51c486fbfd885284b7b5e31c7d373f125 HEAD
-          node scripts/check-changed.mjs --base 110914e51c486fbfd885284b7b5e31c7d373f125 --head HEAD --timed
+          node --import ./scripts/tsx.mjs --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { detectChangedLanesForPaths } from './scripts/changed-lanes.mts';
+          import { createChangedCheckPlan, createPnpmManagedCommand } from './scripts/check-changed.mts';
+          import { runManagedCommand } from './scripts/lib/managed-child-process.mts';
+          const base = '110914e51c486fbfd885284b7b5e31c7d373f125';
+          const paths = execFileSync('git', ['diff', '--name-only', base, 'HEAD'], { encoding: 'utf8' }).trim().split('\n');
+          const expected = ['ui/src/e2e/session-runtime-freshness.e2e.test.ts', 'ui/src/lib/sessions/index-cached-list-freshness.test.ts', 'ui/src/lib/sessions/session-row-reconcile.ts'];
+          if (JSON.stringify(paths) !== JSON.stringify(expected)) throw new Error('Unexpected candidate diff');
+          const result = detectChangedLanesForPaths({ paths, base, head: 'HEAD' });
+          const plan = createChangedCheckPlan(result, { base, head: 'HEAD' });
+          const first = plan.commands.findIndex(c => c.name.startsWith('dead export scan'));
+          if (first < 0) throw new Error('Expected interrupted audit not selected');
+          console.log('Full canonical plan:', JSON.stringify(plan.commands.map(c => c.name)));
+          console.log('Reused completed prefix from run 39165983341:', JSON.stringify(plan.commands.slice(0, first).map(c => c.name)));
+          const suffix = plan.commands.slice(first);
+          if (suffix.some(c => c.coreTestCheck || c.name.startsWith('typecheck'))) throw new Error('Unexpected typecheck after resume boundary');
+          console.log('Required remaining suffix:', JSON.stringify(suffix.map(c => c.name)));
+          for (const c of suffix) {
+            const command = c.bin ? c : createPnpmManagedCommand(c);
+            console.log('Resume check:', c.name);
+            const status = await runManagedCommand({ bin: command.bin, args: command.args, env: command.env ?? process.env });
+            if (status !== 0) throw new Error(c.name + ' failed with exit ' + status);
+            console.log('Completed check:', c.name);
+          }
+          NODE
