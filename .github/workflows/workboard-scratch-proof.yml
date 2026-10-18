@@ -1,91 +1,87 @@
-name: Issue 126850 Baseline Red Proof
-
+name: Issue 126850 Focused Proof
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  baseline:
-    name: Newer terminal snapshot regression fails on upstream baseline
+  proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: baseline-browser
+            sha: 09449492a363dace44f8e8c2c0a095b83e58be94
+          - mode: candidate
+            sha: cc4402f0a53729ca62b298c9d61073b03c065dac
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
-      - name: Checkout fixed test-only baseline
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 535cd1f41e007b30df6e11d382d0c7c555d35db0
-          fetch-depth: 3
+          ref: ${{ matrix.sha }}
+          fetch-depth: 5
           persist-credentials: false
-      - name: Verify baseline checkout SHA
-        shell: bash
-        run: test "$(git rev-parse HEAD)" = "535cd1f41e007b30df6e11d382d0c7c555d35db0"
-      - name: Set up pinned Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Verify immutable target
+        env:
+          TARGET_SHA: ${{ matrix.sha }}
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24.21.0"
           package-manager-cache: false
-      - name: Install pinned pnpm and frozen dependencies without scripts or cache
-        shell: bash
+      - name: Install frozen dependencies without scripts
         run: |
           npm install --global pnpm@12.11.1
-          test "$(pnpm --version)" = "12.11.1"
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Verify the precise baseline regression fails
-        shell: bash
+      - name: Focused owner and sibling tests
+        if: matrix.mode == 'candidate'
+        run: |
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.ui.config.ts --configLoader runner \
+            ui/src/lib/sessions/index-cached-list-freshness.test.ts \
+            ui/src/lib/sessions/reconcile.test.ts \
+            ui/src/lib/sessions/index.test.ts \
+            ui/src/lib/sessions/session-row-provenance.test.ts --maxWorkers=1
+      - name: Prepare Chromium
+        run: node --import ./scripts/tsx.mjs scripts/ensure-playwright-chromium.mts --require-playwright-chromium
+      - name: Browser flow and retained screenshots
+        env:
+          MODE: ${{ matrix.mode }}
+          OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/issue-126850-media
         run: |
           set +e
-          node scripts/run-vitest.mjs run \
-            --config test/vitest/vitest.ui.config.ts \
-            --configLoader runner \
-            ui/src/lib/sessions/index-cached-list-freshness.test.ts \
-            -t 'admits a newer terminal session sample when its persisted timestamp moves backward' \
-            --maxWorkers=1 \
-            --reporter=json \
-            --outputFile="$RUNNER_TEMP/issue-126850-baseline.json"
-          test_status=$?
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.ui-e2e.config.ts --configLoader runner \
+            ui/src/e2e/session-runtime-freshness.e2e.test.ts --maxWorkers=1 \
+            --reporter=json --outputFile="$RUNNER_TEMP/browser.json"
+          result=$?
           set -e
-          if [[ "$test_status" -eq 0 ]]; then
-            echo 'Baseline unexpectedly passed the regression.' >&2
-            exit 1
-          fi
-          node --input-type=module - "$RUNNER_TEMP/issue-126850-baseline.json" <<'NODE'
-          import { readFileSync } from "node:fs";
-          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          const testName = "admits a newer terminal session sample when its persisted timestamp moves backward";
-          const results = report.testResults;
-          const failed = results.flatMap((result) =>
-            result.assertionResults.filter((assertion) => assertion.status === "failed"),
-          );
-          console.log(
-            "Baseline report diagnostic:",
-            JSON.stringify({
-              numFailedTests: report.numFailedTests,
-              numPassedTests: report.numPassedTests,
-              testResults: results.map((result) => ({
-                name: result.name,
-                status: result.status,
-                message: result.message,
-                assertions: result.assertionResults.map((assertion) => ({
-                  fullName: assertion.fullName,
-                  status: assertion.status,
-                  failureMessages: assertion.failureMessages,
-                })),
-              })),
-            }),
-          );
-          if (
-            report.numFailedTests !== 1 ||
-            report.numPassedTests !== 0 ||
-            results.length !== 1 ||
-            !results[0].name.endsWith("ui/src/lib/sessions/index-cached-list-freshness.test.ts") ||
-            results[0].status !== "failed" ||
-            (results[0].message ?? "").trim() !== "" ||
-            failed.length !== 1 ||
-            !failed[0].fullName.endsWith(testName)
-          ) {
-            throw new Error("Baseline failed outside the intended newer-terminal-sample assertion.");
+          if [[ "$MODE" == candidate ]]; then
+            test "$result" -eq 0
+          else
+            test "$result" -ne 0
+            node --input-type=module - "$RUNNER_TEMP/browser.json" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const failed = report.testResults.flatMap(r => r.assertionResults.filter(a => a.status === 'failed'));
+          console.log('Browser baseline diagnostic:', JSON.stringify(report));
+          if (report.numFailedTests !== 1 || report.numPassedTests !== 0 || failed.length !== 1 ||
+              !failed[0].fullName.includes('clears it on a newer terminal sample') ||
+              !failed[0].failureMessages.join('\n').includes('to be +0')) {
+            throw new Error('Unexpected baseline browser failure');
           }
-          console.log("Expected baseline failure:", failed[0].fullName);
           NODE
+          fi
+      - name: Scoped format, lint and types
+        if: matrix.mode == 'candidate'
+        run: |
+          git diff --check 110914e51c486fbfd885284b7b5e31c7d373f125 HEAD
+          node scripts/check-changed.mjs --base 110914e51c486fbfd885284b7b5e31c7d373f125 --head HEAD --timed
+      - name: Preserve synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: issue-126850-${{ matrix.mode }}
+          path: |
+            ${{ runner.temp }}/issue-126850-media
+            ${{ runner.temp }}/browser.json
+          if-no-files-found: error
+          retention-days: 7
