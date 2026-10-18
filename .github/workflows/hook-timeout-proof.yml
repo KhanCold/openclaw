@@ -41,7 +41,6 @@ jobs:
       CI: "true"
       OPENCLAW_VITEST_RUNTIME: node
       NPM_CONFIG_USERCONFIG: /dev/null
-      NPM_CONFIG_GLOBALCONFIG: /dev/null
       GH_TOKEN: ""
       GITHUB_TOKEN: ""
     steps:
