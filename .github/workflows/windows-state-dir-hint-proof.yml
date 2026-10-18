@@ -49,3 +49,56 @@ jobs:
           }
           Write-Output "Expected baseline failure: $($tests[0].fullName)"
           Write-Output (($tests[0].failureMessages | Out-String).Substring(0, [Math]::Min(600, ($tests[0].failureMessages | Out-String).Length)))
+          exit 0
+
+  candidate:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout fixed candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 1d52bd4309643ad3b3b72c0f708ead47b9319b17
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Check exact checkout and diff
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne '1d52bd4309643ad3b3b72c0f708ead47b9319b17') { throw 'Wrong candidate SHA' }
+          git diff --check e2a97a7e0dba6d16cc5833873c36497f4e575d47 HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate diff whitespace failure' }
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+      - name: Install frozen dependencies without scripts
+        shell: pwsh
+        run: |
+          npm install --global pnpm@12.11.1
+          if ((pnpm --version) -ne '12.11.1') { throw 'Wrong pnpm version' }
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency install failed' }
+      - name: Run real Gateway owner suite
+        shell: pwsh
+        run: |
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.cli-process.config.ts src/cli/state-dir-gateway-check.server.test.ts --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { throw 'Real Gateway owner suite failed' }
+      - name: Run state-dir guard unit owner suite
+        shell: pwsh
+        run: |
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.cli.config.ts src/cli/state-dir-gateway-check.test.ts --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { throw 'State-dir guard unit suite failed' }
+      - name: Scoped format and lint
+        shell: pwsh
+        run: |
+          pnpm exec oxfmt --check src/cli/state-dir-gateway-check.ts src/cli/state-dir-gateway-check.server.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
+          node scripts/run-oxlint.mjs src/cli/state-dir-gateway-check.ts src/cli/state-dir-gateway-check.server.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
+      - name: Core source and test type checks
+        shell: pwsh
+        run: |
+          pnpm tsgo:core
+          if ($LASTEXITCODE -ne 0) { throw 'Core type check failed' }
+          pnpm tsgo:test:src
+          if ($LASTEXITCODE -ne 0) { throw 'Core test type check failed' }
