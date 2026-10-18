@@ -1,17 +1,16 @@
-name: Issue 176223 Candidate Proof
+name: Issue 176223 Final Baseline
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  candidate:
+  baseline:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: cd76e724b4162b15b86987710ce4b6c196c8c255
-          fetch-depth: 6
+          ref: 1a351e692bc4c39d715bc06599e30bffe8b7b39b
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -19,50 +18,22 @@ jobs:
           package-manager-cache: false
       - name: Install frozen physical dependencies
         run: |
-          test "$(git rev-parse HEAD)" = "cd76e724b4162b15b86987710ce4b6c196c8c255"
-          git cat-file -e 806ea5812ccbe393b4dd0c3a6c1ce0010a5d755a^{commit}
           npm install --global pnpm@12.11.1
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Check touched formatting
-        run: |
-          mapfile -t paths < <(git diff --name-only 806ea5812ccbe393b4dd0c3a6c1ce0010a5d755a HEAD)
-          if ! pnpm exec oxfmt --check "${paths[@]}"; then
-            pnpm exec oxfmt "${paths[@]}"
-            git diff > "$RUNNER_TEMP/format.patch"
-            cat "$RUNNER_TEMP/format.patch"
-            exit 1
-          fi
-      - name: Workboard owner and consumer tests
+      - name: Prove expected baseline failure at actual tool entry
         env:
           OPENCLAW_VITEST_RUNTIME: node
-        run: pnpm test:extension workboard --maxWorkers=1
-      - name: Canonical targeted type and lint checks
         run: |
-          node --import ./scripts/tsx.mjs --input-type=module <<'NODE'
-          import {execFileSync} from 'node:child_process';
-          import {detectChangedLanesForPaths} from './scripts/changed-lanes.mts';
-          import {createChangedCheckPlan,createPnpmManagedCommand} from './scripts/check-changed.mts';
-          import {runManagedCommand} from './scripts/lib/managed-child-process.mts';
-          const base='806ea5812ccbe393b4dd0c3a6c1ce0010a5d755a';
-          const paths=execFileSync('git',['diff','--name-only',base,'HEAD'],{encoding:'utf8'}).trim().split('\n');
-          const result=detectChangedLanesForPaths({paths,base,head:'HEAD'});
-          const plan=createChangedCheckPlan(result,{base,head:'HEAD'});
-          console.log('Full optional changed-check plan:',JSON.stringify(plan.commands.map(c=>c.name)));
-          const commands=plan.commands.filter(c=>c.name.startsWith('typecheck ')||c.name.startsWith('lint '));
-          if(commands.length===0) throw new Error('No required targeted checks selected');
-          for(const c of commands){
-            const command=c.bin?c:createPnpmManagedCommand(c);
-            console.log('Required targeted check:',c.name,JSON.stringify(command.args));
-            const status=await runManagedCommand({bin:command.bin,args:command.args,env:command.env??process.env});
-            if(status!==0) throw new Error(c.name+' failed '+status);
-            console.log('Completed required check:',c.name);
-          }
-          NODE
-      - name: Retain formatter correction if needed
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: issue-176223-format
-          path: ${{ runner.temp }}/format.patch
-          if-no-files-found: ignore
-          retention-days: 7
+          set +e
+          pnpm test extensions/workboard/src/tools.test.ts --maxWorkers=1 --testNamePattern 'refreshes diagnostics without making inactive cards look edited' > "$RUNNER_TEMP/baseline.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$status" -eq 1
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          text = (Path(os.environ['RUNNER_TEMP']) / 'baseline.log').read_text()
+          assert 'AssertionError' in text and 'updatedAt' in text, 'not the expected product failure'
+          assert '1 failed' in text, 'expected one failed regression'
+          PY
