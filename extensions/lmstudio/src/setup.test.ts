@@ -188,6 +188,8 @@ function createPromptText(apiKey = "lmstudio-test-key", baseUrl = "http://localh
   return vi.fn().mockResolvedValueOnce(baseUrl).mockResolvedValueOnce(apiKey);
 }
 
+// `promptText` is the public callback-based setup API. Keep its non-wizard
+// coverage next to the wizard prompter cases.
 function runInteractive(
   params: Omit<Parameters<typeof promptAndConfigureLmstudioInteractive>[0], "config"> & {
     config?: OpenClawConfig;
@@ -1028,6 +1030,7 @@ describe("lmstudio setup", () => {
     );
 
     expect(discoverLmstudioModelsMock.mock.calls[0]?.[0]).toMatchObject({
+      onListedModels: expect.any(Function),
       baseUrl: "http://localhost:1234/v1",
       apiKey: "secretref-lmstudio-key",
       headers: {
@@ -1098,6 +1101,7 @@ describe("lmstudio setup", () => {
     );
 
     expect(discoverLmstudioModelsMock.mock.calls[0]?.[0]).toMatchObject({
+      onListedModels: expect.any(Function),
       baseUrl: "http://localhost:1234/v1",
       apiKey: expectedApiKey,
       headers,

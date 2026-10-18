@@ -259,7 +259,7 @@ function generateZshCommandGroup(
   local -a commands
   local -a options
   
-  _arguments -C \\
+  _arguments -s -C \\
     ${generateZshArgs(command)} \\
     ${generateZshSubcmdList(command)} \\
     "*::arg:->args"
@@ -284,7 +284,7 @@ function generateZshSubcommands(program: Command, prefix: string): string {
           ? `\n${generateZshCommandGroup(cmd, funcName)}\n`
           : `
 ${funcName}() {
-  _arguments -C \\
+  _arguments -s -C \\
     ${generateZshArgs(cmd)}
 }
 `;
