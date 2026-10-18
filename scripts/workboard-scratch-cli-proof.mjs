@@ -5,6 +5,9 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
+import { GatewayClient } from "../src/gateway/client.ts";
+import { loadOrCreateDeviceIdentity } from "../src/infra/device-identity.ts";
+import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../src/utils/message-channel.ts";
 
 const repo = process.cwd();
 const temp = await mkdtemp(path.join(os.tmpdir(), "workboard-cli-proof-"));
@@ -46,6 +49,7 @@ await writeFile(configPath, JSON.stringify(config));
 const env = { ...process.env, HOME: temp, OPENCLAW_STATE_DIR: state, OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_GATEWAY_TOKEN: token };
 const log = [];
 let gateway;
+let fixtureClient;
 function cli(args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(repo, "openclaw.mjs"), ...args], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -65,6 +69,13 @@ function sanitizedGatewayTail() {
     .replaceAll(`http://127.0.0.1:${providerPort}/v1`, "[redacted-loopback-endpoint]")
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[redacted-ip]")
   ).join("\n");
+}
+function redactMessage(value) {
+  return String(value)
+    .replaceAll(token, "[redacted-token]")
+    .replaceAll(temp, "[redacted-temp-path]")
+    .replaceAll(repo, "[redacted-repo-path]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[redacted-ip]");
 }
 function waitForRequest(ms = 90000) {
   return Promise.race([captured, new Promise((_, reject) => setTimeout(() => reject(new Error("timed out waiting for synthetic model request")), ms))]);
@@ -86,10 +97,33 @@ try {
   const cardId = JSON.parse(createOut).card.id;
   const retainedPath = path.join(workspace, "synthetic-retained-repository");
   await mkdir(retainedPath, { recursive: true });
-  const updateArgs = ["gateway", "call", "workboard.cards.update", "--port", String(gatewayPort), "--token", token, "--params"];
-  await cli([...updateArgs, JSON.stringify({ id: cardId, patch: { workspace: { kind: "worktree", path: retainedPath, branch: "main" } } })]);
-  const switchOut = await cli([...updateArgs, JSON.stringify({ id: cardId, patch: { workspace: { kind: "scratch" } } })]);
-  const switched = JSON.parse(switchOut).card;
+  let helloResolve;
+  let helloReject;
+  const hello = new Promise((resolve, reject) => { helloResolve = resolve; helloReject = reject; });
+  fixtureClient = new GatewayClient({
+    url: `ws://127.0.0.1:${gatewayPort}`,
+    token,
+    clientName: GATEWAY_CLIENT_NAMES.CLI,
+    clientDisplayName: "Workboard scratch fixture setup",
+    clientVersion: "source-proof",
+    mode: GATEWAY_CLIENT_MODES.CLI,
+    role: "operator",
+    scopes: ["operator.admin", "operator.write", "operator.read"],
+    deviceIdentity: loadOrCreateDeviceIdentity({ path: path.join(state, "proof-device-identity.sqlite") }),
+    onHelloOk: () => helloResolve(),
+    onConnectError: () => helloReject(new Error("fixture Gateway client connection failed")),
+  });
+  fixtureClient.start();
+  await Promise.race([hello, new Promise((_, reject) => setTimeout(() => reject(new Error("fixture Gateway client readiness timed out")), 15000))]);
+  let switched;
+  try {
+    await fixtureClient.request("workboard.cards.update", { id: cardId, patch: { workspace: { kind: "worktree", path: retainedPath, branch: "main" } } });
+    switched = await fixtureClient.request("workboard.cards.update", { id: cardId, patch: { workspace: { kind: "scratch" } } });
+  } catch (error) {
+    throw new Error(`Gateway Workboard workspace switch failed: ${redactMessage(error)}`);
+  }
+  await fixtureClient.stopAndWait({ timeoutMs: 5000 });
+  fixtureClient = undefined;
   if (switched.metadata?.automation?.workspace?.kind !== "scratch" || switched.metadata?.automation?.workspace?.path !== retainedPath) throw new Error("CLI Gateway did not retain the synthetic path across the scratch switch");
   console.log("CLI proof: Gateway CLI RPC changed workspace from worktree to scratch while retaining stored path metadata.");
   const dispatch = cli(["workboard", "dispatch", "--max-starts", "1", "--json"], { timeout: 60000 });
@@ -106,6 +140,7 @@ try {
   console.log("CLI proof: official openclaw workboard dispatch started one worker; loopback model stub captured its request.");
   console.log(JSON.stringify({ expected, workerContext: "Workspace: scratch", syntheticRetainedPathPresent: retainedPathPresent, modelService: "local loopback stub; no external provider call", model: request.model }));
 } finally {
+  if (fixtureClient) await fixtureClient.stopAndWait({ timeoutMs: 5000 }).catch(() => {});
   if (gateway && gateway.exitCode === null) { gateway.kill("SIGTERM"); await Promise.race([once(gateway, "exit"), new Promise((resolve) => setTimeout(resolve, 5000))]); }
   provider.closeAllConnections();
   if (provider.listening) await new Promise((resolve) => provider.close(resolve));

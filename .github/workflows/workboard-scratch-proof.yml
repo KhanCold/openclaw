@@ -66,4 +66,4 @@ jobs:
         env:
           WORKBOARD_PROOF_EXPECTED: ${{ matrix.expected }}
         run: |
-          node scripts/workboard-scratch-cli-proof.mjs
+          node --import ./scripts/tsx.mjs scripts/workboard-scratch-cli-proof.mjs
