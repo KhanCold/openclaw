@@ -131,8 +131,16 @@ try {
   fixtureClient = undefined;
   if (switched.metadata?.automation?.workspace?.kind !== "scratch" || switched.metadata?.automation?.workspace?.path !== retainedPath) throw new Error("CLI Gateway did not retain the synthetic path across the scratch switch");
   console.log("CLI proof: Gateway CLI RPC changed workspace from worktree to scratch while retaining stored path metadata.");
+  const dispatchPromise = cli(["workboard", "dispatch", "--max-starts", "1", "--url", `ws://127.0.0.1:${gatewayPort}`, "--token", token, "--json"], { timeout: 60000 }).then((output) => {
+    const result = JSON.parse(output);
+    const startedCount = Array.isArray(result.started) ? result.started.length : 0;
+    const failureCount = Array.isArray(result.startFailures) ? result.startFailures.length : 0;
+    console.log(JSON.stringify({ dispatchStartedCount: startedCount, dispatchStartFailureCount: failureCount, gatewayUnavailableFallback: result.gatewayUnavailable === true }));
+    if (startedCount !== 1) throw new Error("official Workboard CLI did not start exactly one worker");
+    return output;
+  });
   const [dispatchOut, request] = await Promise.all([
-    cli(["workboard", "dispatch", "--max-starts", "1", "--url", `ws://127.0.0.1:${gatewayPort}`, "--token", token, "--json"], { timeout: 60000 }),
+    dispatchPromise,
     waitForRequest(),
   ]);
   const dispatched = JSON.parse(dispatchOut);
