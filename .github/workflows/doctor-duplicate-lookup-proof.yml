@@ -42,7 +42,7 @@ jobs:
           import os,pathlib,re
           log=pathlib.Path(os.environ['RUNNER_TEMP'],'baseline.log').read_text()
           log=re.sub(r'\x1b\[[0-9;]*m','',log)
-          assert 'to be less than or equal to 2048' in log, log
+          assert 'to be less than or equal to 256' in log, log
           assert re.search(r'Tests\s+1 failed',log), log
-          print('EXPECTED BASELINE RED: actual Doctor settled and imported 64 duplicate groups; artifact path-read budget failed.')
+          print('EXPECTED BASELINE RED: actual Doctor settled and imported 64 duplicate groups; inventory traversal budget failed.')
           PY
