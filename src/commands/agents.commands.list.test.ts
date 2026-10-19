@@ -127,19 +127,16 @@ describe("agentsListCommand", () => {
     expect(mocks.status).not.toHaveBeenCalled();
   });
   it("shows requested routing rules beneath their agent in tree output", async () => {
-    setEntries(
-      { main: { name: "Main" }, child: { name: "Child" }, unbound: { name: "Unbound" } },
-      [{ agentId: "child", match: { channel: "telegram" } }],
-    );
+    setEntries({ main: { name: "Main" }, child: { name: "Child" }, unbound: { name: "Unbound" } }, [
+      { agentId: "child", match: { channel: "telegram" } },
+    ]);
     mocks.provenance.mockResolvedValue([
       { agentId: "child", createdVia: "agent", creatorAgentId: "main", createdAtMs: 2 },
     ]);
 
     const plainTree = (await list({ tree: true })).text;
     const treeWithBindings = (await list({ tree: true, bindings: true })).text;
-    expect(plainTree).toBe(
-      "Agents:\n- main (Main)\n  - child (Child)\n- unbound (Unbound)",
-    );
+    expect(plainTree).toBe("Agents:\n- main (Main)\n  - child (Child)\n- unbound (Unbound)");
     expect(treeWithBindings).toBe(
       "Agents:\n- main (Main)\n  - child (Child)\n    Routing rules:\n      - telegram\n- unbound (Unbound)",
     );
