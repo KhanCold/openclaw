@@ -53,12 +53,14 @@ describe("state-store preAction guard", () => {
 
     const error = await program.parseAsync(process.argv).catch((failure: unknown) => failure);
     expect(error).toBeInstanceOf(ExpectedCliError);
-    expect(formatCliFailureLines({
-      title: "The CLI command failed.",
-      error,
-      argv: process.argv,
-      env: {},
-    })).toEqual(["state stores differ"]);
+    expect(
+      formatCliFailureLines({
+        title: "The CLI command failed.",
+        error,
+        argv: process.argv,
+        env: {},
+      }),
+    ).toEqual(["state stores differ"]);
 
     expect(mocks.check).toHaveBeenCalledWith({ command: "openclaw configure" });
     expect(mocks.ensureBootstrap).not.toHaveBeenCalled();
