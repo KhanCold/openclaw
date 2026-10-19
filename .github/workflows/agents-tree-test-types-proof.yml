@@ -1,0 +1,30 @@
+name: Agents tree bindings test types
+
+on:
+  push:
+    branches:
+      - ci/agents-tree-test-types-proof
+
+permissions: {}
+
+jobs:
+  test-types:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 0d93fd3ecf3a368df79ceda719eed766701e388a
+          persist-credentials: false
+      - name: Verify candidate source
+        run: test "$(git rev-parse HEAD)" = "0d93fd3ecf3a368df79ceda719eed766701e388a"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Install frozen dependencies without scripts
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check source test type graphs
+        run: corepack pnpm tsgo:test:src
