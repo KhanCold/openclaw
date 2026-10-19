@@ -25,8 +25,8 @@ import {
   withOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
-import { collectRecoveryInventory } from "./doctor-session-sqlite-recovery-inventory.js";
 import * as discovery from "./doctor-session-sqlite-discovery.js";
+import { collectRecoveryInventory } from "./doctor-session-sqlite-recovery-inventory.js";
 import { restoreSessionSqliteMigrationRun } from "./doctor-session-sqlite-restore.js";
 import { runDoctorSessionSqlite } from "./doctor-session-sqlite.js";
 
@@ -451,7 +451,7 @@ it("recover settles identical repeated archives across retained manifests and na
 
 it("settles many duplicate archives without rescanning the inventory for each claim", () =>
   withOpenClawTestState({ label: "doctor-duplicate-lookup-work" }, async (state) => {
-    const { sessions, target, archiveDir, run, search } = discoveryState(state);
+    const { sessions, target, archiveDir, run, scope } = discoveryState(state);
     fs.mkdirSync(archiveDir);
     const count = 64;
     const manifests: string[] = [];
@@ -492,7 +492,9 @@ it("settles many duplicate archives without rescanning the inventory for each cl
       });
     const report = await run("import");
     expect(report.totals.importedEntries).toBe(count);
-    expect(search("lookupscalingneedle")).toHaveLength(count);
+    expect(searchTranscripts({ ...scope, query: "lookupscalingneedle", limit: count }).hits).toHaveLength(
+      count,
+    );
     expect(fs.readdirSync(archiveDir)).toHaveLength(count);
     for (const manifestPath of manifests) {
       const manifest = readManifest(manifestPath)!;
