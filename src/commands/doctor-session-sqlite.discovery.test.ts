@@ -25,6 +25,7 @@ import {
   withOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
+import * as discovery from "./doctor-session-sqlite-discovery.js";
 import { collectRecoveryInventory } from "./doctor-session-sqlite-recovery-inventory.js";
 import { restoreSessionSqliteMigrationRun } from "./doctor-session-sqlite-restore.js";
 import { runDoctorSessionSqlite } from "./doctor-session-sqlite.js";
@@ -446,6 +447,71 @@ it("recover settles identical repeated archives across retained manifests and na
       expect(issues(repeated)).toEqual(deferred);
       expect(repeated.totals.importedEntries).toBe(0);
     }
+  }));
+
+it("settles many duplicate archives without rescanning the inventory for each claim", () =>
+  withOpenClawTestState({ label: "doctor-duplicate-lookup-work" }, async (state) => {
+    const { sessions, target, archiveDir, run, scope } = discoveryState(state);
+    fs.mkdirSync(archiveDir);
+    const count = 64;
+    const manifests: string[] = [];
+    for (let copy = 1; copy <= 2; copy++) {
+      const retained = createSessionSqliteMigrationRun(state.env, [target]);
+      manifests.push(retained.manifestPath);
+      for (let index = 0; index < count; index++) {
+        const id = `lookup-${index}`;
+        const source = path.join(sessions, `${id}.jsonl`);
+        fs.writeFileSync(source, transcript(id, "lookupscalingneedle"));
+        await publishArchive(
+          retained,
+          target,
+          source,
+          path.join(archiveDir, `${id}.jsonl.imported-${copy}`),
+        );
+      }
+      completeRun(retained, target);
+    }
+    const collect = discovery.collectHistoricalArchiveSources;
+    let inventoryReads = 0;
+    let inventorySize = 0;
+    using measured = vi
+      .spyOn(discovery, "collectHistoricalArchiveSources")
+      .mockImplementationOnce((params) => {
+        const result = collect(params);
+        inventorySize = result.inventory.artifacts.length;
+        // Count inventory traversal, not later reads of selected objects during disposal.
+        const observed = new Proxy(result.inventory.artifacts, {
+          get(artifacts, property, receiver) {
+            if (typeof property === "string" && /^\d+$/u.test(property)) {
+              inventoryReads++;
+            }
+            return Reflect.get(artifacts, property, receiver);
+          },
+        });
+        result.inventory.artifacts = observed;
+        return result;
+      });
+    const report = await run("import");
+    measured.mockRestore();
+    expect(report.totals.importedEntries).toBe(count);
+    for (let index = 0; index < count; index++) {
+      const sessionId = `lookup-${index}`;
+      expect(searchTranscripts({ ...scope, query: "lookupscalingneedle", sessionId }).hits).toEqual(
+        [expect.objectContaining({ sessionId })],
+      );
+    }
+    expect(fs.readdirSync(archiveDir)).toHaveLength(count);
+    for (const manifestPath of manifests) {
+      const manifest = readManifest(manifestPath)!;
+      for (const move of manifest.targets.flatMap((owner) => owner.completedMoves)) {
+        const id = path.basename(move.sourcePath, ".jsonl");
+        expect(fs.readFileSync(move.archivePath, "utf8")).toBe(
+          transcript(id, "lookupscalingneedle"),
+        );
+      }
+    }
+    expect(inventorySize).toBe(count * 2);
+    expect(inventoryReads).toBeLessThanOrEqual(inventorySize * 2);
   }));
 
 it("keeps diagnostic, deleted, mismatched, and ambiguous inputs out of searchable history", () =>

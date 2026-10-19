@@ -90,6 +90,15 @@ export async function settleDuplicateSessionSqliteArchives(params: {
     claims,
     inventory: { artifacts, references },
   } = collectHistoricalArchiveSources(params);
+  if (claims.length === 0) {
+    return [];
+  }
+  const artifactsByPath = new Map<string, (typeof artifacts)[number]>();
+  for (const artifact of artifacts) {
+    if (!artifactsByPath.has(artifact.path)) {
+      artifactsByPath.set(artifact.path, artifact);
+    }
+  }
   const failures: Array<{
     target: SessionSqliteMigrationTargetInput;
     issues: DoctorSessionSqliteIssue[];
@@ -131,7 +140,7 @@ export async function settleDuplicateSessionSqliteArchives(params: {
       continue;
     }
     for (const refs of group.filter((candidate) => candidate !== survivor)) {
-      const item = artifacts.find((candidate) => candidate.path === refs[0]!.move.archivePath)!;
+      const item = artifactsByPath.get(refs[0]!.move.archivePath)!;
       survivors.set(item.path, survivor);
       try {
         assertSurvivor(refs);
