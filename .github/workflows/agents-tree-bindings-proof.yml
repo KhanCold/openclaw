@@ -1,0 +1,105 @@
+name: Agents tree bindings scoped proof
+
+on:
+  push:
+    branches:
+      - ci/agents-tree-bindings-proof
+
+permissions: {}
+
+jobs:
+  scoped-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Install frozen dependencies without lifecycle scripts
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prove baseline red and patched CLI green with synthetic config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent-fixture/state"
+          cat > "$RUNNER_TEMP/agent-fixture/openclaw.json" <<'JSON'
+          {
+            "agents": {
+              "entries": {
+                "main": { "name": "Main" },
+                "child": { "name": "Child" },
+                "unbound": { "name": "Unbound" }
+              }
+            },
+            "bindings": [
+              { "agentId": "child", "match": { "channel": "telegram" } }
+            ]
+          }
+          JSON
+          cat > "$RUNNER_TEMP/agent-fixture/proof.py" <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          source = pathlib.Path("src/commands/agents.commands.list.ts")
+          config = pathlib.Path(os.environ["RUNNER_TEMP"]) / "agent-fixture/openclaw.json"
+          state = pathlib.Path(os.environ["RUNNER_TEMP"]) / "agent-fixture/state"
+          env = dict(os.environ, OPENCLAW_CONFIG_PATH=str(config), OPENCLAW_STATE_DIR=str(state))
+
+          def cli(*args):
+              result = subprocess.run(
+                  ["node", "--import", "./scripts/tsx.mjs", "src/entry.ts", "agents", "list", *args],
+                  env=env, text=True, capture_output=True, timeout=90,
+              )
+              assert result.returncode == 0, (args, result.stdout, result.stderr)
+              return result.stdout
+
+          baseline = subprocess.check_output(
+              ["git", "show", "HEAD~2:src/commands/agents.commands.list.ts"]
+          )
+          patched = source.read_bytes()
+          try:
+              source.write_bytes(baseline)
+              before = {
+                  "tree": cli("--tree"),
+                  "bindings": cli("--bindings"),
+                  "both": cli("--tree", "--bindings"),
+                  "json": json.loads(cli("--json", "--bindings")),
+              }
+              assert "telegram" in before["bindings"], before
+              assert "telegram" not in before["tree"], before
+              assert "telegram" not in before["both"], before
+              source.write_bytes(patched)
+              after = {
+                  "tree": cli("--tree"),
+                  "bindings": cli("--bindings"),
+                  "both": cli("--tree", "--bindings"),
+                  "json": json.loads(cli("--json", "--bindings")),
+              }
+              assert after["tree"] == before["tree"]
+              assert after["bindings"] == before["bindings"]
+              assert after["json"] == before["json"]
+              assert "- child" in after["both"]
+              assert "Routing rules:\n    - telegram" in after["both"], after["both"]
+              assert "- unbound" in after["both"]
+              assert after["both"].count("telegram") == 1, after["both"]
+              print("PASS: real CLI baseline red, head green, tree/bindings/JSON controls, unbound agent")
+          finally:
+              source.write_bytes(patched)
+          PY
+          python3 "$RUNNER_TEMP/agent-fixture/proof.py"
+      - name: Focused unit regression
+        run: corepack pnpm test src/commands/agents.commands.list.test.ts --maxWorkers=1
+      - name: Scoped format and lint
+        run: |
+          corepack pnpm exec oxfmt --check src/commands/agents.commands.list.ts src/commands/agents.commands.list.test.ts
+          corepack pnpm exec oxlint src/commands/agents.commands.list.ts src/commands/agents.commands.list.test.ts
+      - name: Core TypeScript check
+        run: corepack pnpm tsgo:core
