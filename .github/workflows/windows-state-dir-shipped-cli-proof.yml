@@ -23,8 +23,8 @@ jobs:
       - name: Confirm source matches repair candidate
         shell: pwsh
         run: |
-          if ((git rev-parse HEAD^).Trim() -ne 'e01686e02d3e98bb8ad529578516bcf178f856c6') { throw 'Proof is not based on the repair candidate' }
-          git diff --exit-code HEAD^ HEAD -- src
+          if ((git rev-parse HEAD~2).Trim() -ne 'e01686e02d3e98bb8ad529578516bcf178f856c6') { throw 'Proof is not based on the repair candidate' }
+          git diff --exit-code HEAD~2 HEAD -- src
           if ($LASTEXITCODE -ne 0) { throw 'Proof branch changed product or test code' }
       - name: Install and build the shipped CLI
         shell: pwsh
@@ -115,6 +115,17 @@ jobs:
             $repair = $match.Groups['repair'].Value
             if (-not $repair.Contains('& openclaw channels add } finally')) { throw 'Repair block targets an unexpected action' }
             if ((Get-Content -Raw $cliConfig) -ne $config) { throw 'Refused CLI changed its config' }
+            $listRefusal = (& openclaw channels list 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0) { throw 'Mismatched read-only CLI unexpectedly succeeded' }
+            $listMatch = [regex]::Match($listRefusal, '(?s)Fix: in PowerShell, run (?<repair>& \{.*?\})\. To write')
+            if (-not $listMatch.Success) { throw 'Read-only CLI did not emit a copyable repair block' }
+            $listRepair = $listMatch.Groups['repair'].Value
+            if (-not $listRepair.Contains('& openclaw channels list } finally')) { throw 'Read-only repair block targets an unexpected action' }
+            $listOutput = (Invoke-Expression $listRepair 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw "Unmodified emitted repair block failed: $listOutput" }
+            if ($env:OPENCLAW_STATE_DIR -ne $priorState -or $env:OPENCLAW_CONFIG_PATH -ne $priorConfig) { throw 'Unmodified repair did not restore the prior environment' }
+            if ((Get-Content -Raw $cliConfig) -ne $config) { throw 'Unmodified repair changed the CLI store' }
+            Write-Output 'UNMODIFIED_EMITTED_POWERSHELL_REPAIR=PASS'
             Write-Output 'SHIPPED_CLI_REFUSAL=live Gateway state/config mismatch'
             Write-Output 'DEFAULT_OUTPUT_SECRET_CONTROL=PASS'
             Write-Output "EMITTED_POWERSHELL_REPAIR=$repair"
