@@ -23,6 +23,7 @@ jobs:
           package-manager-cache: false
       - name: Verify baseline source before dependency setup
         run: |
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git 11c31139b9e0ccfdb6dd81b5b8cdc4db2a2e3627
           git cat-file -e 11c31139b9e0ccfdb6dd81b5b8cdc4db2a2e3627
           test -z "$(git diff 11c31139b9e0ccfdb6dd81b5b8cdc4db2a2e3627 HEAD -- src/commands/doctor-session-sqlite-retirement.ts)"
       - name: Install frozen dependencies without lifecycle scripts
