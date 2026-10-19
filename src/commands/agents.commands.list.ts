@@ -210,7 +210,9 @@ export async function agentsListCommand(
   }
 
   if (opts.tree) {
-    runtime.log(["Agents:", ...formatAgentTree(summaries, provenance, opts.bindings === true)].join("\n"));
+    runtime.log(
+      ["Agents:", ...formatAgentTree(summaries, provenance, opts.bindings === true)].join("\n"),
+    );
     return;
   }
 
