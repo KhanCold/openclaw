@@ -1,0 +1,42 @@
+name: Doctor duplicate lookup candidate proof
+
+on:
+  push:
+    branches: [proof/177352-candidate]
+
+permissions: {}
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      OPENCLAW_CI_TEST_RUNTIME_POLICY: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Install frozen dependencies without lifecycle scripts
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+      - name: Focused real Doctor regression and recovery controls
+        run: |
+          corepack pnpm test src/commands/doctor-session-sqlite.discovery.test.ts src/commands/doctor-session-sqlite-recovery-inventory.test.ts src/commands/doctor-session-sqlite.active-settlement.test.ts src/commands/doctor-session-sqlite.retirement-disposal.test.ts src/commands/doctor-session-sqlite.retirement-mutations.test.ts --maxWorkers=1
+      - name: Changed formatting and lint
+        if: always()
+        run: |
+          corepack pnpm exec oxfmt --check src/commands/doctor-session-sqlite-retirement.ts src/commands/doctor-session-sqlite.discovery.test.ts || { corepack pnpm exec oxfmt --write src/commands/doctor-session-sqlite-retirement.ts src/commands/doctor-session-sqlite.discovery.test.ts; git diff -- src/commands/doctor-session-sqlite-retirement.ts src/commands/doctor-session-sqlite.discovery.test.ts; exit 1; }
+          node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/commands/doctor-session-sqlite-retirement.ts src/commands/doctor-session-sqlite.discovery.test.ts
+      - name: Core and Doctor-test types
+        if: always()
+        run: |
+          corepack pnpm tsgo:core
+          node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.commands-doctor.json
+      - name: Build shipped runtime
+        run: corepack pnpm build
