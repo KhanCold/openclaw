@@ -1,0 +1,42 @@
+name: Fallback restoration candidate proof
+
+on:
+  push:
+    branches: [proof/177393-candidate]
+
+permissions: {}
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPENCLAW_CI_TEST_RUNTIME_POLICY: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Install frozen dependencies without lifecycle scripts
+        id: install
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+      - name: Changed-file formatting and type-aware lint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          corepack pnpm exec oxfmt --check src/auto-reply/reply/agent-runner-result-accounting.ts src/auto-reply/reply/agent-runner-result-accounting.restoration.test.ts
+          node scripts/run-oxlint.mjs --tsconfig config/tsconfig/oxlint.core.json src/auto-reply/reply/agent-runner-result-accounting.ts src/auto-reply/reply/agent-runner-result-accounting.restoration.test.ts
+      - name: Real restoration regression and accounting-completion siblings
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          time corepack pnpm test src/auto-reply/reply/agent-runner-result-accounting.restoration.test.ts --maxWorkers=1
+          time corepack pnpm test src/auto-reply/reply/agent-runner-result-accounting.fallback.test.ts src/auto-reply/reply/agent-runner-result-accounting.final-delivery.test.ts src/auto-reply/reply/agent-runner-result-accounting.persistence.test.ts src/auto-reply/reply/agent-runner-result-accounting.test.ts src/auto-reply/reply/agent-runner-completion.memory.test.ts src/auto-reply/reply/agent-runner-completion.persistence.test.ts --maxWorkers=1
+      - name: Production and messaging-test type graphs
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          node scripts/run-tsgo.mjs -p tsconfig.core.json
+          node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.messaging.json
