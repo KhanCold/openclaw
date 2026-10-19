@@ -1,0 +1,137 @@
+name: Windows shipped state-dir CLI proof
+
+on:
+  push:
+    branches:
+      - proof/windows-state-dir-default-cli
+
+permissions: {}
+
+jobs:
+  shipped-cli:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Confirm source matches repair candidate
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD^).Trim() -ne 'e01686e02d3e98bb8ad529578516bcf178f856c6') { throw 'Proof is not based on the repair candidate' }
+          git diff --exit-code HEAD^ HEAD -- src
+          if ($LASTEXITCODE -ne 0) { throw 'Proof branch changed product or test code' }
+      - name: Install and build the shipped CLI
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen install failed' }
+          corepack pnpm build
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+          if (-not (Test-Path dist/entry.js)) { throw 'Built CLI entry is missing' }
+          corepack pnpm test src/cli/program/preaction-state-store.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Focused state-store guard test failed' }
+      - name: Run real Windows CLI refusal, repaired action, and environment restoration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = (Get-Location).Path
+          $root = Join-Path $env:RUNNER_TEMP 'shipped-state-dir-proof'
+          $gatewayState = Join-Path $root 'gateway'
+          $cliState = Join-Path $root 'cli'
+          $bin = Join-Path $root 'bin'
+          New-Item -ItemType Directory -Force $gatewayState, $cliState, $bin | Out-Null
+          $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+          $listener.Stop()
+          $syntheticToken = 'synthetic-windows-proof-token'
+          $gatewayConfig = Join-Path $gatewayState 'openclaw.json'
+          $cliConfig = Join-Path $cliState 'openclaw.json'
+          $config = @{ gateway = @{ mode = 'local'; port = $port; auth = @{ mode = 'token'; token = $syntheticToken } } } | ConvertTo-Json -Depth 8
+          [IO.File]::WriteAllText($gatewayConfig, $config)
+          [IO.File]::WriteAllText($cliConfig, $config)
+          $launcher = Join-Path $bin 'openclaw.cmd'
+          [IO.File]::WriteAllText($launcher, "@echo off`r`nnode `"$repo\openclaw.mjs`" %*`r`n")
+          $env:PATH = "$bin;$env:PATH"
+          if ((Get-Command openclaw).Source -ne $launcher) { throw 'Proof launcher did not resolve to the built CLI' }
+          $env:NO_COLOR = '1'
+          $env:OPENCLAW_HOME = $root
+          $env:OPENCLAW_STATE_DIR = $gatewayState
+          $env:OPENCLAW_CONFIG_PATH = $gatewayConfig
+          $env:OPENCLAW_GATEWAY_PORT = [string]$port
+          $env:OPENCLAW_SKIP_CHANNELS = '1'
+          $env:OPENCLAW_SKIP_CRON = '1'
+          $env:OPENCLAW_SKIP_GMAIL_WATCHER = '1'
+          $env:OPENCLAW_SKIP_BROWSER_CONTROL_SERVER = '1'
+          $env:OPENCLAW_SKIP_CANVAS_HOST = '1'
+          $env:OPENCLAW_DISABLE_BUNDLED_PLUGINS = '1'
+          $gatewayOut = Join-Path $root 'gateway.out'
+          $gatewayErr = Join-Path $root 'gateway.err'
+          $gateway = Start-Process -FilePath (Get-Command node).Source -ArgumentList @("`"$repo\openclaw.mjs`"", 'gateway', 'run', '--allow-unconfigured') -PassThru -RedirectStandardOutput $gatewayOut -RedirectStandardError $gatewayErr
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 120; $i++) {
+              if ($gateway.HasExited) { throw "Gateway exited early with code $($gateway.ExitCode)" }
+              try {
+                $tcp = [Net.Sockets.TcpClient]::new('127.0.0.1', $port)
+                $tcp.Dispose()
+                $ready = $true
+                break
+              } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $ready) { throw 'Local Gateway did not become ready' }
+            $env:OPENCLAW_STATE_DIR = $cliState
+            $env:OPENCLAW_CONFIG_PATH = $cliConfig
+            $env:OPENCLAW_SKIP_CHANNELS = '0'
+            $env:OPENCLAW_DISABLE_BUNDLED_PLUGINS = '0'
+            Remove-Item Env:OPENCLAW_DEBUG -ErrorAction SilentlyContinue
+            $env:OPENCLAW_STATE_DIR = $gatewayState
+            $env:OPENCLAW_CONFIG_PATH = $gatewayConfig
+            $control = (& openclaw channels list 2>&1 | Out-String)
+            $controlExit = $LASTEXITCODE
+            if ($controlExit -ne 0 -or $control -match 'different state directories|Fix: in PowerShell') { throw 'Matching Gateway state did not allow ordinary CLI use' }
+            Write-Output 'MATCHING_STATE_CONTROL=PASS'
+            $env:OPENCLAW_STATE_DIR = $cliState
+            $env:OPENCLAW_CONFIG_PATH = $cliConfig
+            $priorState = $env:OPENCLAW_STATE_DIR
+            $priorConfig = $env:OPENCLAW_CONFIG_PATH
+            $refusal = (& openclaw channels add --channel telegram --token $syntheticToken 2>&1 | Out-String)
+            $refusalExit = $LASTEXITCODE
+            Write-Output "INITIAL_CLI_EXIT=$refusalExit"
+            Write-Output "INITIAL_CLI_OUTPUT=$($refusal.Replace($syntheticToken, '[synthetic]'))"
+            if ($refusalExit -eq 0) { throw 'Mismatched CLI unexpectedly succeeded' }
+            if ($refusal.Contains($syntheticToken)) { throw 'Refusal leaked the synthetic Gateway token' }
+            if ($refusal -match 'For help, run openclaw doctor') { throw 'Refusal was hidden behind a generic failure' }
+            if ($refusal -notmatch 'No credentials or configuration were written\. CLI and live Gateway use different') { throw 'Shipped CLI did not emit the live-Gateway mismatch refusal' }
+            $match = [regex]::Match($refusal, '(?s)Fix: in PowerShell, run (?<repair>& \{.*?\})\. To write')
+            if (-not $match.Success) { throw 'Shipped CLI did not emit a copyable PowerShell repair block' }
+            $repair = $match.Groups['repair'].Value
+            if (-not $repair.Contains('& openclaw channels add } finally')) { throw 'Repair block targets an unexpected action' }
+            if ((Get-Content -Raw $cliConfig) -ne $config) { throw 'Refused CLI changed its config' }
+            Write-Output 'SHIPPED_CLI_REFUSAL=live Gateway state/config mismatch'
+            Write-Output 'DEFAULT_OUTPUT_SECRET_CONTROL=PASS'
+            Write-Output "EMITTED_POWERSHELL_REPAIR=$repair"
+            Write-Output 'ACTION_ARGUMENTS=--channel telegram --token [synthetic]; appended to the emitted command for noninteractive setup'
+            $withArgs = $repair.Replace('& openclaw channels add } finally', "& openclaw channels add --channel telegram --token $syntheticToken } finally")
+            $repairedOutput = (Invoke-Expression $withArgs 2>&1 | Out-String)
+            $repairExit = $LASTEXITCODE
+            if ($repairExit -ne 0) { throw "Copied PowerShell repair failed with exit ${repairExit}: $($repairedOutput.Replace($syntheticToken, '[synthetic]'))" }
+            if ($repairedOutput -notmatch 'Added .* account') { throw "Built CLI did not confirm the channel action: $($repairedOutput.Replace($syntheticToken, '[synthetic]'))" }
+            if ($env:OPENCLAW_STATE_DIR -ne $priorState -or $env:OPENCLAW_CONFIG_PATH -ne $priorConfig) { throw 'PowerShell repair did not restore the prior environment' }
+            $written = Get-Content -Raw $gatewayConfig | ConvertFrom-Json
+            if (-not $written.channels.telegram) { throw 'Channel action did not update Gateway config' }
+            if ((Get-Content -Raw $cliConfig) -ne $config) { throw 'Channel action wrote to the CLI store' }
+            Write-Output 'BUILT_CLI_ACTION=added synthetic Telegram account to Gateway config'
+            Write-Output 'PRIOR_ENVIRONMENT_RESTORED=true'
+            Write-Output 'CLI_STORE_UNCHANGED=true'
+            Write-Output 'SHIPPED_CLI_PROOF=PASS'
+          } finally {
+            if (-not $gateway.HasExited) { Stop-Process -Id $gateway.Id -Force }
+          }
