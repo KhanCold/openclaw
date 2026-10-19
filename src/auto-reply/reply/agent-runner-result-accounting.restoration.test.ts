@@ -165,3 +165,44 @@ it.each(["session", "lifecycle", "writer", "cancellation"] as const)(
     expect(f.read()?.fallbackNotice).toEqual(f.activeNotice);
   },
 );
+
+it.each(["selection", "fallback"] as const)(
+  "preserves a newer %s when restoration reaches the canonical write boundary",
+  async (replacement) => {
+    const f = await fixture();
+    const selected = { provider: "new-fixture", model: "selected" };
+    const nextNotice =
+      replacement === "selection"
+        ? { ...f.activeNotice, selectedModel: "new-fixture/selected" }
+        : { ...f.activeNotice, activeModel: "fallback-fixture/replacement" };
+    const append = transcript.appendAssistantMessageToSessionTranscript;
+    let replaced = false;
+    vi.spyOn(transcript, "appendAssistantMessageToSessionTranscript").mockImplementationOnce(
+      async (params) => {
+        await f.replace({
+          ...f.read()!,
+          ...(replacement === "selection"
+            ? {
+                providerOverride: selected.provider,
+                modelOverride: selected.model,
+                modelOverrideSource: "user" as const,
+              }
+            : {}),
+          fallbackNotice: nextNotice,
+        });
+        replaced = true;
+        return append(params);
+      },
+    );
+    await f.account("ordinary", primary);
+    expect(replaced).toBe(true);
+    expect(await f.notices()).toEqual([]);
+    expect(f.read()?.fallbackNotice).toEqual(nextNotice);
+    if (replacement === "selection") {
+      expect(f.read()).toMatchObject({
+        providerOverride: selected.provider,
+        modelOverride: selected.model,
+      });
+    }
+  },
+);

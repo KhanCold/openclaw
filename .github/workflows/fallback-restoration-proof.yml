@@ -1,0 +1,28 @@
+name: Fallback restoration actor baseline proof
+
+on:
+  push:
+    branches: [proof/177393-baseline-red]
+
+permissions: {}
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      OPENCLAW_CI_TEST_RUNTIME_POLICY: node
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Install frozen dependencies without lifecycle scripts
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+      - name: Exercise real completion actors and canonical transcript persistence
+        run: corepack pnpm test src/auto-reply/reply/agent-runner-result-accounting.restoration.test.ts --maxWorkers=1
