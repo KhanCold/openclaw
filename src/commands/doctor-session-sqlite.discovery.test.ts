@@ -474,7 +474,7 @@ it("settles many duplicate archives without rescanning the inventory for each cl
     const collect = discovery.collectHistoricalArchiveSources;
     let inventoryReads = 0;
     let inventorySize = 0;
-    using _measured = vi
+    using measured = vi
       .spyOn(discovery, "collectHistoricalArchiveSources")
       .mockImplementationOnce((params) => {
         const result = collect(params);
@@ -492,6 +492,7 @@ it("settles many duplicate archives without rescanning the inventory for each cl
         return result;
       });
     const report = await run("import");
+    measured.mockRestore();
     expect(report.totals.importedEntries).toBe(count);
     for (let index = 0; index < count; index++) {
       const sessionId = `lookup-${index}`;
