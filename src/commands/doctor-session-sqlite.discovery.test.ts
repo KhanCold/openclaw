@@ -472,22 +472,24 @@ it("settles many duplicate archives without rescanning the inventory for each cl
       completeRun(retained, target);
     }
     const collect = discovery.collectHistoricalArchiveSources;
-    let pathReads = 0;
+    let inventoryReads = 0;
     let inventorySize = 0;
     using measured = vi
       .spyOn(discovery, "collectHistoricalArchiveSources")
       .mockImplementationOnce((params) => {
         const result = collect(params);
-        inventorySize = result.inventory.report.artifacts.length;
-        for (const artifact of result.inventory.report.artifacts) {
-          const archivePath = artifact.path;
-          Object.defineProperty(artifact, "path", {
-            get() {
-              pathReads++;
-              return archivePath;
-            },
-          });
-        }
+        inventorySize = result.inventory.artifacts.length;
+        // Count inventory traversal, not later reads of selected objects during disposal.
+        const observed = new Proxy(result.inventory.artifacts, {
+          get(artifacts, property, receiver) {
+            if (typeof property === "string" && /^\d+$/u.test(property)) {
+              inventoryReads++;
+            }
+            return Reflect.get(artifacts, property, receiver);
+          },
+        });
+        result.inventory.artifacts = observed;
+        result.inventory.report.artifacts = observed;
         return result;
       });
     const report = await run("import");
@@ -509,7 +511,7 @@ it("settles many duplicate archives without rescanning the inventory for each cl
       }
     }
     expect(inventorySize).toBe(count * 2);
-    expect(pathReads).toBeLessThanOrEqual(inventorySize * 16);
+    expect(inventoryReads).toBeLessThanOrEqual(inventorySize * 2);
   }));
 
 it("keeps diagnostic, deleted, mismatched, and ambiguous inputs out of searchable history", () =>
