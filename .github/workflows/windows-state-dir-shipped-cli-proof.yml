@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.21.0'
@@ -23,8 +23,8 @@ jobs:
       - name: Confirm unchanged PR code
         shell: pwsh
         run: |
-          if ((git rev-parse HEAD^).Trim() -ne '1d52bd4309643ad3b3b72c0f708ead47b9319b17') { throw 'Proof is not based on the reviewed PR head' }
-          git diff --exit-code HEAD^ HEAD -- src
+          if ((git rev-parse HEAD~2).Trim() -ne '1d52bd4309643ad3b3b72c0f708ead47b9319b17') { throw 'Proof is not based on the reviewed PR head' }
+          git diff --exit-code HEAD~2 HEAD -- src
           if ($LASTEXITCODE -ne 0) { throw 'Proof branch changed product or test code' }
       - name: Install and build the shipped CLI
         shell: pwsh
@@ -93,6 +93,8 @@ jobs:
             $priorConfig = $env:OPENCLAW_CONFIG_PATH
             $refusal = (& openclaw channels add --channel telegram --token $syntheticToken 2>&1 | Out-String)
             $refusalExit = $LASTEXITCODE
+            Write-Output "INITIAL_CLI_EXIT=$refusalExit"
+            Write-Output "INITIAL_CLI_OUTPUT=$($refusal.Replace($syntheticToken, '[synthetic]'))"
             if ($refusalExit -eq 0) { throw 'Mismatched CLI unexpectedly succeeded' }
             if ($refusal -notmatch 'No credentials or configuration were written\. CLI and live Gateway use different') { throw 'Shipped CLI did not emit the live-Gateway mismatch refusal' }
             $match = [regex]::Match($refusal, '(?s)Fix: in PowerShell, run (?<repair>& \{.*?\})\. To write')
