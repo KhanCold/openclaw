@@ -40,3 +40,13 @@ jobs:
           node scripts/run-tsgo.mjs -p test/tsconfig/tsconfig.core.test.commands-doctor.json
       - name: Build shipped runtime
         run: corepack pnpm build
+      - name: Exercise built Doctor and durable retained-state readback
+        run: |
+          fixture="$RUNNER_TEMP/doctor-lookup-cli"
+          node --import ./scripts/tsx.mjs scripts/perf/doctor-duplicate-lookup-proof.mts seed "$fixture"
+          export OPENCLAW_STATE_DIR="$fixture/state"
+          export OPENCLAW_CONFIG_PATH="$fixture/openclaw.json"
+          node openclaw.mjs doctor --session-sqlite import --session-sqlite-store "$fixture/state/agents/main/sessions/sessions.json" --json > "$RUNNER_TEMP/doctor-first.json"
+          node --import ./scripts/tsx.mjs scripts/perf/doctor-duplicate-lookup-proof.mts verify "$fixture" "$RUNNER_TEMP/doctor-first.json" 64
+          node openclaw.mjs doctor --session-sqlite import --session-sqlite-store "$fixture/state/agents/main/sessions/sessions.json" --json > "$RUNNER_TEMP/doctor-repeat.json"
+          node --import ./scripts/tsx.mjs scripts/perf/doctor-duplicate-lookup-proof.mts verify "$fixture" "$RUNNER_TEMP/doctor-repeat.json" 0
