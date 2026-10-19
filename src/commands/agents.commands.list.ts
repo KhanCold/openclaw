@@ -119,7 +119,7 @@ function formatAgentTree(
     if (includeBindings && summary.bindingDetails?.length) {
       lines.push(`${"  ".repeat(depth + 1)}Routing rules:`);
       for (const binding of summary.bindingDetails) {
-        lines.push(`${"  ".repeat(depth + 2)}- ${safe(binding)}`);
+        lines.push(`${"  ".repeat(depth + 2)}- ${sanitizeTerminalText(binding)}`);
       }
     }
     for (const child of childrenById.get(summary.id) ?? []) {
