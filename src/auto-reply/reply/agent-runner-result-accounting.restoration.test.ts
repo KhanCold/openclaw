@@ -2,9 +2,11 @@ import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, it, vi } from "vitest";
 import { loadTranscriptEvents } from "../../config/sessions/session-accessor.js";
 import * as transcript from "../../config/sessions/transcript.js";
+import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import { readModelFallbackNotice } from "../../shared/model-fallback-notice.js";
 import { useAccountingFixture } from "./agent-runner-accounting.test-support.js";
 import { agentAccountingPersistenceDiagnostic as primary } from "./agent-runner-result-accounting.persistence.test-support.js";
+import { persistReplySessionEntry } from "./session-entry-persistence.js";
 
 const { database, createFixture } = useAccountingFixture("openclaw-restoration-");
 const fallback = { provider: "fallback-fixture", model: "available" };
@@ -166,38 +168,57 @@ it.each(["session", "lifecycle", "writer", "cancellation"] as const)(
   },
 );
 
-it.each(["selection", "fallback"] as const)(
-  "preserves a newer %s when restoration reaches the canonical write boundary",
-  async (replacement) => {
-    const f = await fixture();
+it.each([
+  ["selection", "ordinary"],
+  ["selection", "followup"],
+  ["fallback", "ordinary"],
+  ["fallback", "followup"],
+  ["unrelated", "ordinary"],
+] as const)(
+  "preserves a newer %s during %s restoration at the canonical write boundary",
+  async (replacement, lane) => {
+    const f = await fixture(lane);
     const selected = { provider: "new-fixture", model: "selected" };
     const nextNotice =
       replacement === "selection"
-        ? { ...f.activeNotice, selectedModel: "new-fixture/selected" }
+        ? undefined
         : { ...f.activeNotice, activeModel: "fallback-fixture/replacement" };
     const append = transcript.appendAssistantMessageToSessionTranscript;
     let replaced = false;
     vi.spyOn(transcript, "appendAssistantMessageToSessionTranscript").mockImplementationOnce(
       async (params) => {
-        await f.replace({
-          ...f.read()!,
-          ...(replacement === "selection"
-            ? {
-                providerOverride: selected.provider,
-                modelOverride: selected.model,
-                modelOverrideSource: "user" as const,
-              }
-            : {}),
-          fallbackNotice: nextNotice,
-        });
+        const initialEntry = f.read()!;
+        const next = { ...initialEntry };
+        if (replacement === "selection") {
+          applyModelOverrideToSessionEntry({ entry: next, selection: selected });
+        } else if (replacement === "fallback") {
+          next.fallbackNotice = nextNotice;
+        } else {
+          next.verboseLevel = "on";
+        }
+        expect(
+          await persistReplySessionEntry({
+            storePath: database.storePath,
+            sessionKey: f.context.sessionKey!,
+            initialEntry,
+            entry: next,
+            requireModelSelectionUnlocked: replacement === "selection",
+          }),
+        ).toMatchObject({ status: "current" });
         replaced = true;
         return append(params);
       },
     );
-    await f.account("ordinary", primary);
+    await f.account(lane, primary);
     expect(replaced).toBe(true);
-    expect(await f.notices()).toEqual([]);
-    expect(f.read()?.fallbackNotice).toEqual(nextNotice);
+    if (replacement === "unrelated") {
+      expect(await f.notices()).toHaveLength(1);
+      expect(f.read()?.fallbackNotice).toBeUndefined();
+      expect(f.read()?.verboseLevel).toBe("on");
+    } else {
+      expect(await f.notices()).toEqual([]);
+      expect(f.read()?.fallbackNotice).toEqual(nextNotice);
+    }
     if (replacement === "selection") {
       expect(f.read()).toMatchObject({
         providerOverride: selected.provider,
