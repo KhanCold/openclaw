@@ -87,7 +87,11 @@ function formatSummary(summary: AgentSummary) {
   return lines.join("\n");
 }
 
-function formatAgentTree(summaries: AgentSummary[], provenance: AgentProvenance[]): string[] {
+function formatAgentTree(
+  summaries: AgentSummary[],
+  provenance: AgentProvenance[],
+  includeBindings: boolean,
+): string[] {
   const summaryById = new Map(summaries.map((summary) => [summary.id, summary]));
   const provenanceById = new Map(provenance.map((record) => [record.agentId, record]));
   const childrenById = new Map<string, AgentSummary[]>();
@@ -112,6 +116,12 @@ function formatAgentTree(summaries: AgentSummary[], provenance: AgentProvenance[
     }
     visited.add(summary.id);
     lines.push(`${"  ".repeat(depth)}- ${formatSummaryHeader(summary)}`);
+    if (includeBindings && summary.bindingDetails?.length) {
+      lines.push(`${"  ".repeat(depth + 1)}Routing rules:`);
+      for (const binding of summary.bindingDetails) {
+        lines.push(`${"  ".repeat(depth + 2)}- ${safe(binding)}`);
+      }
+    }
     for (const child of childrenById.get(summary.id) ?? []) {
       append(child, depth + 1);
     }
@@ -200,7 +210,7 @@ export async function agentsListCommand(
   }
 
   if (opts.tree) {
-    runtime.log(["Agents:", ...formatAgentTree(summaries, provenance)].join("\n"));
+    runtime.log(["Agents:", ...formatAgentTree(summaries, provenance, opts.bindings === true)].join("\n"));
     return;
   }
 
