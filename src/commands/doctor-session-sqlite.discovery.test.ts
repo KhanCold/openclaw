@@ -489,7 +489,6 @@ it("settles many duplicate archives without rescanning the inventory for each cl
           },
         });
         result.inventory.artifacts = observed;
-        result.inventory.report.artifacts = observed;
         return result;
       });
     const report = await run("import");
