@@ -495,9 +495,9 @@ it("settles many duplicate archives without rescanning the inventory for each cl
     expect(report.totals.importedEntries).toBe(count);
     for (let index = 0; index < count; index++) {
       const sessionId = `lookup-${index}`;
-      expect(searchTranscripts({ ...scope, query: "lookupscalingneedle", sessionId }).hits).toEqual([
-        expect.objectContaining({ sessionId }),
-      ]);
+      expect(searchTranscripts({ ...scope, query: "lookupscalingneedle", sessionId }).hits).toEqual(
+        [expect.objectContaining({ sessionId })],
+      );
     }
     expect(fs.readdirSync(archiveDir)).toHaveLength(count);
     for (const manifestPath of manifests) {
