@@ -76,9 +76,8 @@ describe("CLI Gateway state target guard", () => {
         message: expect.stringContaining("No credentials or configuration were written"),
       },
     });
-    expect(result.stderr).toBe(
-      "[openclaw] The CLI command failed.\n[openclaw] For help, run `openclaw doctor`.\n",
-    );
+    expect(result.stderr).toContain("No credentials or configuration were written");
+    expect(result.stderr).toContain("Fix: run OPENCLAW_STATE_DIR=");
     expect(JSON.parse(await fs.readFile(configPath, "utf8"))).not.toHaveProperty("auth.profiles");
   });
 });
