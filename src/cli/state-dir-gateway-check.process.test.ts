@@ -77,7 +77,9 @@ describe("CLI Gateway state target guard", () => {
       },
     });
     expect(result.stderr).toContain("No credentials or configuration were written");
-    expect(result.stderr).toContain("Fix: run OPENCLAW_STATE_DIR=");
+    expect(result.stderr).toContain(
+      process.platform === "win32" ? "Fix: in PowerShell, run & {" : "Fix: run OPENCLAW_STATE_DIR=",
+    );
     expect(JSON.parse(await fs.readFile(configPath, "utf8"))).not.toHaveProperty("auth.profiles");
   });
 });
