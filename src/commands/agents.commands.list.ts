@@ -101,11 +101,7 @@ function formatSummary(summary: AgentSummary) {
   return lines.join("\n");
 }
 
-function formatAgentTree(
-  summaries: AgentSummary[],
-  provenance: AgentProvenance[],
-  includeBindings: boolean,
-): string[] {
+function formatAgentTree(summaries: AgentSummary[], provenance: AgentProvenance[]): string[] {
   const summaryById = new Map(summaries.map((summary) => [summary.id, summary]));
   const provenanceById = new Map(provenance.map((record) => [record.agentId, record]));
   const childrenById = new Map<string, AgentSummary[]>();
@@ -130,7 +126,7 @@ function formatAgentTree(
     }
     visited.add(summary.id);
     lines.push(`${"  ".repeat(depth)}- ${formatSummaryHeader(summary)}`);
-    if (includeBindings && summary.bindingDetails?.length) {
+    if (summary.bindingDetails?.length) {
       lines.push(`${"  ".repeat(depth + 1)}Routing rules:`);
       for (const binding of summary.bindingDetails) {
         lines.push(`${"  ".repeat(depth + 2)}- ${sanitizeTerminalText(binding)}`);
@@ -482,9 +478,7 @@ export async function agentsListCommand(opts: AgentsListOptions) {
   }
 
   if (opts.tree) {
-    runtime.log(
-      ["Agents:", ...formatAgentTree(summaries, provenance, opts.bindings === true)].join("\n"),
-    );
+    runtime.log(["Agents:", ...formatAgentTree(summaries, provenance)].join("\n"));
     return;
   }
 
