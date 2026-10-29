@@ -132,6 +132,12 @@ jobs:
           git checkout --quiet "$CANDIDATE_SHA" -- src/cli/config-set-input.ts
           test "$(git hash-object src/cli/config-set-input.ts)" = "41425074c115f55d65b5d70997d1e1c5664e8043"
           corepack pnpm test src/cli/config-cli.integration.test.ts --maxWorkers=1 --reporter=verbose 2>&1 | tee "$PROOF_DIR/candidate-green.log"
+          corepack pnpm test src/cli/config-set-mode.test.ts src/cli/config-cli.test.ts --maxWorkers=1 --reporter=verbose 2>&1 | tee "$PROOF_DIR/candidate-builder-controls.log"
+          if ! grep -Fq 'selects ref_builder' "$PROOF_DIR/candidate-builder-controls.log" || ! grep -Fq 'keeps a quoted numeric record key distinct from an array-indexed secret target' "$PROOF_DIR/candidate-builder-controls.log" || ! grep -Fq 'supports provider builder mode under secrets.providers.<alias>' "$PROOF_DIR/candidate-builder-controls.log"; then
+            echo 'Candidate builder control tests did not show the valid ref/provider positive cases.' >&2
+            exit 1
+          fi
+          printf 'PASS: exact candidate passed valid nonempty SecretRef and provider builder mode controls.\n' | tee -a "$PROOF_DIR/manifest.txt"
           corepack pnpm build
           cli_dir="$PROOF_DIR/cli-candidate"
           cli_home="$cli_dir/home"
