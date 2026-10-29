@@ -1,0 +1,202 @@
+name: plugins-init-expected-errors-proof
+
+on:
+  push:
+    branches:
+      - proof/plugins-init-expected-errors-2026-10-29
+
+permissions:
+  contents: read
+
+jobs:
+  plugins-init-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      BASE_SHA: 0f1e63efe002112e30f46d4544a84a04260f308d
+      CANDIDATE_SHA: 46b64ec98c696f27406d209f2c87bfc0737e76ca
+      CANDIDATE_REF: task/2026-10-29-plugin-init-expected-errors
+      REPO_DIR: ${{ github.workspace }}/.proof-checkout
+      PROOF_DIR: ${{ github.workspace }}/.proof-evidence
+    steps:
+      - name: Checkout proof workflow without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Fetch exact public base and candidate snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROOF_DIR" "$REPO_DIR"
+          git -C "$REPO_DIR" init --quiet
+          git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
+          test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA^{commit}")" = "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring-command.ts")" = "56b97edeb1c94b91f046101e150643250c71690a"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring-command.ts")" = "f109f2983b6b8c9dbb084d71586329f69192eb21"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring.process.test.ts")" = "aa168066ddb53ca05afa22e0db26e6732d7c8967"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "66fbbfa539ced012c72e305da7b96399df57ec26"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/plugins-init-expected-errors-2026-10-29.txt")" = "e522732c77ec94723e739d22f28df549b0231f5f"
+          {
+            printf 'Base SHA: %s\n' "$BASE_SHA"
+            printf 'Candidate SHA: %s\n' "$CANDIDATE_SHA"
+            printf 'Candidate ref: %s\n' "$CANDIDATE_REF"
+            printf 'Node: %s\n' "$(node --version)"
+          } | tee "$PROOF_DIR/manifest.txt"
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack enable
+          printf 'pnpm: %s\n' "$(corepack pnpm --version)" | tee -a "$PROOF_DIR/manifest.txt"
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Stage the repository-pinned Bun formatter
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          bash scripts/stage-openclaw-bun.sh "$PROOF_DIR/bun" linux x64
+          echo "$PROOF_DIR/bun/bin" >> "$GITHUB_PATH"
+          "$PROOF_DIR/bun/bin/bun" --version | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Prove new CLI error regressions fail on baseline
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          git show "$BASE_SHA:src/cli/plugins-authoring-command.ts" > src/cli/plugins-authoring-command.ts
+          test "$(git hash-object src/cli/plugins-authoring-command.ts)" = "56b97edeb1c94b91f046101e150643250c71690a"
+          set +e
+          corepack pnpm test src/cli/plugins-authoring.process.test.ts --maxWorkers=1 --reporter=verbose > "$PROOF_DIR/base-red.log" 2>&1
+          exit_status=$?
+          set -e
+          cat "$PROOF_DIR/base-red.log"
+          if [ "$exit_status" -eq 0 ]; then
+            echo 'Baseline unexpectedly passed the new plugin init diagnostic regressions.' >&2
+            exit 1
+          fi
+          if ! grep -Fq 'reports invalid plugins init input' "$PROOF_DIR/base-red.log" || ! grep -Fq 'explains why init refuses an existing directory' "$PROOF_DIR/base-red.log"; then
+            echo 'Baseline failed without showing the expected plugin-init error cases.' >&2
+            exit 1
+          fi
+          node -e 'let s=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(s.replace(/\x1b\[[0-9;]*m/g, "")));' < "$PROOF_DIR/base-red.log" > "$PROOF_DIR/base-red.plain.log"
+          if ! grep -Eq 'Tests[[:space:]]+4 failed([[:space:]]|$)' "$PROOF_DIR/base-red.plain.log"; then
+            echo 'Baseline did not show all four new plugin-init cases failing.' >&2
+            exit 1
+          fi
+          printf 'PASS: baseline source blob failed all four new expected-error cases (exit %s).\n' "$exit_status" | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Prove the built baseline CLI hides the expected cause
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack pnpm build
+          cli_dir="$PROOF_DIR/cli-baseline"
+          mkdir -p "$cli_dir/home" "$cli_dir/state" "$cli_dir/xdg-config" "$cli_dir/xdg-cache"
+          config="$cli_dir/state/openclaw.json"
+          printf '{"agents":{"entries":{"main":{}}},"gateway":{"port":18789}}\n' > "$config"
+          set +e
+          env HOME="$cli_dir/home" OPENCLAW_HOME="$cli_dir/home" OPENCLAW_STATE_DIR="$cli_dir/state" OPENCLAW_CONFIG_PATH="$config" XDG_CONFIG_HOME="$cli_dir/xdg-config" XDG_CACHE_HOME="$cli_dir/xdg-cache" OPENCLAW_NO_RESPAWN=1 OPENCLAW_HIDE_BANNER=1 NO_COLOR=1 node openclaw.mjs plugins init plugin-init-proof --directory "$cli_dir/project" --type invalid > "$cli_dir/stdout.log" 2> "$cli_dir/stderr.log"
+          exit_status=$?
+          set -e
+          cat "$cli_dir/stderr.log"
+          if [ "$exit_status" -eq 0 ] || ! grep -Fq 'OpenClaw hit an unexpected runtime error' "$cli_dir/stderr.log" || ! grep -Fq 'openclaw doctor' "$cli_dir/stderr.log" || grep -Fq 'Unsupported plugin scaffold type' "$cli_dir/stderr.log"; then
+            echo 'Baseline built CLI did not reproduce generic crash framing with the reason hidden.' >&2
+            exit 1
+          fi
+          test ! -e "$cli_dir/project"
+          printf 'PASS: baseline built CLI hid the invalid-type cause behind unexpected-error/doctor output.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Prove candidate process tests and real CLI cases
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$CANDIDATE_SHA" -- src/cli/plugins-authoring-command.ts
+          test "$(git hash-object src/cli/plugins-authoring-command.ts)" = "f109f2983b6b8c9dbb084d71586329f69192eb21"
+          corepack pnpm test src/cli/plugins-authoring.process.test.ts --maxWorkers=1 --reporter=verbose 2>&1 | tee "$PROOF_DIR/candidate-green.log"
+          corepack pnpm build
+          run_candidate_case() {
+            local case_name="$1"
+            shift
+            case_dir="$PROOF_DIR/cli-candidate/$case_name"
+            mkdir -p "$case_dir/home" "$case_dir/state" "$case_dir/xdg-config" "$case_dir/xdg-cache"
+            printf '{"agents":{"entries":{"main":{}}},"gateway":{"port":18789}}\n' > "$case_dir/state/openclaw.json"
+            if env HOME="$case_dir/home" OPENCLAW_HOME="$case_dir/home" OPENCLAW_STATE_DIR="$case_dir/state" OPENCLAW_CONFIG_PATH="$case_dir/state/openclaw.json" XDG_CONFIG_HOME="$case_dir/xdg-config" XDG_CACHE_HOME="$case_dir/xdg-cache" OPENCLAW_NO_RESPAWN=1 OPENCLAW_HIDE_BANNER=1 NO_COLOR=1 node openclaw.mjs "$@" > "$case_dir/stdout.log" 2> "$case_dir/stderr.log"; then
+              case_exit=0
+            else
+              case_exit=$?
+            fi
+          }
+          run_candidate_case invalid-type plugins init plugin-init-proof --directory "$PROOF_DIR/cli-candidate/invalid-type/project" --type invalid
+          test "$case_exit" -eq 1
+          grep -Fq 'Unsupported plugin scaffold type' "$case_dir/stderr.log"
+          ! grep -Fq 'openclaw doctor' "$case_dir/stderr.log"
+          test ! -e "$PROOF_DIR/cli-candidate/invalid-type/project"
+          run_candidate_case empty-id plugins init ' ' --directory "$PROOF_DIR/cli-candidate/empty-id/project"
+          test "$case_exit" -eq 1
+          grep -Fq 'Plugin id is required.' "$case_dir/stderr.log"
+          ! grep -Fq 'openclaw doctor' "$case_dir/stderr.log"
+          test ! -e "$PROOF_DIR/cli-candidate/empty-id/project"
+          run_candidate_case empty-name plugins init plugin-init-proof --directory "$PROOF_DIR/cli-candidate/empty-name/project" --name ' '
+          test "$case_exit" -eq 1
+          grep -Fq 'Plugin display name is required.' "$case_dir/stderr.log"
+          ! grep -Fq 'openclaw doctor' "$case_dir/stderr.log"
+          test ! -e "$PROOF_DIR/cli-candidate/empty-name/project"
+          existing_dir="$PROOF_DIR/cli-candidate/existing-path/project"
+          mkdir -p "$existing_dir"
+          printf 'preserve me\n' > "$existing_dir/keep.txt"
+          run_candidate_case existing-path plugins init plugin-init-proof --directory "$existing_dir"
+          test "$case_exit" -eq 1
+          grep -Fq 'Refusing to overwrite existing path:' "$case_dir/stderr.log"
+          ! grep -Fq 'openclaw doctor' "$case_dir/stderr.log"
+          test "$(cat "$existing_dir/keep.txt")" = 'preserve me'
+          run_candidate_case valid-init plugins init plugin-init-proof --directory "$PROOF_DIR/cli-candidate/valid-init/project"
+          test "$case_exit" -eq 0
+          node -e 'const fs = require("node:fs"); const path = require("node:path"); const d = process.argv[1]; const m = JSON.parse(fs.readFileSync(path.join(d, "openclaw.plugin.json"), "utf8")); const p = JSON.parse(fs.readFileSync(path.join(d, "package.json"), "utf8")); if (m.id !== "plugin-init-proof" || p.name !== "openclaw-plugin-plugin-init-proof") process.exit(1);' "$PROOF_DIR/cli-candidate/valid-init/project"
+          printf 'PASS: candidate process tests/build; four built-CLI errors are readable, no doctor hint/no unwanted directory; valid init succeeds.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Check candidate formatting lint types and line ratchet
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack pnpm format:check src/cli/plugins-authoring-command.ts src/cli/plugins-authoring.process.test.ts
+          corepack pnpm lint --files-json '["src/cli/plugins-authoring-command.ts","src/cli/plugins-authoring.process.test.ts"]'
+          corepack pnpm tsgo:core
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          printf 'PASS: formatting, focused lint, core typecheck, test-line ratchet, and diff hygiene on exact candidate.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Record verifiable proof summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Plugin init expected-error proof'
+            echo
+            echo "- Evidence workflow commit: $GITHUB_SHA"
+            echo "- Baseline: $BASE_SHA (production blob 56b97edeb1c94b91f046101e150643250c71690a)"
+            echo "- Candidate: $CANDIDATE_SHA (production blob f109f2983b6b8c9dbb084d71586329f69192eb21; test blob 66fbbfa539ced012c72e305da7b96399df57ec26; allocation blob e522732c77ec94723e739d22f28df549b0231f5f)"
+            echo "- Runner: ubuntu-24.04 (GitHub-hosted public runner)"
+            echo '- Permissions: contents: read; pinned actions; no repository secrets, OIDC, environments, caches, self-hosted runners, or persisted checkout credentials.'
+            echo '- Proof logs and summary are retained with this Actions run; no separate artifact storage is used.'
+            echo
+            if [ -f "$PROOF_DIR/manifest.txt" ]; then
+              cat "$PROOF_DIR/manifest.txt"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
