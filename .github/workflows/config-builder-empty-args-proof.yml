@@ -17,8 +17,8 @@ jobs:
       BASE_SHA: e1cd6e11ac78eb247131eb32d568d3f61c98ab33
       CANDIDATE_SHA: 0457c9a746855da5439b77a34d0d4e4e89ad34ba
       CANDIDATE_REF: task/2026-10-29-config-builder-empty-args
-      REPO_DIR: ${{ runner.temp }}/config-builder-proof/openclaw
-      PROOF_DIR: ${{ runner.temp }}/config-builder-proof
+      REPO_DIR: ${{ github.workspace }}/.proof-checkout
+      PROOF_DIR: ${{ github.workspace }}/.proof-evidence
     steps:
       - name: Checkout evidence branch without persisting credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +56,7 @@ jobs:
 
       - name: Install locked dependencies without lifecycle scripts
         shell: bash
-        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        working-directory: ${{ github.workspace }}/.proof-checkout
         run: |
           set -euo pipefail
           corepack enable
@@ -65,7 +65,7 @@ jobs:
 
       - name: Stage the repository-pinned Bun formatter
         shell: bash
-        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        working-directory: ${{ github.workspace }}/.proof-checkout
         run: |
           set -euo pipefail
           bash scripts/stage-openclaw-bun.sh "$PROOF_DIR/bun" linux x64
@@ -74,7 +74,7 @@ jobs:
 
       - name: Prove the regression fails with baseline production code
         shell: bash
-        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        working-directory: ${{ github.workspace }}/.proof-checkout
         run: |
           set -euo pipefail
           git show "$BASE_SHA:src/cli/config-set-input.ts" > src/cli/config-set-input.ts
@@ -100,7 +100,7 @@ jobs:
 
       - name: Restore and prove the exact candidate passes
         shell: bash
-        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        working-directory: ${{ github.workspace }}/.proof-checkout
         run: |
           set -euo pipefail
           git checkout --quiet "$CANDIDATE_SHA" -- src/cli/config-set-input.ts
@@ -110,7 +110,7 @@ jobs:
 
       - name: Check final-head formatting, lint, types, and diff hygiene
         shell: bash
-        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        working-directory: ${{ github.workspace }}/.proof-checkout
         run: |
           set -euo pipefail
           corepack pnpm format:check src/cli/config-set-input.ts src/cli/config-cli.integration.test.ts docs/cli/config.md
