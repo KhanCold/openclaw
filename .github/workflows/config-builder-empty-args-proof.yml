@@ -163,7 +163,7 @@ jobs:
         run: |
           set -euo pipefail
           corepack pnpm format:check src/cli/config-set-input.ts src/cli/config-cli.integration.test.ts docs/cli/config.md
-          corepack pnpm lint src/cli/config-set-input.ts src/cli/config-cli.integration.test.ts
+          corepack pnpm lint --files-json '["src/cli/config-set-input.ts","src/cli/config-cli.integration.test.ts"]'
           corepack pnpm tsgo:core
           corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
           git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
