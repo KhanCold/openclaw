@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 50
     env:
       BASE_SHA: e1cd6e11ac78eb247131eb32d568d3f61c98ab33
-      CANDIDATE_SHA: 0457c9a746855da5439b77a34d0d4e4e89ad34ba
+      CANDIDATE_SHA: a02018904ac562a80c8cb46cf2d24d1479278ea5
       CANDIDATE_REF: task/2026-10-29-config-builder-empty-args
       REPO_DIR: ${{ github.workspace }}/.proof-checkout
       PROOF_DIR: ${{ github.workspace }}/.proof-evidence
@@ -47,6 +47,7 @@ jobs:
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/config-set-input.ts")" = "93eb1b71a98aa540ccf2791cc56dd0d3690b9723"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-set-input.ts")" = "41425074c115f55d65b5d70997d1e1c5664e8043"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-cli.integration.test.ts")" = "7f9702496e9e2586f42bb5110bc7f5961a53baf5"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/config-builder-empty-args-2026-10-29.txt")" = "87523dd7a0632907d61799465827c3f08825fa47"
           {
             printf 'Base SHA: %s\n' "$BASE_SHA"
             printf 'Candidate SHA: %s\n' "$CANDIDATE_SHA"
@@ -92,11 +93,36 @@ jobs:
             echo 'Baseline failed without showing the expected empty-builder regression cases.' >&2
             exit 1
           fi
-          if ! grep -Eq 'Tests [0-9]+ failed' "$PROOF_DIR/base-red.log"; then
-            echo 'Baseline output did not contain a Vitest test-failure summary.' >&2
+          node -e 'let s=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(s.replace(/\x1b\[[0-9;]*m/g, "")));' < "$PROOF_DIR/base-red.log" > "$PROOF_DIR/base-red.plain.log"
+          if ! grep -Eq 'Tests[[:space:]]+15 failed([[:space:]]|$)' "$PROOF_DIR/base-red.plain.log"; then
+            echo 'Baseline output did not show the exact expected 15 failing regression tests.' >&2
             exit 1
           fi
           printf 'PASS: baseline production blob failed the expected empty-builder cases (exit %s).\n' "$status" | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Prove the built baseline CLI performs the unintended write
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack pnpm build
+          cli_dir="$PROOF_DIR/cli-baseline"
+          cli_home="$cli_dir/home"
+          cli_state="$cli_dir/state"
+          mkdir -p "$cli_home" "$cli_state" "$cli_dir/xdg-config" "$cli_dir/xdg-cache"
+          config="$cli_state/openclaw.json"
+          printf '{"agents":{"entries":{"main":{}}},"gateway":{"port":18789}}\n' > "$config"
+          set +e
+          env HOME="$cli_home" OPENCLAW_HOME="$cli_home" OPENCLAW_STATE_DIR="$cli_state" OPENCLAW_CONFIG_PATH="$config" XDG_CONFIG_HOME="$cli_dir/xdg-config" XDG_CACHE_HOME="$cli_dir/xdg-cache" node openclaw.mjs config set gateway.port 19001 --ref-id "" > "$cli_dir/result.log" 2>&1
+          status=$?
+          set -e
+          cat "$cli_dir/result.log"
+          if [ "$status" -ne 0 ]; then
+            echo "Baseline built CLI did not reproduce the accidental write (exit $status)." >&2
+            exit 1
+          fi
+          node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value.gateway?.port !== 19001) process.exit(1);' "$config"
+          printf 'PASS: baseline built CLI treated the empty builder argument as value mode and wrote gateway.port=19001.\n' | tee -a "$PROOF_DIR/manifest.txt"
 
       - name: Restore and prove the exact candidate passes
         shell: bash
@@ -106,6 +132,29 @@ jobs:
           git checkout --quiet "$CANDIDATE_SHA" -- src/cli/config-set-input.ts
           test "$(git hash-object src/cli/config-set-input.ts)" = "41425074c115f55d65b5d70997d1e1c5664e8043"
           corepack pnpm test src/cli/config-cli.integration.test.ts --maxWorkers=1 --reporter=verbose 2>&1 | tee "$PROOF_DIR/candidate-green.log"
+          corepack pnpm build
+          cli_dir="$PROOF_DIR/cli-candidate"
+          cli_home="$cli_dir/home"
+          cli_state="$cli_dir/state"
+          mkdir -p "$cli_home" "$cli_state" "$cli_dir/xdg-config" "$cli_dir/xdg-cache"
+          config="$cli_state/openclaw.json"
+          original='{"agents":{"entries":{"main":{}}},"gateway":{"port":18789}}'
+          printf '%s\n' "$original" > "$config"
+          set +e
+          env HOME="$cli_home" OPENCLAW_HOME="$cli_home" OPENCLAW_STATE_DIR="$cli_state" OPENCLAW_CONFIG_PATH="$config" XDG_CONFIG_HOME="$cli_dir/xdg-config" XDG_CACHE_HOME="$cli_dir/xdg-cache" node openclaw.mjs config set gateway.port 19001 --ref-id "" > "$cli_dir/result.log" 2>&1
+          status=$?
+          set -e
+          cat "$cli_dir/result.log"
+          if [ "$status" -eq 0 ]; then
+            echo 'Candidate built CLI accepted an empty ref builder argument.' >&2
+            exit 1
+          fi
+          if ! grep -Fq 'ref builder mode does not accept <value>' "$cli_dir/result.log"; then
+            echo 'Candidate built CLI failed without the expected ref-builder diagnostic.' >&2
+            exit 1
+          fi
+          test "$(cat "$config")" = "$original"
+          printf 'PASS: exact candidate built CLI rejected the empty builder argument and preserved config bytes.\n' | tee -a "$PROOF_DIR/manifest.txt"
           printf 'PASS: exact candidate production blob passed the full config CLI integration file.\n' | tee -a "$PROOF_DIR/manifest.txt"
 
       - name: Check final-head formatting, lint, types, and diff hygiene
@@ -116,6 +165,7 @@ jobs:
           corepack pnpm format:check src/cli/config-set-input.ts src/cli/config-cli.integration.test.ts docs/cli/config.md
           corepack pnpm lint src/cli/config-set-input.ts src/cli/config-cli.integration.test.ts
           corepack pnpm tsgo:core
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
           git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
           printf 'PASS: format, targeted lint, core typecheck, and diff checks on candidate %s.\n' "$CANDIDATE_SHA" | tee -a "$PROOF_DIR/manifest.txt"
 
@@ -128,7 +178,7 @@ jobs:
             echo
             echo "- Evidence workflow commit: $GITHUB_SHA"
             echo "- Baseline: $BASE_SHA (production file blob 93eb1b71a98aa540ccf2791cc56dd0d3690b9723)"
-            echo "- Candidate: $CANDIDATE_SHA (production file blob 41425074c115f55d65b5d70997d1e1c5664e8043)"
+            echo "- Candidate: $CANDIDATE_SHA (production file blob 41425074c115f55d65b5d70997d1e1c5664e8043; test file blob 7f9702496e9e2586f42bb5110bc7f5961a53baf5; test-line allocation blob 87523dd7a0632907d61799465827c3f08825fa47)"
             echo "- Runner: ubuntu-24.04 (GitHub-hosted standard public-repository runner)"
             echo '- Permissions: contents: read; no repository secrets, OIDC, environments, caches, or persisted checkout credentials.'
             echo '- Proof logs are retained with this Actions run; no separate artifact storage is requested.'
