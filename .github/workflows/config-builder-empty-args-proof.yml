@@ -139,4 +139,3 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-b410ea993a3c125ed5437c360fdb20fdcafba8ee6cfd9c8610f687da8011feda  proof-config-builder-empty-args.yml
