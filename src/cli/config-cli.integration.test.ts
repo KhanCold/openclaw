@@ -288,7 +288,7 @@ describe("config cli integration", () => {
       error: "--batch-file must not be empty",
     },
     ...["--ref-provider", "--ref-source", "--ref-id"].map((flag) => ({
-      name: \`empty \${flag}\`,
+      name: `empty ${flag}`,
       args: ["gateway.port", "19001", flag, ""],
       error: "ref builder mode does not accept <value>",
     })),
@@ -302,12 +302,12 @@ describe("config cli integration", () => {
       "--provider-no-output-timeout-ms",
       "--provider-max-output-bytes",
     ].map((flag) => ({
-      name: \`empty \${flag}\`,
+      name: `empty ${flag}`,
       args: ["gateway.port", "19001", flag, ""],
       error: "provider builder mode does not accept <value>",
     })),
     ...["--ref-id", "--provider-mode"].map((flag) => ({
-      name: \`batch with empty \${flag}\`,
+      name: `batch with empty ${flag}`,
       args: ["--batch-json", '[{"path":"gateway.port","value":19001}]', flag, ""],
       error: "batch mode (--batch-json/--batch-file) cannot be combined",
     })),
