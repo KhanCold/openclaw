@@ -155,6 +155,17 @@ jobs:
           fi
           test "$(cat "$config")" = "$original"
           printf 'PASS: exact candidate built CLI rejected the empty builder argument and preserved config bytes.\n' | tee -a "$PROOF_DIR/manifest.txt"
+          set +e
+          env HOME="$cli_home" OPENCLAW_HOME="$cli_home" OPENCLAW_STATE_DIR="$cli_state" OPENCLAW_CONFIG_PATH="$config" XDG_CONFIG_HOME="$cli_dir/xdg-config" XDG_CACHE_HOME="$cli_dir/xdg-cache" node openclaw.mjs config set gateway.port 19002 > "$cli_dir/positive-result.log" 2>&1
+          positive_status=$?
+          set -e
+          cat "$cli_dir/positive-result.log"
+          if [ "$positive_status" -ne 0 ]; then
+            echo "Candidate built CLI rejected ordinary value mode (exit $positive_status)." >&2
+            exit 1
+          fi
+          node -e 'const fs = require("node:fs"); const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (value.gateway?.port !== 19002) process.exit(1);' "$config"
+          printf 'PASS: exact candidate built CLI accepted ordinary value mode and wrote gateway.port=19002.\n' | tee -a "$PROOF_DIR/manifest.txt"
           printf 'PASS: exact candidate production blob passed the full config CLI integration file.\n' | tee -a "$PROOF_DIR/manifest.txt"
 
       - name: Check final-head formatting, lint, types, and diff hygiene
