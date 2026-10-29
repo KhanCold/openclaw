@@ -114,12 +114,12 @@ jobs:
           exit_status=$?
           set -e
           cat "$cli_dir/stderr.log"
-          if [ "$exit_status" -eq 0 ] || ! grep -Fq 'OpenClaw hit an unexpected runtime error' "$cli_dir/stderr.log" || ! grep -Fq 'openclaw doctor' "$cli_dir/stderr.log" || grep -Fq 'Unsupported plugin scaffold type' "$cli_dir/stderr.log"; then
-            echo 'Baseline built CLI did not reproduce generic crash framing with the reason hidden.' >&2
+          if [ "$exit_status" -eq 0 ] || ! grep -Fq '[openclaw] The CLI command failed.' "$cli_dir/stderr.log" || ! grep -Fq 'openclaw doctor' "$cli_dir/stderr.log" || grep -Fq 'Unsupported plugin scaffold type' "$cli_dir/stderr.log"; then
+            echo 'Baseline built CLI did not reproduce generic command-failure framing with the reason hidden.' >&2
             exit 1
           fi
           test ! -e "$cli_dir/project"
-          printf 'PASS: baseline built CLI hid the invalid-type cause behind unexpected-error/doctor output.\n' | tee -a "$PROOF_DIR/manifest.txt"
+          printf 'PASS: baseline built CLI hid the invalid-type cause behind generic command-failure/doctor output.\n' | tee -a "$PROOF_DIR/manifest.txt"
 
       - name: Prove candidate process tests and real CLI cases
         shell: bash
