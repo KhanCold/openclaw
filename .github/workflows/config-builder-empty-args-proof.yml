@@ -1,0 +1,142 @@
+name: config-builder-empty-args-proof
+
+on:
+  push:
+    branches:
+      - proof/config-builder-empty-args-2026-10-29
+
+permissions:
+  contents: read
+
+jobs:
+  config-builder:
+    name: Base red, candidate green, and scoped checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      BASE_SHA: e1cd6e11ac78eb247131eb32d568d3f61c98ab33
+      CANDIDATE_SHA: 0457c9a746855da5439b77a34d0d4e4e89ad34ba
+      CANDIDATE_REF: task/2026-10-29-config-builder-empty-args
+      REPO_DIR: ${{ runner.temp }}/config-builder-proof/openclaw
+      PROOF_DIR: ${{ runner.temp }}/config-builder-proof
+    steps:
+      - name: Checkout evidence branch without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Fetch exact public base and candidate snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROOF_DIR" "$REPO_DIR"
+          git -C "$REPO_DIR" init --quiet
+          git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
+          fetched_candidate="$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)"
+          test "$fetched_candidate" = "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA^{commit}")" = "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/config-set-input.ts")" = "93eb1b71a98aa540ccf2791cc56dd0d3690b9723"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-set-input.ts")" = "41425074c115f55d65b5d70997d1e1c5664e8043"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-cli.integration.test.ts")" = "7f9702496e9e2586f42bb5110bc7f5961a53baf5"
+          {
+            printf 'Base SHA: %s\n' "$BASE_SHA"
+            printf 'Candidate SHA: %s\n' "$CANDIDATE_SHA"
+            printf 'Candidate ref: %s\n' "$CANDIDATE_REF"
+            printf 'Node: %s\n' "$(node --version)"
+          } | tee "$PROOF_DIR/manifest.txt"
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        run: |
+          set -euo pipefail
+          corepack enable
+          printf 'pnpm: %s\n' "$(corepack pnpm --version)" | tee -a "$PROOF_DIR/manifest.txt"
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Stage the repository-pinned Bun formatter
+        shell: bash
+        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        run: |
+          set -euo pipefail
+          bash scripts/stage-openclaw-bun.sh "$PROOF_DIR/bun" linux x64
+          echo "$PROOF_DIR/bun/bin" >> "$GITHUB_PATH"
+          "$PROOF_DIR/bun/bin/bun" --version | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Prove the regression fails with baseline production code
+        shell: bash
+        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        run: |
+          set -euo pipefail
+          git show "$BASE_SHA:src/cli/config-set-input.ts" > src/cli/config-set-input.ts
+          test "$(git hash-object src/cli/config-set-input.ts)" = "93eb1b71a98aa540ccf2791cc56dd0d3690b9723"
+          set +e
+          corepack pnpm test src/cli/config-cli.integration.test.ts --maxWorkers=1 --reporter=verbose > "$PROOF_DIR/base-red.log" 2>&1
+          status=$?
+          set -e
+          cat "$PROOF_DIR/base-red.log"
+          if [ "$status" -eq 0 ]; then
+            echo 'Baseline unexpectedly passed the candidate regression tests.' >&2
+            exit 1
+          fi
+          if ! grep -Fq 'empty --ref-provider' "$PROOF_DIR/base-red.log" || ! grep -Fq 'provider builder with empty ref flag' "$PROOF_DIR/base-red.log"; then
+            echo 'Baseline failed without showing the expected empty-builder regression cases.' >&2
+            exit 1
+          fi
+          if ! grep -Eq 'Tests [0-9]+ failed' "$PROOF_DIR/base-red.log"; then
+            echo 'Baseline output did not contain a Vitest test-failure summary.' >&2
+            exit 1
+          fi
+          printf 'PASS: baseline production blob failed the expected empty-builder cases (exit %s).\n' "$status" | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Restore and prove the exact candidate passes
+        shell: bash
+        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$CANDIDATE_SHA" -- src/cli/config-set-input.ts
+          test "$(git hash-object src/cli/config-set-input.ts)" = "41425074c115f55d65b5d70997d1e1c5664e8043"
+          corepack pnpm test src/cli/config-cli.integration.test.ts --maxWorkers=1 --reporter=verbose 2>&1 | tee "$PROOF_DIR/candidate-green.log"
+          printf 'PASS: exact candidate production blob passed the full config CLI integration file.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Check final-head formatting, lint, types, and diff hygiene
+        shell: bash
+        working-directory: ${{ runner.temp }}/config-builder-proof/openclaw
+        run: |
+          set -euo pipefail
+          corepack pnpm format:check src/cli/config-set-input.ts src/cli/config-cli.integration.test.ts docs/cli/config.md
+          corepack pnpm lint src/cli/config-set-input.ts src/cli/config-cli.integration.test.ts
+          corepack pnpm tsgo:core
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          printf 'PASS: format, targeted lint, core typecheck, and diff checks on candidate %s.\n' "$CANDIDATE_SHA" | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Record verifiable proof summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Config builder empty-argument proof'
+            echo
+            echo "- Evidence workflow commit: $GITHUB_SHA"
+            echo "- Baseline: $BASE_SHA (production file blob 93eb1b71a98aa540ccf2791cc56dd0d3690b9723)"
+            echo "- Candidate: $CANDIDATE_SHA (production file blob 41425074c115f55d65b5d70997d1e1c5664e8043)"
+            echo "- Runner: ubuntu-24.04 (GitHub-hosted standard public-repository runner)"
+            echo '- Permissions: contents: read; no repository secrets, OIDC, environments, caches, or persisted checkout credentials.'
+            echo '- Proof logs are retained with this Actions run; no separate artifact storage is requested.'
+            echo
+            if [ -f "$PROOF_DIR/manifest.txt" ]; then
+              echo '```text'
+              cat "$PROOF_DIR/manifest.txt"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+b410ea993a3c125ed5437c360fdb20fdcafba8ee6cfd9c8610f687da8011feda  proof-config-builder-empty-args.yml
