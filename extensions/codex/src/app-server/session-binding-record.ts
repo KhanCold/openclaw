@@ -120,6 +120,18 @@ export function ownsStoredSessionGeneration(
   );
 }
 
+/** Retired tombstones are inert for deletion of a newer session generation. */
+export function canDeleteSessionWithCodexBinding(
+  identity: CodexAppServerBindingIdentity,
+  stored: StoredCodexAppServerBinding | undefined,
+): boolean {
+  return (
+    stored !== undefined &&
+    (ownsStoredSessionGeneration(identity, stored) ||
+      (stored.state === "cleared" && stored.retired === true))
+  );
+}
+
 /** Legacy effect guards; prepared readers also observe raw SDK binding writes. */
 export function readCurrentCodexAppServerBinding(
   state: Pick<PluginStateSyncKeyedStore<StoredCodexAppServerBinding>, "lookup">,
