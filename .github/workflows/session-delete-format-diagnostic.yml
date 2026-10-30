@@ -1,0 +1,67 @@
+name: codex-session-delete-format-diagnostic
+
+on:
+  push:
+    branches:
+      - proof/2026-10-30-session-delete-format-diagnostic
+
+permissions:
+  contents: read
+
+jobs:
+  format-diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE_SHA: e7469ffb9ccce44f135faa22cab5dad4422e6074
+    steps:
+      - name: Checkout diagnostic workflow without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Fetch exact candidate snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir .format-candidate
+          git -C .format-candidate init --quiet
+          git -C .format-candidate remote add fork https://github.com/KhanCold/openclaw.git
+          git -C .format-candidate fetch --no-tags --depth=1 fork "$CANDIDATE_SHA"
+          test "$(git -C .format-candidate rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
+          git -C .format-candidate checkout --quiet --detach "$CANDIDATE_SHA"
+          test "$(git -C .format-candidate rev-parse HEAD:extensions/codex/src/app-server/session-binding.ts)" = "43ee64eb250c6e575d26d2b415c33e6bf758f5f8"
+          test "$(git -C .format-candidate rev-parse HEAD:extensions/codex/src/app-server/session-binding.test.ts)" = "5358753327242fd747c5090f87747477ba2e4aca"
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: .format-candidate
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Stage repository-pinned Bun formatter
+        shell: bash
+        working-directory: .format-candidate
+        run: |
+          set -euo pipefail
+          bash scripts/stage-openclaw-bun.sh "$RUNNER_TEMP/openclaw-bun" linux x64
+          echo "$RUNNER_TEMP/openclaw-bun/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/openclaw-bun/bin/bun" --version
+
+      - name: Apply official formatter and show exact diff
+        shell: bash
+        working-directory: .format-candidate
+        run: |
+          set -euo pipefail
+          corepack pnpm format extensions/codex/src/app-server/session-binding.ts extensions/codex/src/app-server/session-binding.test.ts
+          git diff --stat
+          git diff --numstat
+          git diff -- extensions/codex/src/app-server/session-binding.ts extensions/codex/src/app-server/session-binding.test.ts
