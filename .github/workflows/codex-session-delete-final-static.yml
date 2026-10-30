@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 45
     env:
       BASE_SHA: 6fc01dc6615798ce5bd5b5f9268e8457fcbf5846
-      CANDIDATE_SHA: 58181b46169a3bc465047a382cf761199a381e99
+      CANDIDATE_SHA: 0b85ff59f1a26fd2450add5d70c075b6837640a1
       CANDIDATE_REF: task/2026-10-30-session-delete-retired-codex-binding-latest
     steps:
       - name: Checkout proof workflow without persisting credentials
@@ -41,7 +41,9 @@ jobs:
           git -C .final-checkout fetch --no-tags --depth=1 fork "$BASE_SHA"
           test "$(git -C .final-checkout rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "c01bb1da21e047506d0ac44be7a758ba2ee77e1b"
           test "$(git -C .final-checkout rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "eb27c0c1e7838866106f14b766373f4812ed3e5f"
-          test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "456313c6b265614065517eaf78d4841e8ade0e0c"
+          test "$(git -C .final-checkout rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding-record.ts")" = "25d7f5b83e8a772d697020724e1ba38a2e7c4619"
+          test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "a0d5e3e8428abbb42e245fa00bce9f834ae26e69"
+          test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding-record.ts")" = "0911c5a0e0b4dd6b8d81a8f16dad9bacff2fc521"
           test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "829ccae0924f6381a274f3143d4bf21810871d3f"
           test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/codex-retired-binding-delete-2026-10-30.txt")" = "492dff089afe4c5aaa55abe406b1f1169db21a13"
 
@@ -97,9 +99,10 @@ jobs:
         working-directory: .final-checkout
         run: |
           set -euo pipefail
-          corepack pnpm format:check extensions/codex/src/app-server/session-binding.ts extensions/codex/src/app-server/session-binding.test.ts
-          corepack pnpm lint --files-json '["extensions/codex/src/app-server/session-binding.ts","extensions/codex/src/app-server/session-binding.test.ts"]'
+          corepack pnpm format:check extensions/codex/src/app-server/session-binding.ts extensions/codex/src/app-server/session-binding-record.ts extensions/codex/src/app-server/session-binding.test.ts
+          corepack pnpm lint --files-json '["extensions/codex/src/app-server/session-binding.ts","extensions/codex/src/app-server/session-binding-record.ts","extensions/codex/src/app-server/session-binding.test.ts"]'
           corepack pnpm tsgo:extensions
           corepack pnpm tsgo:extensions:test
           corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          corepack pnpm check:line-cap-ratchet --base "$BASE_SHA" --no-merge-base
           git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
