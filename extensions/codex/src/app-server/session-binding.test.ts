@@ -658,6 +658,83 @@ describe("Codex app-server binding store", () => {
     },
   );
 
+  it("deletes a successor session after retiring a predecessor SQLite binding", async () => {
+    const { state, store } = await createSqliteFixture(
+      "app-server-thread-bindings-delete-predecessor",
+    );
+    const predecessor = makeStableSessionIdentity(
+      "predecessor-uuid-1",
+      "agent:main:cron:rotated",
+    );
+    const successor = { ...predecessor, sessionId: "successor-uuid-2" };
+    await setBinding(store, predecessor, thread("thread-predecessor"));
+    await store.retireSessionGeneration(predecessor);
+    expect(state.lookup(storeKey(predecessor))).toEqual(retiredRow(predecessor.sessionId));
+
+    await store.withSessionDeletion(successor, () => {}, async (binding, mutation) => {
+      expect(binding).toBeUndefined();
+      mutation.commit();
+    });
+
+    expect(state.lookup(storeKey(successor))).toBeUndefined();
+  });
+
+  it("preserves SQLite session-deletion sibling controls", async () => {
+    const { state, store } = await createSqliteFixture(
+      "app-server-thread-bindings-delete-controls",
+    );
+
+    const noBinding = makeStableSessionIdentity("no-binding", "agent:main:cron:no-binding");
+    await store.withSessionDeletion(noBinding, () => {}, async (_binding, mutation) => {
+      mutation.commit();
+    });
+
+    const sameGeneration = makeStableSessionIdentity(
+      "same-generation",
+      "agent:main:cron:same-generation",
+    );
+    const sameGenerationTombstone = retiredRow(sameGeneration.sessionId);
+    state.register(storeKey(sameGeneration), sameGenerationTombstone);
+    await store.withSessionDeletion(sameGeneration, () => {}, async (_binding, mutation) => {
+      mutation.commit();
+      mutation.rollback();
+    });
+    expect(state.lookup(storeKey(sameGeneration))).toEqual(sameGenerationTombstone);
+
+    const currentActive = makeStableSessionIdentity(
+      "current-active",
+      "agent:main:cron:current-active",
+    );
+    state.register(storeKey(currentActive), {
+      version: 1,
+      state: "active",
+      sessionId: currentActive.sessionId,
+      binding: thread("thread-current"),
+    });
+    await store.withSessionDeletion(currentActive, () => {}, async (_binding, mutation) => {
+      mutation.commit();
+    });
+    expect(state.lookup(storeKey(currentActive))).toBeUndefined();
+
+    const staleActive = makeStableSessionIdentity(
+      "stale-active",
+      "agent:main:cron:stale-active",
+    );
+    const activePredecessor = {
+      version: 1 as const,
+      state: "active" as const,
+      sessionId: "active-predecessor",
+      binding: thread("thread-active-predecessor"),
+    };
+    state.register(storeKey(staleActive), activePredecessor);
+    await expect(
+      store.withSessionDeletion(staleActive, () => {}, async (_binding, mutation) => {
+        mutation.commit();
+      }),
+    ).rejects.toThrow("Codex binding generation changed before session deletion");
+    expect(state.lookup(storeKey(staleActive))).toEqual(activePredecessor);
+  });
+
   it("preserves a stale private supervision binding instead of reclaiming it as empty", async () => {
     const { store } = createBindingFixture();
     const previous = makeStableSessionIdentity("session-1", "agent:main:telegram:supervised");
