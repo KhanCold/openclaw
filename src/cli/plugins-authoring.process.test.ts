@@ -79,20 +79,17 @@ it.each([
   },
   { id: " ", options: [], reason: "Plugin id is required." },
   { id: pluginId, options: ["--name", " "], reason: "Plugin display name is required." },
-])(
-  "reports invalid plugins init input: $reason",
-  async ({ id, options, reason }) => {
-    const root = tempDirs.make("openclaw-plugin-init-input-");
-    const project = path.join(root, "project");
+])("reports invalid plugins init input: $reason", async ({ id, options, reason }) => {
+  const root = tempDirs.make("openclaw-plugin-init-input-");
+  const project = path.join(root, "project");
 
-    const result = await runPlugins(root, ["init", id, "--directory", project, ...options]);
+  const result = await runPlugins(root, ["init", id, "--directory", project, ...options]);
 
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain(reason);
-    expect(result.stderr).not.toContain("openclaw doctor");
-    await expect(fs.stat(project)).rejects.toMatchObject({ code: "ENOENT" });
-  },
-);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain(reason);
+  expect(result.stderr).not.toContain("openclaw doctor");
+  await expect(fs.stat(project)).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 it("explains why init refuses an existing directory and preserves its contents", async () => {
   const root = tempDirs.make("openclaw-plugin-init-existing-");
