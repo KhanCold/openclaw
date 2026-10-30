@@ -1,0 +1,73 @@
+name: plugin-init-format-diff
+
+on:
+  push:
+    branches:
+      - proof/plugins-init-format-diff-2026-10-30
+
+permissions:
+  contents: read
+
+jobs:
+  format-diff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CANDIDATE_SHA: 46b64ec98c696f27406d209f2c87bfc0737e76ca
+      CANDIDATE_REF: task/2026-10-29-plugin-init-expected-errors
+      BASE_SHA: 0f1e63efe002112e30f46d4544a84a04260f308d
+      REPO_DIR: ${{ github.workspace }}/.format-checkout
+    steps:
+      - name: Checkout diagnostic workflow without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Fetch and verify candidate snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" init --quiet "$REPO_DIR"
+          git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
+          test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring.process.test.ts")" = "aa168066ddb53ca05afa22e0db26e6732d7c8967"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "66fbbfa539ced012c72e305da7b96399df57ec26"
+          printf 'Base %s\nCandidate %s\nTest blob %s\n' "$BASE_SHA" "$CANDIDATE_SHA" "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: ${{ github.workspace }}/.format-checkout
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Stage the repository-pinned Bun formatter
+        shell: bash
+        working-directory: ${{ github.workspace }}/.format-checkout
+        run: |
+          set -euo pipefail
+          bash scripts/stage-openclaw-bun.sh "$RUNNER_TEMP/openclaw-bun" linux x64
+          echo "$RUNNER_TEMP/openclaw-bun/bin" >> "$GITHUB_PATH"
+
+      - name: Print the canonical formatter diff
+        shell: bash
+        working-directory: ${{ github.workspace }}/.format-checkout
+        run: |
+          set -euo pipefail
+          node scripts/run-format.mts --write src/cli/plugins-authoring.process.test.ts
+          {
+            echo '## Formatter output diff'
+            git --no-pager diff -- src/cli/plugins-authoring.process.test.ts
+            echo '## Formatted candidate file'
+            sed -n '1,145p' src/cli/plugins-authoring.process.test.ts
+          } | tee -a "$GITHUB_STEP_SUMMARY"
