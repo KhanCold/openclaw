@@ -14,14 +14,24 @@ async function fromRepo(relativePath: string) {
   return await import(pathToFileURL(path.join(repoRoot!, relativePath)).href);
 }
 
-const [bindingModule, sqliteHelper, sessionStore, sessionPaths, sqliteRuntime, pluginStateRuntime] =
-  await Promise.all([
+const [
+  bindingModule,
+  sqliteHelper,
+  sessionStore,
+  sessionPaths,
+  sqliteRuntime,
+  pluginStateRuntime,
+  transcriptWrite,
+  transcriptRead,
+] = await Promise.all([
     fromRepo("extensions/codex/src/app-server/session-binding.ts"),
     fromRepo("extensions/codex/src/app-server/session-binding.sqlite.test-helpers.ts"),
     fromRepo("src/plugin-sdk/session-store-runtime.ts"),
     fromRepo("src/config/sessions/paths.ts"),
     fromRepo("src/plugin-sdk/sqlite-runtime-testing.ts"),
     fromRepo("src/plugin-sdk/plugin-state-test-runtime.ts"),
+    fromRepo("src/config/sessions/session-accessor.sqlite-transcript-write.test-support.ts"),
+    fromRepo("src/config/sessions/session-transcript-events.ts"),
   ]);
 
 const {
@@ -35,6 +45,8 @@ const { getSessionEntry, upsertSessionEntry } = sessionStore;
 const { resolveDefaultSessionStorePath } = sessionPaths;
 const { closeOpenClawStateDatabaseAsync } = sqliteRuntime;
 const { resetPluginStateStoreForTests } = pluginStateRuntime;
+const { replaceTranscriptEvents } = transcriptWrite;
+const { loadSessionTranscriptEvents } = transcriptRead;
 
 const sessionStorePath = resolveDefaultSessionStorePath("main");
 const sessionDir = path.dirname(sessionStorePath);
@@ -99,6 +111,20 @@ async function seed() {
       `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: `proof transcript ${sessionKey}` }] } })}\n`,
       { mode: 0o600 },
     );
+    await replaceTranscriptEvents(
+      { agentId: "main", sessionId, sessionKey, storePath: sessionStorePath, env: process.env },
+      [
+        { type: "session", id: sessionId, version: 3 },
+        {
+          type: "message",
+          id: `proof-message-${sessionId}`,
+          message: {
+            role: "user",
+            content: [{ type: "text", text: `proof transcript ${sessionKey}` }],
+          },
+        },
+      ],
+    );
   }
 
   const retired = identity(ids.retiredOld, sessionNames.retired);
@@ -138,6 +164,10 @@ async function seed() {
 async function verify() {
   const mode = process.argv[2];
   assert(mode === "base" || mode === "candidate", `unknown verification mode: ${mode}`);
+  const cliResultPath = process.argv[3];
+  assert(cliResultPath, "CLI deletion result path missing");
+  const cliResult = JSON.parse(await fs.readFile(cliResultPath, "utf8"));
+  const resultsByKey = new Map(cliResult.results.map((entry: { key: string }) => [entry.key, entry]));
   const shouldDeleteRetired = mode === "candidate";
   const expectations = [
     [sessionNames.retired, !shouldDeleteRetired],
@@ -159,16 +189,25 @@ async function verify() {
       env: process.env,
     });
     assert.equal(Boolean(entry), shouldRemain, `${sessionKey}: unexpected session row state`);
-    const transcript = path.join(sessionDir, `${sessionId}.jsonl`);
-    const transcriptExists = await fs
-      .stat(transcript)
-      .then(() => true)
-      .catch(() => false);
-    const archived = (await fs.readdir(sessionDir)).some((name) =>
-      name.startsWith(`${sessionId}.jsonl.deleted.`),
+    const transcriptEvents = await loadSessionTranscriptEvents({
+      agentId: "main",
+      sessionId,
+      sessionKey,
+      storePath: sessionStorePath,
+      env: process.env,
+    });
+    assert.equal(
+      transcriptEvents.length > 0,
+      shouldRemain,
+      `${sessionKey}: unexpected SQLite transcript-history state`,
     );
-    assert.equal(transcriptExists, shouldRemain, `${sessionKey}: unexpected live transcript state`);
-    assert.equal(archived, !shouldRemain, `${sessionKey}: deleted transcript archive missing or unexpected`);
+    const result = resultsByKey.get(sessionKey) as { status: string; archived?: string[] } | undefined;
+    assert.equal(result?.status, shouldRemain ? "failed" : "deleted", `${sessionKey}: CLI status mismatch`);
+    const archived = result?.archived ?? [];
+    assert.equal(archived.length > 0, !shouldRemain, `${sessionKey}: archive result mismatch`);
+    for (const archivedPath of archived) {
+      await fs.stat(archivedPath);
+    }
   }
 
   const retiredIdentity = identity(ids.retiredCurrent, sessionNames.retired);
