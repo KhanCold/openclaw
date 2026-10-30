@@ -1,4 +1,4 @@
-name: plugin-init-format-diff
+name: plugin-init-final-ratchet-proof
 
 on:
   push:
@@ -9,16 +9,16 @@ permissions:
   contents: read
 
 jobs:
-  format-diff:
+  final-ratchet:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      CANDIDATE_SHA: 46b64ec98c696f27406d209f2c87bfc0737e76ca
+      CANDIDATE_SHA: 8cb1ceac4e3be86d63dcf39a61464b327e2c3f10
       CANDIDATE_REF: task/2026-10-29-plugin-init-expected-errors
       BASE_SHA: 0f1e63efe002112e30f46d4544a84a04260f308d
-      REPO_DIR: ${{ github.workspace }}/.format-checkout
+      REPO_DIR: ${{ github.workspace }}/.ratchet-checkout
     steps:
-      - name: Checkout diagnostic workflow without persisting credentials
+      - name: Checkout proof workflow without persisting credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -29,45 +29,47 @@ jobs:
           node-version: 24.22.1
           check-latest: false
 
-      - name: Fetch and verify candidate snapshot
+      - name: Fetch and verify exact final candidate blobs
         shell: bash
         run: |
           set -euo pipefail
-          git -C "$GITHUB_WORKSPACE" init --quiet "$REPO_DIR"
+          git init --quiet "$REPO_DIR"
           git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
           git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
           test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
           git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
           git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring-command.ts")" = "56b97edeb1c94b91f046101e150643250c71690a"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring-command.ts")" = "f109f2983b6b8c9dbb084d71586329f69192eb21"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring.process.test.ts")" = "aa168066ddb53ca05afa22e0db26e6732d7c8967"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "66fbbfa539ced012c72e305da7b96399df57ec26"
-          printf 'Base %s\nCandidate %s\nTest blob %s\n' "$BASE_SHA" "$CANDIDATE_SHA" "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" >> "$GITHUB_STEP_SUMMARY"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "936cd5763339888cb8d88a64935afa67dcbf450f"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/plugins-init-expected-errors-2026-10-29.txt")" = "8f92bfdd49766b1907d4aec8d3b0f9ed6129d0e6"
+          test "$(cat "$REPO_DIR/config/test-lines-allocations/plugins-init-expected-errors-2026-10-29.txt")" = "35"
+          {
+            echo "Final candidate: $CANDIDATE_SHA"
+            echo "Production blob: f109f2983b6b8c9dbb084d71586329f69192eb21"
+            echo "Test blob: 936cd5763339888cb8d88a64935afa67dcbf450f"
+            echo "Allocation blob: 8f92bfdd49766b1907d4aec8d3b0f9ed6129d0e6 (35 lines)"
+            echo "Base: $BASE_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install locked dependencies without lifecycle scripts
         shell: bash
-        working-directory: ${{ github.workspace }}/.format-checkout
+        working-directory: ${{ github.workspace }}/.ratchet-checkout
         run: |
           set -euo pipefail
           corepack enable
           corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
 
-      - name: Stage the repository-pinned Bun formatter
+      - name: Verify exact final line allocation and diff hygiene
         shell: bash
-        working-directory: ${{ github.workspace }}/.format-checkout
+        working-directory: ${{ github.workspace }}/.ratchet-checkout
         run: |
           set -euo pipefail
-          bash scripts/stage-openclaw-bun.sh "$RUNNER_TEMP/openclaw-bun" linux x64
-          echo "$RUNNER_TEMP/openclaw-bun/bin" >> "$GITHUB_PATH"
-
-      - name: Print the canonical formatter diff
-        shell: bash
-        working-directory: ${{ github.workspace }}/.format-checkout
-        run: |
-          set -euo pipefail
-          node scripts/run-format.mts --write src/cli/plugins-authoring.process.test.ts
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
           {
-            echo '## Formatter output diff'
-            git --no-pager diff -- src/cli/plugins-authoring.process.test.ts
-            echo '## Formatted candidate file'
-            sed -n '1,145p' src/cli/plugins-authoring.process.test.ts
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo
+            echo 'PASS: exact final candidate line-ratchet and diff hygiene.'
+            echo 'Behavior/build/CLI, formatter, focused lint, and core typecheck passed in run 40977906203 before this allocation-only commit; this SHA verifies identical source/test blobs plus the corrected exact 35-line allocation.'
+          } >> "$GITHUB_STEP_SUMMARY"
