@@ -671,6 +671,12 @@ describe("Codex app-server binding store", () => {
     await store.retireSessionGeneration(predecessor);
     expect(state.lookup(storeKey(predecessor))).toEqual(retiredRow(predecessor.sessionId));
 
+    await store.withSessionDeletion(successor, () => {}, async (_binding, mutation) => {
+      mutation.commit();
+      mutation.rollback();
+    });
+    expect(state.lookup(storeKey(successor))).toEqual(retiredRow(predecessor.sessionId));
+
     await store.withSessionDeletion(successor, () => {}, async (binding, mutation) => {
       expect(binding).toBeUndefined();
       mutation.commit();
