@@ -131,7 +131,7 @@ function thread(threadId: string, fields: Partial<ThreadBinding> = {}): ThreadBi
   return { threadId, cwd: "/repo", ...fields };
 }
 
-const retiredRow = (sessionId: string) => ({
+const retiredRow = (sessionId: string): StoredBinding => ({
   version: 1,
   state: "cleared",
   retired: true,
