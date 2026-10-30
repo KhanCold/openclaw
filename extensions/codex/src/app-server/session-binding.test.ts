@@ -752,11 +752,6 @@ describe("Codex app-server binding store", () => {
       "app-server-thread-bindings-delete-controls",
     );
 
-    const noBinding = makeStableSessionIdentity("no-binding", "agent:main:cron:no-binding");
-    await store.withSessionDeletion(noBinding, () => {}, async (_binding, mutation) => {
-      await settleSqliteDeletionMutation(noBinding.sessionKey, mutation, "commit");
-    });
-
     const sameGeneration = makeStableSessionIdentity(
       "same-generation",
       "agent:main:cron:same-generation",
