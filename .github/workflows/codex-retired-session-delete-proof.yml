@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       BASE_SHA: 6fc01dc6615798ce5bd5b5f9268e8457fcbf5846
-      CANDIDATE_SHA: 0b85ff59f1a26fd2450add5d70c075b6837640a1
+      CANDIDATE_SHA: 299687aa0aa2be56a25574ea4328c74828e131c2
       CANDIDATE_REF: task/2026-10-30-session-delete-retired-codex-binding-latest
       REPO_DIR: ${{ github.workspace }}/.proof-checkout
       PROOF_DIR: ${{ github.workspace }}/.proof-evidence
@@ -49,8 +49,8 @@ jobs:
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "c01bb1da21e047506d0ac44be7a758ba2ee77e1b"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "eb27c0c1e7838866106f14b766373f4812ed3e5f"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding-record.ts")" = "25d7f5b83e8a772d697020724e1ba38a2e7c4619"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "a0d5e3e8428abbb42e245fa00bce9f834ae26e69"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding-record.ts")" = "0911c5a0e0b4dd6b8d81a8f16dad9bacff2fc521"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "3f25a0403ff5659fcb3c1e246845599054d39723"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding-record.ts")" = "828381fcb798ed381a50a5a6a6a73a9662800486"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "829ccae0924f6381a274f3143d4bf21810871d3f"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/codex-retired-binding-delete-2026-10-30.txt")" = "492dff089afe4c5aaa55abe406b1f1169db21a13"
           {
@@ -173,8 +173,8 @@ jobs:
         run: |
           set -euo pipefail
           git checkout --quiet "$CANDIDATE_SHA" -- extensions/codex/src/app-server/session-binding.ts extensions/codex/src/app-server/session-binding-record.ts
-          test "$(git hash-object extensions/codex/src/app-server/session-binding.ts)" = "a0d5e3e8428abbb42e245fa00bce9f834ae26e69"
-          test "$(git hash-object extensions/codex/src/app-server/session-binding-record.ts)" = "0911c5a0e0b4dd6b8d81a8f16dad9bacff2fc521"
+          test "$(git hash-object extensions/codex/src/app-server/session-binding.ts)" = "3f25a0403ff5659fcb3c1e246845599054d39723"
+          test "$(git hash-object extensions/codex/src/app-server/session-binding-record.ts)" = "828381fcb798ed381a50a5a6a6a73a9662800486"
           corepack pnpm test \
             extensions/codex/src/app-server/session-binding.test.ts \
             extensions/codex/src/app-server/session-retirement.test.ts \
@@ -271,7 +271,7 @@ jobs:
             echo
             echo "- Evidence workflow commit: $GITHUB_SHA"
             echo "- Exact base: $BASE_SHA (production blob c01bb1da21e047506d0ac44be7a758ba2ee77e1b; test blob eb27c0c1e7838866106f14b766373f4812ed3e5f)"
-            echo "- Exact candidate: $CANDIDATE_SHA (production binding blob a0d5e3e8428abbb42e245fa00bce9f834ae26e69; record helper blob 0911c5a0e0b4dd6b8d81a8f16dad9bacff2fc521; test blob 829ccae0924f6381a274f3143d4bf21810871d3f; allocation blob 492dff089afe4c5aaa55abe406b1f1169db21a13)"
+            echo "- Exact candidate: $CANDIDATE_SHA (production binding blob 3f25a0403ff5659fcb3c1e246845599054d39723; record helper blob 828381fcb798ed381a50a5a6a6a73a9662800486; test blob 829ccae0924f6381a274f3143d4bf21810871d3f; allocation blob 492dff089afe4c5aaa55abe406b1f1169db21a13)"
             echo '- Runner: ubuntu-24.04, GitHub-hosted public-repository runner.'
             echo '- Permissions: contents: read; checkout credentials not persisted; no repository secrets, OIDC, environments, self-hosted runners, caches, or artifact uploads.'
             echo '- Runtime: isolated HOME/state/config, real plugin-state SQLite tombstones, live SQLite session rows, built CLI and local token-authenticated Gateway; no provider/model/channel credentials.'
