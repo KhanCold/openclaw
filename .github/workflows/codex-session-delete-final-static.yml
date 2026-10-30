@@ -1,0 +1,105 @@
+name: codex-session-delete-final-static
+
+on:
+  push:
+    branches:
+      - proof/2026-10-30-session-delete-final-static
+
+permissions:
+  contents: read
+
+jobs:
+  final-static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BASE_SHA: 6fc01dc6615798ce5bd5b5f9268e8457fcbf5846
+      CANDIDATE_SHA: 58181b46169a3bc465047a382cf761199a381e99
+      CANDIDATE_REF: task/2026-10-30-session-delete-retired-codex-binding-latest
+    steps:
+      - name: Checkout proof workflow without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Fetch and pin exact final candidate snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir .final-checkout
+          git -C .final-checkout init --quiet
+          git -C .final-checkout remote add fork https://github.com/KhanCold/openclaw.git
+          git -C .final-checkout fetch --no-tags --depth=1 fork "$CANDIDATE_REF"
+          test "$(git -C .final-checkout rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
+          git -C .final-checkout checkout --quiet --detach "$CANDIDATE_SHA"
+          git -C .final-checkout fetch --no-tags --depth=1 fork "$BASE_SHA"
+          test "$(git -C .final-checkout rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "c01bb1da21e047506d0ac44be7a758ba2ee77e1b"
+          test "$(git -C .final-checkout rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "eb27c0c1e7838866106f14b766373f4812ed3e5f"
+          test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "456313c6b265614065517eaf78d4841e8ade0e0c"
+          test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "829ccae0924f6381a274f3143d4bf21810871d3f"
+          test "$(git -C .final-checkout rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/codex-retired-binding-delete-2026-10-30.txt")" = "492dff089afe4c5aaa55abe406b1f1169db21a13"
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: .final-checkout
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Stage repository-pinned Bun formatter
+        shell: bash
+        working-directory: .final-checkout
+        run: |
+          set -euo pipefail
+          bash scripts/stage-openclaw-bun.sh "$RUNNER_TEMP/openclaw-bun" linux x64
+          echo "$RUNNER_TEMP/openclaw-bun/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/openclaw-bun/bin/bun" --version
+
+      - name: Prove exact base-red for the stale-predecessor SQLite regression
+        shell: bash
+        working-directory: .final-checkout
+        run: |
+          set -euo pipefail
+          git show "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts" > extensions/codex/src/app-server/session-binding.ts
+          set +e
+          corepack pnpm test extensions/codex/src/app-server/session-binding.test.ts -t "restores a stale predecessor tombstone after a failed session deletion transaction" --maxWorkers=1 --reporter=verbose > "$RUNNER_TEMP/base-red.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/base-red.log"
+          if [ "$status" -eq 0 ] || ! grep -Fq 'restores a stale predecessor tombstone after a failed session deletion transaction' "$RUNNER_TEMP/base-red.log"; then
+            echo 'Exact base did not show the expected stale-predecessor failure.' >&2
+            exit 1
+          fi
+
+      - name: Restore final candidate and pass focused regression suites
+        shell: bash
+        working-directory: .final-checkout
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$CANDIDATE_SHA" -- extensions/codex/src/app-server/session-binding.ts
+          corepack pnpm test \
+            extensions/codex/src/app-server/session-binding.test.ts \
+            extensions/codex/src/app-server/session-retirement.test.ts \
+            src/config/sessions/session-accessor.sqlite-deletion.test.ts \
+            src/commands/sessions-cleanup.harness.test.ts \
+            src/agents/harness/native-session/binding-lifecycle.test.ts \
+            --maxWorkers=1
+
+      - name: Check exact-head formatting, lint, types, ratchet, and diff hygiene
+        shell: bash
+        working-directory: .final-checkout
+        run: |
+          set -euo pipefail
+          corepack pnpm format:check extensions/codex/src/app-server/session-binding.ts extensions/codex/src/app-server/session-binding.test.ts
+          corepack pnpm lint --files-json '["extensions/codex/src/app-server/session-binding.ts","extensions/codex/src/app-server/session-binding.test.ts"]'
+          corepack pnpm tsgo:extensions
+          corepack pnpm tsgo:extensions:test
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
