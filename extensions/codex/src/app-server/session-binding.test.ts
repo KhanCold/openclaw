@@ -73,7 +73,7 @@ async function createSessionFixture(prefix: string) {
 }
 async function createSqliteFixture(namespace: string, rejectNew = false) {
   const { root } = await createSessionFixture(`codex-${namespace}-`);
-  const stateEnv = { ...process.env, OPENCLAW_STATE_DIR: root };
+  const stateEnv = { ...process.env, OPENCLAW_STATE_DIR: path.join(root, "plugin-state") };
   const openSyncKeyedStore = <T>(options: OpenKeyedStoreOptions) =>
     createPluginStateSyncKeyedStoreForTests<T>("codex", {
       ...options,
