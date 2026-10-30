@@ -1,0 +1,281 @@
+name: codex-retired-session-delete-proof
+
+on:
+  push:
+    branches:
+      - proof/2026-10-30-session-delete-retired-codex-binding-latest
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-proof:
+    name: Exact base/candidate Gateway deletion proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BASE_SHA: 6fc01dc6615798ce5bd5b5f9268e8457fcbf5846
+      CANDIDATE_SHA: 80f0348693dbe029cbd780f95b79818f0625c40f
+      CANDIDATE_REF: task/2026-10-30-session-delete-retired-codex-binding-latest
+      REPO_DIR: ${{ github.workspace }}/.proof-checkout
+      PROOF_DIR: ${{ github.workspace }}/.proof-evidence
+      RUNTIME_SCRIPT: ${{ github.workspace }}/.proof-runtime.mts
+    steps:
+      - name: Checkout evidence workflow without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Fetch exact public base and candidate snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROOF_DIR" "$REPO_DIR"
+          cp proof/session-delete-proof-runtime.mts "$RUNTIME_SCRIPT"
+          git -C "$REPO_DIR" init --quiet
+          git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
+          fetched_candidate="$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)"
+          test "$fetched_candidate" = "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA^{commit}")" = "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "c01bb1da21e047506d0ac44be7a758ba2ee77e1b"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "eb27c0c1e7838866106f14b766373f4812ed3e5f"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "43ee64eb250c6e575d26d2b415c33e6bf758f5f8"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "56afe01623c0e21b091950a97214e20871a4603b"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/codex-retired-binding-delete-2026-10-30.txt")" = "987e7ca9a76df749c99da91a829e772e9aa622f6"
+          {
+            printf 'Base SHA: %s\nCandidate SHA: %s\nCandidate ref: %s\nNode: %s\n' "$BASE_SHA" "$CANDIDATE_SHA" "$CANDIDATE_REF" "$(node --version)"
+          } | tee "$PROOF_DIR/manifest.txt"
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack enable
+          printf 'pnpm: %s\n' "$(corepack pnpm --version)" | tee -a "$PROOF_DIR/manifest.txt"
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Stage the repository-pinned Bun formatter
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          bash scripts/stage-openclaw-bun.sh "$PROOF_DIR/bun" linux x64
+          echo "$PROOF_DIR/bun/bin" >> "$GITHUB_PATH"
+          "$PROOF_DIR/bun/bin/bun" --version | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Prove the SQLite regression fails on the exact base
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          git show "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts" > extensions/codex/src/app-server/session-binding.ts
+          test "$(git hash-object extensions/codex/src/app-server/session-binding.ts)" = "c01bb1da21e047506d0ac44be7a758ba2ee77e1b"
+          set +e
+          corepack pnpm test extensions/codex/src/app-server/session-binding.test.ts --maxWorkers=1 --reporter=verbose > "$PROOF_DIR/base-red.log" 2>&1
+          status=$?
+          set -e
+          cat "$PROOF_DIR/base-red.log"
+          if [ "$status" -eq 0 ] || ! grep -Fq 'deletes a successor session after retiring a predecessor SQLite binding' "$PROOF_DIR/base-red.log"; then
+            echo 'Baseline did not fail the expected SQLite predecessor-tombstone regression.' >&2
+            exit 1
+          fi
+          printf 'PASS: exact base production blob fails the retired-predecessor SQLite regression.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Build baseline and prove real sessions delete through Gateway
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack pnpm build
+          run_gateway_delete_proof() {
+            local mode="$1"
+            local runtime_dir="$PROOF_DIR/runtime-$mode"
+            local state_dir="$runtime_dir/state"
+            local home_dir="$runtime_dir/home"
+            local token="openclaw-proof-$mode-$GITHUB_RUN_ID"
+            local port
+            mkdir -p "$state_dir" "$home_dir" "$runtime_dir/xdg-config" "$runtime_dir/xdg-cache"
+            port="$(node -e 'const net=require("node:net");const s=net.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+            export HOME="$home_dir" OPENCLAW_HOME="$home_dir" OPENCLAW_STATE_DIR="$state_dir" OPENCLAW_CONFIG_PATH="$state_dir/openclaw.json" XDG_CONFIG_HOME="$runtime_dir/xdg-config" XDG_CACHE_HOME="$runtime_dir/xdg-cache" PROOF_GATEWAY_PORT="$port" PROOF_GATEWAY_TOKEN="$token" PROOF_REPO_DIR="$REPO_DIR"
+            node --import ./scripts/tsx.mjs "$RUNTIME_SCRIPT" seed | tee "$runtime_dir/seed.json"
+            node openclaw.mjs gateway --allow-unconfigured --bind loopback --auth token --token "$token" --port "$port" > "$runtime_dir/gateway.log" 2>&1 &
+            local gateway_pid=$!
+            local ready=0
+            for _ in $(seq 1 90); do
+              if curl --silent --show-error --fail --max-time 2 "http://127.0.0.1:$port/startup" >/dev/null 2>&1; then ready=1; break; fi
+              if ! kill -0 "$gateway_pid" 2>/dev/null; then break; fi
+              sleep 2
+            done
+            if [ "$ready" -ne 1 ]; then
+              cat "$runtime_dir/gateway.log"
+              kill "$gateway_pid" 2>/dev/null || true
+              wait "$gateway_pid" 2>/dev/null || true
+              echo "Gateway did not become ready for $mode proof." >&2
+              return 1
+            fi
+            local keys=(
+              'agent:main:cron:proof-retired-predecessor:heartbeat'
+              'agent:main:cron:proof-no-binding:heartbeat'
+              'agent:main:cron:proof-same-generation:heartbeat'
+              'agent:main:cron:proof-active-mismatch:heartbeat'
+            )
+            set +e
+            node openclaw.mjs sessions delete "${keys[@]}" --agent main --yes --json --url "ws://127.0.0.1:$port" --token "$token" > "$runtime_dir/delete.stdout.log" 2> "$runtime_dir/delete.stderr.log"
+            local cli_status=$?
+            set -e
+            cat "$runtime_dir/delete.stdout.log"
+            cat "$runtime_dir/delete.stderr.log" >&2
+            test "$cli_status" -eq 1
+            node - "$runtime_dir/delete.stdout.log" "$mode" <<'NODE'
+          const assert = require("node:assert/strict");
+          const fs = require("node:fs");
+          const [file, mode] = process.argv.slice(2);
+          const result = JSON.parse(fs.readFileSync(file, "utf8"));
+          assert.equal(result.ok, false);
+          assert.equal(result.operation, "delete");
+          const byKey = new Map(result.results.map((entry) => [entry.key, entry]));
+          const retired = byKey.get("agent:main:cron:proof-retired-predecessor:heartbeat");
+          const noBinding = byKey.get("agent:main:cron:proof-no-binding:heartbeat");
+          const same = byKey.get("agent:main:cron:proof-same-generation:heartbeat");
+          const active = byKey.get("agent:main:cron:proof-active-mismatch:heartbeat");
+          assert.equal(retired?.status, mode === "base" ? "failed" : "deleted");
+          assert.match(retired?.error ?? "", mode === "base" ? /Codex binding generation changed before session deletion/u : /^$/u);
+          assert.equal(noBinding?.status, "deleted");
+          assert.equal(same?.status, "deleted");
+          assert.equal(active?.status, "failed");
+          assert.match(active.error ?? "", /Codex binding generation changed before session deletion/u);
+          process.stdout.write(`PASS: ${mode} CLI batch statuses and error fences verified.\n`);
+          NODE
+            kill -TERM "$gateway_pid" 2>/dev/null || true
+            wait "$gateway_pid" 2>/dev/null || true
+            node --import ./scripts/tsx.mjs "$RUNTIME_SCRIPT" verify "$mode" | tee "$runtime_dir/verify.json"
+            printf 'PASS: real built CLI + Gateway + SQLite %s deletion scenario and archive controls.\n' "$mode" | tee -a "$PROOF_DIR/manifest.txt"
+          }
+          run_gateway_delete_proof base
+
+      - name: Restore candidate and prove SQLite tests, build, and real Gateway deletion
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$CANDIDATE_SHA" -- extensions/codex/src/app-server/session-binding.ts
+          test "$(git hash-object extensions/codex/src/app-server/session-binding.ts)" = "43ee64eb250c6e575d26d2b415c33e6bf758f5f8"
+          corepack pnpm test \
+            extensions/codex/src/app-server/session-binding.test.ts \
+            extensions/codex/src/app-server/session-retirement.test.ts \
+            src/config/sessions/session-accessor.sqlite-deletion.test.ts \
+            src/commands/sessions-cleanup.harness.test.ts \
+            src/agents/harness/native-session/binding-lifecycle.test.ts \
+            --maxWorkers=1
+          corepack pnpm build
+          run_gateway_delete_proof() {
+            local mode="candidate"
+            local runtime_dir="$PROOF_DIR/runtime-$mode"
+            local state_dir="$runtime_dir/state"
+            local home_dir="$runtime_dir/home"
+            local token="openclaw-proof-$mode-$GITHUB_RUN_ID"
+            local port
+            mkdir -p "$state_dir" "$home_dir" "$runtime_dir/xdg-config" "$runtime_dir/xdg-cache"
+            port="$(node -e 'const net=require("node:net");const s=net.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+            export HOME="$home_dir" OPENCLAW_HOME="$home_dir" OPENCLAW_STATE_DIR="$state_dir" OPENCLAW_CONFIG_PATH="$state_dir/openclaw.json" XDG_CONFIG_HOME="$runtime_dir/xdg-config" XDG_CACHE_HOME="$runtime_dir/xdg-cache" PROOF_GATEWAY_PORT="$port" PROOF_GATEWAY_TOKEN="$token" PROOF_REPO_DIR="$REPO_DIR"
+            node --import ./scripts/tsx.mjs "$RUNTIME_SCRIPT" seed | tee "$runtime_dir/seed.json"
+            node openclaw.mjs gateway --allow-unconfigured --bind loopback --auth token --token "$token" --port "$port" > "$runtime_dir/gateway.log" 2>&1 &
+            local gateway_pid=$!
+            local ready=0
+            for _ in $(seq 1 90); do
+              if curl --silent --show-error --fail --max-time 2 "http://127.0.0.1:$port/startup" >/dev/null 2>&1; then ready=1; break; fi
+              if ! kill -0 "$gateway_pid" 2>/dev/null; then break; fi
+              sleep 2
+            done
+            if [ "$ready" -ne 1 ]; then
+              cat "$runtime_dir/gateway.log"
+              kill "$gateway_pid" 2>/dev/null || true
+              wait "$gateway_pid" 2>/dev/null || true
+              echo "Gateway did not become ready for candidate proof." >&2
+              return 1
+            fi
+            local keys=(
+              'agent:main:cron:proof-retired-predecessor:heartbeat'
+              'agent:main:cron:proof-no-binding:heartbeat'
+              'agent:main:cron:proof-same-generation:heartbeat'
+              'agent:main:cron:proof-active-mismatch:heartbeat'
+            )
+            set +e
+            node openclaw.mjs sessions delete "${keys[@]}" --agent main --yes --json --url "ws://127.0.0.1:$port" --token "$token" > "$runtime_dir/delete.stdout.log" 2> "$runtime_dir/delete.stderr.log"
+            local cli_status=$?
+            set -e
+            cat "$runtime_dir/delete.stdout.log"
+            cat "$runtime_dir/delete.stderr.log" >&2
+            test "$cli_status" -eq 1
+            node - "$runtime_dir/delete.stdout.log" "$mode" <<'NODE'
+          const assert = require("node:assert/strict");
+          const fs = require("node:fs");
+          const [file, mode] = process.argv.slice(2);
+          const result = JSON.parse(fs.readFileSync(file, "utf8"));
+          assert.equal(result.ok, false);
+          assert.equal(result.operation, "delete");
+          const byKey = new Map(result.results.map((entry) => [entry.key, entry]));
+          const retired = byKey.get("agent:main:cron:proof-retired-predecessor:heartbeat");
+          const noBinding = byKey.get("agent:main:cron:proof-no-binding:heartbeat");
+          const same = byKey.get("agent:main:cron:proof-same-generation:heartbeat");
+          const active = byKey.get("agent:main:cron:proof-active-mismatch:heartbeat");
+          assert.equal(retired?.status, "deleted");
+          assert.equal(noBinding?.status, "deleted");
+          assert.equal(same?.status, "deleted");
+          assert.equal(active?.status, "failed");
+          assert.match(active.error ?? "", /Codex binding generation changed before session deletion/u);
+          process.stdout.write("PASS: candidate CLI batch statuses and active-generation error fence verified.\n");
+          NODE
+            kill -TERM "$gateway_pid" 2>/dev/null || true
+            wait "$gateway_pid" 2>/dev/null || true
+            node --import ./scripts/tsx.mjs "$RUNTIME_SCRIPT" verify "$mode" | tee "$runtime_dir/verify.json"
+            printf 'PASS: candidate real built CLI + Gateway removed the stale-session row and tombstone, archived transcript, and retained the active binding.\n' | tee -a "$PROOF_DIR/manifest.txt"
+          }
+          run_gateway_delete_proof
+
+      - name: Check final candidate formatting, lint, types, line ratchet, and diff hygiene
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack pnpm format:check extensions/codex/src/app-server/session-binding.ts extensions/codex/src/app-server/session-binding.test.ts
+          corepack pnpm lint --files-json '["extensions/codex/src/app-server/session-binding.ts","extensions/codex/src/app-server/session-binding.test.ts"]'
+          corepack pnpm tsgo:extensions
+          corepack pnpm tsgo:extensions:test
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          printf 'PASS: exact candidate format, changed-file lint, extension production/test typechecks, test-line ratchet, and diff hygiene.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Record verifiable proof summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Codex retired predecessor session deletion proof'
+            echo
+            echo "- Evidence workflow commit: $GITHUB_SHA"
+            echo "- Exact base: $BASE_SHA (production blob c01bb1da21e047506d0ac44be7a758ba2ee77e1b; test blob eb27c0c1e7838866106f14b766373f4812ed3e5f)"
+            echo "- Exact candidate: $CANDIDATE_SHA (production blob 43ee64eb250c6e575d26d2b415c33e6bf758f5f8; test blob 56afe01623c0e21b091950a97214e20871a4603b; allocation blob 987e7ca9a76df749c99da91a829e772e9aa622f6)"
+            echo '- Runner: ubuntu-24.04, GitHub-hosted public-repository runner.'
+            echo '- Permissions: contents: read; checkout credentials not persisted; no repository secrets, OIDC, environments, self-hosted runners, caches, or artifact uploads.'
+            echo '- Runtime: isolated HOME/state/config, real plugin-state SQLite tombstones, live SQLite session rows, built CLI and local token-authenticated Gateway; no provider/model/channel credentials.'
+            echo '- Runtime cases: old cleared/retired predecessor (base fails; candidate deletes), no binding, same-generation retired tombstone, mismatched active binding; ordinary transcript archive checked.'
+            echo '- Existing SQLite lifecycle/lease tests run on the candidate; no schema or migration changes.'
+            echo '- Logs and step summaries are retained with this Actions run.'
+            echo
+            if [ -f "$PROOF_DIR/manifest.txt" ]; then
+              echo '```text'
+              cat "$PROOF_DIR/manifest.txt"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
