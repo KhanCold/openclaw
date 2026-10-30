@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       BASE_SHA: 6fc01dc6615798ce5bd5b5f9268e8457fcbf5846
-      CANDIDATE_SHA: e7469ffb9ccce44f135faa22cab5dad4422e6074
+      CANDIDATE_SHA: 2e86fced5fce9ab6688bfd73cc5e9dad7d2ce55b
       CANDIDATE_REF: task/2026-10-30-session-delete-retired-codex-binding-latest
       REPO_DIR: ${{ github.workspace }}/.proof-checkout
       PROOF_DIR: ${{ github.workspace }}/.proof-evidence
@@ -48,9 +48,9 @@ jobs:
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA^{commit}")" = "$BASE_SHA"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "c01bb1da21e047506d0ac44be7a758ba2ee77e1b"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "eb27c0c1e7838866106f14b766373f4812ed3e5f"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "43ee64eb250c6e575d26d2b415c33e6bf758f5f8"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "5358753327242fd747c5090f87747477ba2e4aca"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/codex-retired-binding-delete-2026-10-30.txt")" = "dee261df401d48661df8ba5474c1d1c7c258d3e5"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "456313c6b265614065517eaf78d4841e8ade0e0c"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "17566e0fba7ef0ebccd0320dedf68e5c1531f426"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/codex-retired-binding-delete-2026-10-30.txt")" = "492dff089afe4c5aaa55abe406b1f1169db21a13"
           {
             printf 'Base SHA: %s\nCandidate SHA: %s\nCandidate ref: %s\nNode: %s\n' "$BASE_SHA" "$CANDIDATE_SHA" "$CANDIDATE_REF" "$(node --version)"
           } | tee "$PROOF_DIR/manifest.txt"
@@ -169,7 +169,7 @@ jobs:
         run: |
           set -euo pipefail
           git checkout --quiet "$CANDIDATE_SHA" -- extensions/codex/src/app-server/session-binding.ts
-          test "$(git hash-object extensions/codex/src/app-server/session-binding.ts)" = "43ee64eb250c6e575d26d2b415c33e6bf758f5f8"
+          test "$(git hash-object extensions/codex/src/app-server/session-binding.ts)" = "456313c6b265614065517eaf78d4841e8ade0e0c"
           corepack pnpm test \
             extensions/codex/src/app-server/session-binding.test.ts \
             extensions/codex/src/app-server/session-retirement.test.ts \
@@ -265,7 +265,7 @@ jobs:
             echo
             echo "- Evidence workflow commit: $GITHUB_SHA"
             echo "- Exact base: $BASE_SHA (production blob c01bb1da21e047506d0ac44be7a758ba2ee77e1b; test blob eb27c0c1e7838866106f14b766373f4812ed3e5f)"
-            echo "- Exact candidate: $CANDIDATE_SHA (production blob 43ee64eb250c6e575d26d2b415c33e6bf758f5f8; test blob 5358753327242fd747c5090f87747477ba2e4aca; allocation blob dee261df401d48661df8ba5474c1d1c7c258d3e5)"
+            echo "- Exact candidate: $CANDIDATE_SHA (production blob 456313c6b265614065517eaf78d4841e8ade0e0c; test blob 17566e0fba7ef0ebccd0320dedf68e5c1531f426; allocation blob 492dff089afe4c5aaa55abe406b1f1169db21a13)"
             echo '- Runner: ubuntu-24.04, GitHub-hosted public-repository runner.'
             echo '- Permissions: contents: read; checkout credentials not persisted; no repository secrets, OIDC, environments, self-hosted runners, caches, or artifact uploads.'
             echo '- Runtime: isolated HOME/state/config, real plugin-state SQLite tombstones, live SQLite session rows, built CLI and local token-authenticated Gateway; no provider/model/channel credentials.'
