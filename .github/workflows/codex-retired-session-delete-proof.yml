@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       BASE_SHA: 6fc01dc6615798ce5bd5b5f9268e8457fcbf5846
-      CANDIDATE_SHA: 4d322da3adb9dc477f5343f585e3a005f8c08105
+      CANDIDATE_SHA: af2f8ef6f4ed8b7e7180ba6a864ac5918966a16d
       CANDIDATE_REF: task/2026-10-30-session-delete-retired-codex-binding-latest
       REPO_DIR: ${{ github.workspace }}/.proof-checkout
       PROOF_DIR: ${{ github.workspace }}/.proof-evidence
@@ -49,7 +49,7 @@ jobs:
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "c01bb1da21e047506d0ac44be7a758ba2ee77e1b"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "eb27c0c1e7838866106f14b766373f4812ed3e5f"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.ts")" = "43ee64eb250c6e575d26d2b415c33e6bf758f5f8"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "111db67d20ae9b9df6e89a6e4b8c3b7d525dd897"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:extensions/codex/src/app-server/session-binding.test.ts")" = "e3759ee294f336b43227a903fa2957dec0a2fd23"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/codex-retired-binding-delete-2026-10-30.txt")" = "13c09a007eb0a76d4ed37d96a9b870c3f4434be8"
           {
             printf 'Base SHA: %s\nCandidate SHA: %s\nCandidate ref: %s\nNode: %s\n' "$BASE_SHA" "$CANDIDATE_SHA" "$CANDIDATE_REF" "$(node --version)"
@@ -85,7 +85,7 @@ jobs:
           status=$?
           set -e
           cat "$PROOF_DIR/base-red.log"
-          if [ "$status" -eq 0 ] || ! grep -Fq 'deletes a successor session after retiring a predecessor SQLite binding' "$PROOF_DIR/base-red.log"; then
+          if [ "$status" -eq 0 ] || ! grep -Fq 'restores a stale predecessor tombstone after a failed session deletion transaction' "$PROOF_DIR/base-red.log"; then
             echo 'Baseline did not fail the expected SQLite predecessor-tombstone regression.' >&2
             exit 1
           fi
@@ -265,12 +265,12 @@ jobs:
             echo
             echo "- Evidence workflow commit: $GITHUB_SHA"
             echo "- Exact base: $BASE_SHA (production blob c01bb1da21e047506d0ac44be7a758ba2ee77e1b; test blob eb27c0c1e7838866106f14b766373f4812ed3e5f)"
-            echo "- Exact candidate: $CANDIDATE_SHA (production blob 43ee64eb250c6e575d26d2b415c33e6bf758f5f8; test blob 111db67d20ae9b9df6e89a6e4b8c3b7d525dd897; allocation blob 13c09a007eb0a76d4ed37d96a9b870c3f4434be8)"
+            echo "- Exact candidate: $CANDIDATE_SHA (production blob 43ee64eb250c6e575d26d2b415c33e6bf758f5f8; test blob e3759ee294f336b43227a903fa2957dec0a2fd23; allocation blob 13c09a007eb0a76d4ed37d96a9b870c3f4434be8)"
             echo '- Runner: ubuntu-24.04, GitHub-hosted public-repository runner.'
             echo '- Permissions: contents: read; checkout credentials not persisted; no repository secrets, OIDC, environments, self-hosted runners, caches, or artifact uploads.'
             echo '- Runtime: isolated HOME/state/config, real plugin-state SQLite tombstones, live SQLite session rows, built CLI and local token-authenticated Gateway; no provider/model/channel credentials.'
             echo '- Runtime cases: old cleared/retired predecessor (base fails; candidate deletes), no binding, same-generation retired tombstone, mismatched active binding; successful cases archive transcripts while failed cases retain them.'
-            echo '- Rollback control: the exact stale predecessor SQLite row is deleted through the worker participant then restored through its rollback settlement; the ordinary same-generation tombstone also rolls back. Existing session-accessor SQLite transaction and lifecycle/lease suites run on the candidate. No schema or migration changes.'
+            echo '- Rollback control: the exact stale predecessor SQLite row is removed through the worker participant; an injected deletion-transaction failure triggers rollback and restores that exact row, and a later successful commit removes it. Existing session-accessor SQLite transaction and lifecycle/lease suites run on the candidate. No schema or migration changes.'
             echo '- Logs and step summaries are retained with this Actions run.'
             echo
             if [ -f "$PROOF_DIR/manifest.txt" ]; then
