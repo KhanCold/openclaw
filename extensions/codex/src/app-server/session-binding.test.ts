@@ -4,6 +4,7 @@ import { patchSessionEntry, upsertSessionEntry } from "openclaw/plugin-sdk/sessi
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveSessionDeletionWorkerParticipant } from "../../../../src/config/sessions/session-deletion-worker-participant.js";
 import { createLazyCodexAppServerBindingStore } from "./session-binding-store.js";
 import {
   bindingStoreKey as storeKey,
@@ -28,6 +29,28 @@ function createBindingFixture() {
   const values = new Map<string, StoredBinding>();
   const state = createMemoryState(values);
   return { state, values, store: createBindingStore(state) };
+}
+
+type SessionDeletionMutation = Parameters<
+  Parameters<BindingStore["withSessionDeletion"]>[2]
+>[1];
+
+async function settleSqliteDeletionMutation(
+  sessionKey: string,
+  mutation: SessionDeletionMutation,
+  outcome: "commit" | "rollback",
+) {
+  const participant = resolveSessionDeletionWorkerParticipant(mutation, sessionKey);
+  const settlement = participant.memoryMutation;
+  if (!settlement) {
+    throw new Error("Expected a worker-owned SQLite session-deletion participant");
+  }
+  const assertCurrent = () => participant.assertCurrent();
+  if (outcome === "commit") {
+    await settlement.commit(assertCurrent);
+  } else {
+    await settlement.rollback(assertCurrent);
+  }
 }
 
 const sessionFixtures: Awaited<ReturnType<typeof createOpenClawTestState>>[] = [];
@@ -672,14 +695,14 @@ describe("Codex app-server binding store", () => {
     expect(state.lookup(storeKey(predecessor))).toEqual(retiredRow(predecessor.sessionId));
 
     await store.withSessionDeletion(successor, () => {}, async (_binding, mutation) => {
-      mutation.commit();
-      mutation.rollback();
+      await settleSqliteDeletionMutation(successor.sessionKey, mutation, "commit");
+      await settleSqliteDeletionMutation(successor.sessionKey, mutation, "rollback");
     });
     expect(state.lookup(storeKey(successor))).toEqual(retiredRow(predecessor.sessionId));
 
     await store.withSessionDeletion(successor, () => {}, async (binding, mutation) => {
       expect(binding).toBeUndefined();
-      mutation.commit();
+      await settleSqliteDeletionMutation(successor.sessionKey, mutation, "commit");
     });
 
     expect(state.lookup(storeKey(successor))).toBeUndefined();
@@ -692,7 +715,7 @@ describe("Codex app-server binding store", () => {
 
     const noBinding = makeStableSessionIdentity("no-binding", "agent:main:cron:no-binding");
     await store.withSessionDeletion(noBinding, () => {}, async (_binding, mutation) => {
-      mutation.commit();
+      await settleSqliteDeletionMutation(noBinding.sessionKey, mutation, "commit");
     });
 
     const sameGeneration = makeStableSessionIdentity(
@@ -702,8 +725,8 @@ describe("Codex app-server binding store", () => {
     const sameGenerationTombstone = retiredRow(sameGeneration.sessionId);
     state.register(storeKey(sameGeneration), sameGenerationTombstone);
     await store.withSessionDeletion(sameGeneration, () => {}, async (_binding, mutation) => {
-      mutation.commit();
-      mutation.rollback();
+      await settleSqliteDeletionMutation(sameGeneration.sessionKey, mutation, "commit");
+      await settleSqliteDeletionMutation(sameGeneration.sessionKey, mutation, "rollback");
     });
     expect(state.lookup(storeKey(sameGeneration))).toEqual(sameGenerationTombstone);
 
@@ -718,7 +741,7 @@ describe("Codex app-server binding store", () => {
       binding: thread("thread-current"),
     });
     await store.withSessionDeletion(currentActive, () => {}, async (_binding, mutation) => {
-      mutation.commit();
+      await settleSqliteDeletionMutation(currentActive.sessionKey, mutation, "commit");
     });
     expect(state.lookup(storeKey(currentActive))).toBeUndefined();
 
