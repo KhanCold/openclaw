@@ -700,7 +700,11 @@ export function createCodexAppServerBindingStore(
           ...prepareLease(identity, { allowRetired: true, assertCurrent }),
           assertCurrent,
           assertRecordCurrent(stored) {
-            if (!stored || !ownsStoredSessionGeneration(identity, stored)) {
+            const ownsGeneration = stored ? ownsStoredSessionGeneration(identity, stored) : false;
+            // Retired cleared predecessors carry no live thread authority for the successor.
+            const inertRetiredPredecessor =
+              stored?.state === "cleared" && stored.retired === true;
+            if (!stored || (!ownsGeneration && !inertRetiredPredecessor)) {
               throw new Error("Codex binding generation changed before session deletion");
             }
           },
