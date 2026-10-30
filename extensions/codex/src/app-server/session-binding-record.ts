@@ -120,16 +120,17 @@ export function ownsStoredSessionGeneration(
   );
 }
 
-/** Retired tombstones are inert for deletion of a newer session generation. */
-export function canDeleteSessionWithCodexBinding(
+export function assertCodexSessionDeletionBindingCurrent(
   identity: CodexAppServerBindingIdentity,
   stored: StoredCodexAppServerBinding | undefined,
-): boolean {
-  return (
-    stored !== undefined &&
-    (ownsStoredSessionGeneration(identity, stored) ||
-      (stored.state === "cleared" && stored.retired === true))
-  );
+): void {
+  if (
+    stored === undefined ||
+    (!ownsStoredSessionGeneration(identity, stored) &&
+      !(stored.state === "cleared" && stored.retired === true))
+  ) {
+    throw new Error("Codex binding generation changed before session deletion");
+  }
 }
 
 /** Legacy effect guards; prepared readers also observe raw SDK binding writes. */
