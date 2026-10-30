@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 50
     env:
       BASE_SHA: 0f1e63efe002112e30f46d4544a84a04260f308d
-      CANDIDATE_SHA: 46b64ec98c696f27406d209f2c87bfc0737e76ca
+      CANDIDATE_SHA: 7e0001863305e2b2ab2a938a0a373e3476454b0c
       CANDIDATE_REF: task/2026-10-29-plugin-init-expected-errors
       REPO_DIR: ${{ github.workspace }}/.proof-checkout
       PROOF_DIR: ${{ github.workspace }}/.proof-evidence
@@ -45,7 +45,7 @@ jobs:
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring-command.ts")" = "56b97edeb1c94b91f046101e150643250c71690a"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring-command.ts")" = "f109f2983b6b8c9dbb084d71586329f69192eb21"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring.process.test.ts")" = "aa168066ddb53ca05afa22e0db26e6732d7c8967"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "66fbbfa539ced012c72e305da7b96399df57ec26"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "936cd5763339888cb8d88a64935afa67dcbf450f"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/plugins-init-expected-errors-2026-10-29.txt")" = "e522732c77ec94723e739d22f28df549b0231f5f"
           {
             printf 'Base SHA: %s\n' "$BASE_SHA"
@@ -191,7 +191,7 @@ jobs:
             echo
             echo "- Evidence workflow commit: $GITHUB_SHA"
             echo "- Baseline: $BASE_SHA (production blob 56b97edeb1c94b91f046101e150643250c71690a)"
-            echo "- Candidate: $CANDIDATE_SHA (production blob f109f2983b6b8c9dbb084d71586329f69192eb21; test blob 66fbbfa539ced012c72e305da7b96399df57ec26; allocation blob e522732c77ec94723e739d22f28df549b0231f5f)"
+            echo "- Candidate: $CANDIDATE_SHA (production blob f109f2983b6b8c9dbb084d71586329f69192eb21; test blob 936cd5763339888cb8d88a64935afa67dcbf450f; allocation blob e522732c77ec94723e739d22f28df549b0231f5f)"
             echo "- Runner: ubuntu-24.04 (GitHub-hosted public runner)"
             echo '- Permissions: contents: read; pinned actions; no repository secrets, OIDC, environments, caches, self-hosted runners, or persisted checkout credentials.'
             echo '- Proof logs and summary are retained with this Actions run; no separate artifact storage is used.'
