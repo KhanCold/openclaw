@@ -702,8 +702,7 @@ export function createCodexAppServerBindingStore(
           assertRecordCurrent(stored) {
             const ownsGeneration = stored ? ownsStoredSessionGeneration(identity, stored) : false;
             // Retired cleared predecessors carry no live thread authority for the successor.
-            const inertRetiredPredecessor =
-              stored?.state === "cleared" && stored.retired === true;
+            const inertRetiredPredecessor = stored?.state === "cleared" && stored.retired === true;
             if (!stored || (!ownsGeneration && !inertRetiredPredecessor)) {
               throw new Error("Codex binding generation changed before session deletion");
             }
