@@ -39,6 +39,7 @@ import {
   bindingStoreKey,
   matchesPendingSupervisionBranch,
   ownsStoredSessionGeneration,
+  canDeleteSessionWithCodexBinding,
   preserveCodexNativeSubagentSubmissions,
   readCurrentCodexAppServerBinding,
   prepareCurrentCodexAppServerBindingRead,
@@ -700,11 +701,7 @@ export function createCodexAppServerBindingStore(
           ...prepareLease(identity, { allowRetired: true, assertCurrent }),
           assertCurrent,
           assertRecordCurrent(stored) {
-            const inertRetiredPredecessor = stored?.state === "cleared" && stored.retired === true;
-            if (
-              !stored ||
-              (!ownsStoredSessionGeneration(identity, stored) && !inertRetiredPredecessor)
-            ) {
+            if (!canDeleteSessionWithCodexBinding(identity, stored)) {
               throw new Error("Codex binding generation changed before session deletion");
             }
           },
