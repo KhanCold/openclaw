@@ -1,5 +1,14 @@
 import path from "node:path";
-import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import {
+  createPluginStateKeyedStoreForTests,
+  createPluginStateSyncKeyedStoreForTests,
+  resetPluginStateStoreForTests,
+} from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import type {
+  OpenAsyncKeyedStoreOptions,
+  OpenKeyedStoreOptions,
+  PluginStateActionAuthority,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
 import { patchSessionEntry, upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
@@ -19,7 +28,10 @@ import {
   type CodexAppServerBindingStore as BindingStore,
   type CodexAppServerThreadBinding as ThreadBinding,
 } from "./session-binding.js";
-import { createCodexSqliteTestBindingStateStore as createSqliteState } from "./session-binding.sqlite.test-helpers.js";
+import {
+  createCodexRuntimeTestBindingStateStore as createRuntimeSqliteState,
+  createCodexSqliteTestBindingStateStore as createSqliteState,
+} from "./session-binding.sqlite.test-helpers.js";
 import { createCodexTestBindingStateStore as createMemoryState } from "./session-binding.test-helpers.js";
 
 type Identity = Parameters<BindingStore["mutate"]>[0];
@@ -61,7 +73,26 @@ async function createSessionFixture(prefix: string) {
 }
 async function createSqliteFixture(namespace: string, rejectNew = false) {
   const { root } = await createSessionFixture(`codex-${namespace}-`);
-  const state = sqliteState(namespace, root, rejectNew);
+  const stateEnv = { ...process.env, OPENCLAW_STATE_DIR: root };
+  const openSyncKeyedStore = <T>(options: OpenKeyedStoreOptions) =>
+    createPluginStateSyncKeyedStoreForTests<T>("codex", {
+      ...options,
+      env: stateEnv,
+    });
+  const openKeyedStoreV2 = <T>(
+    options: OpenAsyncKeyedStoreOptions,
+    authority?: PluginStateActionAuthority,
+  ) =>
+    createPluginStateKeyedStoreForTests<T>("codex", {
+      ...options,
+      env: stateEnv,
+    }).withCurrent(authority ?? { assertCurrent() {} });
+  const stateRuntime = { state: { openSyncKeyedStore, openKeyedStoreV2 } };
+  const state = createRuntimeSqliteState(stateRuntime, {
+    namespace,
+    maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+    ...(rejectNew ? { overflowPolicy: "reject-new" as const } : {}),
+  });
   return { state, store: createBindingStore(state) };
 }
 
@@ -681,7 +712,7 @@ describe("Codex app-server binding store", () => {
     },
   );
 
-  it("deletes a successor session after retiring a predecessor SQLite binding", async () => {
+  it("restores a stale predecessor tombstone after a failed session deletion transaction", async () => {
     const { state, store } = await createSqliteFixture(
       "app-server-thread-bindings-delete-predecessor",
     );
@@ -694,10 +725,18 @@ describe("Codex app-server binding store", () => {
     await store.retireSessionGeneration(predecessor);
     expect(state.lookup(storeKey(predecessor))).toEqual(retiredRow(predecessor.sessionId));
 
-    await store.withSessionDeletion(successor, () => {}, async (_binding, mutation) => {
-      await settleSqliteDeletionMutation(successor.sessionKey, mutation, "commit");
-      await settleSqliteDeletionMutation(successor.sessionKey, mutation, "rollback");
-    });
+    const deletionFailure = new Error("injected session deletion transaction failure");
+    await expect(
+      store.withSessionDeletion(successor, () => {}, async (_binding, mutation) => {
+        await settleSqliteDeletionMutation(successor.sessionKey, mutation, "commit");
+        try {
+          throw deletionFailure;
+        } catch (error) {
+          await settleSqliteDeletionMutation(successor.sessionKey, mutation, "rollback");
+          throw error;
+        }
+      }),
+    ).rejects.toBe(deletionFailure);
     expect(state.lookup(storeKey(successor))).toEqual(retiredRow(predecessor.sessionId));
 
     await store.withSessionDeletion(successor, () => {}, async (binding, mutation) => {
