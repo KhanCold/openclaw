@@ -1,11 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { resolveRuntimeProcessEntrypointUrl } from "../infra/runtime-process-url.js";
 import { captureRuntimeWorkerSource } from "../infra/runtime-worker-generation.js";
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "../infra/sqlite-handle-lifecycle.js";
-import {
-  assertExistingDatabaseIdentity,
-  type DatabasePathIdentity,
-} from "../infra/sqlite-worker-identity.js";
+import type { DatabasePathIdentity } from "../infra/sqlite-worker-identity.js";
 import type { SqliteWorkerStateContext } from "../infra/sqlite-worker-state-context.js";
 import {
   openSharedStateSqliteWorkerStore,
@@ -19,10 +17,8 @@ import {
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
-import { isStateDatabaseReadAdmissionInvalidatedError } from "./openclaw-state-db-async-lifecycle.js";
+import { notifyListeners } from "../shared/listeners.js";
 import {
-  captureOpenClawStateDatabaseReadAdmission,
-  openClawStateDatabaseCache,
   publishOpenClawStateDatabaseWorkerAdmission,
   assertPublishedOpenClawStateDatabaseLifecycle,
   registerOpenClawStateDatabaseAsyncResource,
@@ -145,7 +141,7 @@ function createSharedStateWorkerOwner() {
     }
     throw error;
   };
-  const retainOperation = (store: Store) => {
+  const retainOperation = (store: Store, onNativeLost?: () => void) => {
     const entry = [...stores].find((candidate) => candidate.store === store);
     if (!entry) {
       throw new Error("Shared-state worker operation lost its actor owner");
@@ -153,12 +149,21 @@ function createSharedStateWorkerOwner() {
     clearIdleRetirement(entry);
     entry.activeOperations += 1;
     activeEntries.add(entry);
+    if (onNativeLost) {
+      entry.nativeLostListeners.add(onNativeLost);
+      if (!isSqliteWorkerStoreAvailable(store)) {
+        onNativeLost();
+      }
+    }
     let released = false;
     return () => {
       if (released) {
         return undefined;
       }
       released = true;
+      if (onNativeLost) {
+        entry.nativeLostListeners.delete(onNativeLost);
+      }
       entry.activeOperations -= 1;
       if (entry.activeOperations === 0) {
         activeEntries.delete(entry);
@@ -195,64 +200,6 @@ function createSharedStateWorkerOwner() {
     return pending;
   };
 
-  const inspectInvalidEntry = (
-    entry: Entry,
-  ): { kind: "actor" | "client"; error: unknown } | undefined => {
-    const actor = entry.actor;
-    let kind: "actor" | "client" = "actor";
-    try {
-      if (entry.bound && actor) {
-        assertOpenClawStateWorkerActorPath(actor);
-        if (entry.store && isSqliteWorkerStoreAvailable(entry.store)) {
-          kind = "client";
-        }
-      }
-      entry.databaseAdmission.assertCurrent();
-    } catch (error) {
-      if (!isStateDatabaseReadAdmissionInvalidatedError(error)) {
-        throw error;
-      }
-      // An intact path's invalidation affects the actor's whole physical generation.
-      if (
-        kind === "client" &&
-        openClawStateDatabaseCache.getKnownOpenClawStateDatabaseIdentity(
-          entry.context.admission.databasePath,
-        )?.key === actor?.key
-      ) {
-        kind = "actor";
-      }
-      return { kind, error };
-    }
-    return undefined;
-  };
-  const retireInvalidEntry = (entry: Entry): { pending: Promise<void> | undefined } | undefined => {
-    const invalid = inspectInvalidEntry(entry);
-    if (!invalid) {
-      return undefined;
-    }
-    if (invalid.kind === "actor") {
-      if (hasActiveActorOperations(entry)) {
-        throw invalid.error;
-      }
-      return {
-        pending: entry.opening.then(
-          () => {
-            if (hasActiveActorOperations(entry)) {
-              throw invalid.error;
-            }
-            return entry.actor ? retireActor(entry.actor) : retire(entry);
-          },
-          () => retire(entry),
-        ),
-      };
-    }
-    if (!stores.has(entry)) {
-      return undefined;
-    }
-    const closing = retire(entry);
-    // The retirement owner joins this client after its callback can finish using healthy peers.
-    return { pending: entry.activeOperations === 0 ? closing : undefined };
-  };
   async function close(identity?: DatabasePathIdentity): Promise<void> {
     for (const entry of stores.values()) {
       if (matches(entry, identity)) {
@@ -270,7 +217,7 @@ function createSharedStateWorkerOwner() {
       throw new AggregateError(errors, "Failed to close shared-state SQLite workers");
     }
   }
-  registerOpenClawStateDatabaseAsyncResource({ close });
+  registerOpenClawStateDatabaseAsyncResource({ phase: "after-resources", close });
   registerOpenClawStateDatabaseLifecycleListener((event) => {
     if (event.kind !== "opened") {
       // Synchronous error eviction cannot await, but actor retirement remains
@@ -319,11 +266,6 @@ function createSharedStateWorkerOwner() {
       }
       const assertCurrent = () => {
         assertOwned();
-        assertExistingDatabaseIdentity(
-          databasePath,
-          expectedIdentity.key,
-          expectedIdentity.birthtime,
-        );
         for (const entry of activeEntries) {
           if (
             matches(entry, expectedIdentity) &&
@@ -352,7 +294,16 @@ function createSharedStateWorkerOwner() {
         }
       }
       return openSharedStateSqliteWorkerStore<OpenClawStateWorkerCleanupOperations>(
-        { ...captureRuntimeWorkerSource(moduleUrl), databasePath, existingOnly: true },
+        {
+          ...captureRuntimeWorkerSource(moduleUrl),
+          databasePath,
+          existingOnly: true,
+          admission: {
+            identity: expectedIdentity.key,
+            birthtime: expectedIdentity.birthtime,
+            assertCurrent,
+          },
+        },
         context,
         assertCurrent,
         {
@@ -366,7 +317,7 @@ function createSharedStateWorkerOwner() {
       context: OpenClawStateWorkerContext,
       options: Omit<OperationOptions, "createAdmission"> = {},
     ): Promise<Store | undefined> {
-      const { existingOnly = false, assertCurrent, preparation, signal } = options;
+      const { existingOnly = false, assertCurrent, signal } = options;
       const { admission } = context;
       const wait = <T>(pending: Promise<T>) => racePromiseWithAbortSignal(pending, signal);
       const source = captureRuntimeWorkerSource(moduleUrl);
@@ -381,19 +332,25 @@ function createSharedStateWorkerOwner() {
         if (!matches(candidate, admission.identity)) {
           continue;
         }
-        const retirement = retireInvalidEntry(candidate);
-        if (retirement) {
-          if (retirement.pending) {
-            await wait(retirement.pending);
-          }
-          return this.open(context, options);
-        }
         if (
           stores.has(candidate) &&
           (candidate.context.existingSchemaPath !== context.existingSchemaPath ||
+            !isDeepStrictEqual(
+              candidate.context.gatewayServiceInstallation,
+              context.gatewayServiceInstallation,
+            ) ||
             candidate.source.moduleUrl.href !== source.moduleUrl.href)
         ) {
-          await wait(retire(candidate));
+          // A nested caller cannot join closure of the client scope retaining its
+          // outer lease. Preserve policy refusal without waiting on that scope.
+          if (hasActiveActorOperations(candidate)) {
+            throw new Error(
+              "Shared-state worker policy changed while its actor is in use; close its leases first",
+            );
+          }
+          // Cleanup clients can still retain the actor after this entry closes.
+          // Retire every client before reopening under the new policy.
+          await wait(candidate.actor ? retireActor(candidate.actor) : retire(candidate));
           assertAdmission();
         }
       }
@@ -402,8 +359,10 @@ function createSharedStateWorkerOwner() {
           matches(retiringEntry, admission.identity) &&
           retiringEntry.context.maintenanceScope === context.maintenanceScope
         ) {
-          if (inspectInvalidEntry(retiringEntry)?.kind === "client") {
-            continue;
+          if (hasActiveActorOperations(retiringEntry)) {
+            throw new Error(
+              "Shared-state worker is retiring while its actor is in use; close its leases first",
+            );
           }
           if (!attempt.pending) {
             // Another retained owner may have completed the failed admission's cleanup.
@@ -431,15 +390,16 @@ function createSharedStateWorkerOwner() {
         (candidate) =>
           matches(candidate, admission.identity) &&
           candidate.context.maintenanceScope === context.maintenanceScope &&
-          candidate.context.existingSchemaPath === context.existingSchemaPath,
+          candidate.context.existingSchemaPath === context.existingSchemaPath &&
+          isDeepStrictEqual(
+            candidate.context.gatewayServiceInstallation,
+            context.gatewayServiceInstallation,
+          ),
       );
       const ownsOpening = !entry;
       if (!entry) {
-        // Retain the database generation separately from the caller's lexical
-        // schema scope, which may end while this actor remains reusable.
-        const databaseAdmission = captureOpenClawStateDatabaseReadAdmission(admission.databasePath);
-        assertAdmission();
         const openingGuard = captureOpenClawStateWorkerOpeningGuard(context);
+        const nativeLostListeners = new Set<() => void>();
         const open = () =>
           openingGuard.run(() =>
             openSharedStateSqliteWorkerStore<OpenClawStateWorkerOperations>(
@@ -452,19 +412,29 @@ function createSharedStateWorkerOwner() {
               openingGuard.assertCurrent,
               {
                 maintenanceScope: context.maintenanceScope,
-                preparation,
+                // Opening binds the captured file; later commands retain their own authority.
+                ...(existingOnly && admission.identity.key.startsWith("file:")
+                  ? { createAdmission: openingGuard.createAdmission }
+                  : {}),
                 retireIdle: retireIdle.bind(undefined, admitted),
                 retainCleanup: (cleanup) => {
                   admitted.cleanup = cleanup;
                 },
+                // Bind only the listener set so the broker does not retain the opening caller.
+                onNativeLost: notifyListeners.bind(
+                  undefined,
+                  nativeLostListeners,
+                  undefined,
+                  undefined,
+                ),
               },
             ),
           );
         const admitted: Entry = {
           source,
           context,
-          databaseAdmission,
           existingOnly,
+          nativeLostListeners,
           activeOperations: 0,
           opening: Promise.resolve(undefined),
         };
@@ -518,18 +488,17 @@ function createSharedStateWorkerOwner() {
       }
       try {
         if (!entry.bound) {
-          publishOpenClawStateDatabaseWorkerAdmission(entry.context.admission);
+          publishOpenClawStateDatabaseWorkerAdmission(
+            entry.context.admission,
+            getSqliteWorkerActorIdentity(store).identity,
+          );
           entry.bound = true;
         }
       } catch (error) {
         return retireAfterFailure(entry, error, "binding");
       }
-      const retirement = retireInvalidEntry(entry);
-      if (retirement) {
-        if (retirement.pending) {
-          await wait(retirement.pending);
-        }
-        return this.open(context, options);
+      if (entry.actor) {
+        assertOpenClawStateWorkerActorPath(entry.actor);
       }
       stores.delete(entry);
       stores.add(entry);
@@ -545,7 +514,5 @@ export function getOpenClawStateWorkerOwner() {
   return resolveGlobalSingleton(
     Symbol.for("openclaw.sharedStateWorkerOwner"),
     createSharedStateWorkerOwner,
-    (sharedOwner) => sharedOwner.close(),
-    "shared-state",
   );
 }

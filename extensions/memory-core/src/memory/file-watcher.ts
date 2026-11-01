@@ -1,3 +1,5 @@
+import { createSubsystemLogger } from "openclaw/plugin-sdk/diagnostic-runtime";
+import { materializeErrorStack } from "openclaw/plugin-sdk/error-runtime";
 import {
   watch,
   resolveFsObservationMode,
@@ -8,7 +10,6 @@ import {
   type WatchSubscription,
   type WatchScope,
 } from "openclaw/plugin-sdk/file-access-runtime";
-import { createSubsystemLogger } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import type { MemoryWorkspaceWatchRequest } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { formatCliCommand } from "openclaw/plugin-sdk/setup-tools";
 import type { MemoryCoreRuntimeHost } from "./runtime-host.js";
@@ -26,7 +27,11 @@ const RETRY_DELAYS_MS = [500, 2_000, 5_000];
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 // Native events drive updates; infrequent reconciliation recovers missed events.
 const RECONCILE_INTERVAL_MS = 5 * 60_000;
-type MemoryFileWatcherOptions = {
+export type MemoryWatchFacts = {
+  health: ReturnType<MemoryFileWatcher["health"]>;
+  capacityDegraded: boolean;
+};
+export type MemoryFileWatcherOptions = {
   runInBackgroundContext: NonNullable<MemoryCoreRuntimeHost["runInBackgroundContext"]>;
   workspaceDir: string;
   agentId: string;
@@ -34,6 +39,7 @@ type MemoryFileWatcherOptions = {
   onChange: () => void | Promise<void>;
   onUnavailable: () => void;
   onDirty?: () => void;
+  onState?: (facts: MemoryWatchFacts) => void;
 };
 type ObservationMember = {
   group: MemoryObservation;
@@ -274,6 +280,10 @@ export class MemoryFileWatcher {
     return (this.starting ??= this.options.runInBackgroundContext(() => this.refresh()));
   }
 
+  private publishState(): void {
+    this.options.onState?.({ health: this.health(), capacityDegraded: this.degraded });
+  }
+
   private get canObserve(): boolean {
     return !(
       this.closed ||
@@ -374,6 +384,7 @@ export class MemoryFileWatcher {
             this.observations.set(id, { id, member, shared });
             ready.push(observationReady);
           }
+          this.publishState();
           await Promise.all(ready);
         }
       })
@@ -434,6 +445,7 @@ export class MemoryFileWatcher {
   }
 
   private onHealth(health: WatchHealth, mode: "auto" | "poll", pollIntervalMs: number): void {
+    this.publishState();
     if (health.state !== "ready") {
       return;
     }
@@ -472,6 +484,7 @@ export class MemoryFileWatcher {
       return;
     }
     this.degraded ||= Boolean(capacityCode);
+    this.publishState();
     this.options.onUnavailable();
     this.markDirty();
     log.warn(
@@ -504,11 +517,15 @@ export class MemoryFileWatcher {
     for (const entry of entries) {
       this.observations.delete(entry.id);
     }
+    if (entries.length) {
+      this.publishState();
+    }
     const results = await Promise.allSettled(entries.map(releaseObservation));
     for (const result of results) {
       if (result.status !== "rejected") {
         continue;
       }
+      materializeErrorStack(result.reason);
       this.closeErrors.push(result.reason);
       if (!this.closed) {
         this.options.onUnavailable();
@@ -559,6 +576,7 @@ export class MemoryFileWatcher {
           })
           .catch((error: unknown) => {
             if (error instanceof ObservationSampleCloseError) {
+              materializeErrorStack(error.cause);
               this.closeErrors.push(error.cause);
               this.unavailable(error);
             }
@@ -598,8 +616,11 @@ export class MemoryFileWatcher {
         retirement,
       ]);
       this.pendingPaths.clear();
+      this.publishState();
       if (this.closeErrors.length) {
-        throw new AggregateError(this.closeErrors, "Memory watcher cleanup failed");
+        const failure = new AggregateError(this.closeErrors, "Memory watcher cleanup failed");
+        materializeErrorStack(failure);
+        throw failure;
       }
     });
     return this.closing;
