@@ -56,10 +56,7 @@ export const stubJsonRoutes = (routes: Record<string, unknown>) =>
   stubFetch(({ href }) => (routes[href] ? jsonResponse(routes[href]) : undefined));
 
 export function stubMeetArtifactsApi(
-  options: {
-    failSmartNoteDocumentBody?: boolean;
-    participantDisplayName?: string;
-  } = {},
+  options: { failSmartNoteDocumentBody?: boolean; participantDisplayName?: string } = {},
 ) {
   const fixtures: Record<string, unknown> = meetApiFixtures(options);
   const documents: Record<string, string> = {
