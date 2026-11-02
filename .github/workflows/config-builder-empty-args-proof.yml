@@ -14,9 +14,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     env:
-      BASE_SHA: e1cd6e11ac78eb247131eb32d568d3f61c98ab33
-      CANDIDATE_SHA: a02018904ac562a80c8cb46cf2d24d1479278ea5
-      CANDIDATE_REF: task/2026-10-29-config-builder-empty-args
+      BASE_SHA: 1347e901fce121a46962b706baa0f61f09f87860
+      CANDIDATE_SHA: 9f1496bfd6ac846d0565fc259123d8af6284beb5
+      CANDIDATE_REF: task/2026-11-02-config-builder-empty-args-current-main
       REPO_DIR: ${{ github.workspace }}/.proof-checkout
       PROOF_DIR: ${{ github.workspace }}/.proof-evidence
     steps:
@@ -45,7 +45,10 @@ jobs:
           git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA^{commit}")" = "$BASE_SHA"
           test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/config-set-input.ts")" = "93eb1b71a98aa540ccf2791cc56dd0d3690b9723"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/config-cli.integration.test.ts")" = "1617493ffa803d8123162e6d2ef57431b2b4769e"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:docs/cli/config.md")" = "6052a52170bf690792e879b503875b9cc45bca96"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-set-input.ts")" = "41425074c115f55d65b5d70997d1e1c5664e8043"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:docs/cli/config.md")" = "873f3953e5dcb15d0d7682ddb52557f7899f4073"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-cli.integration.test.ts")" = "7f9702496e9e2586f42bb5110bc7f5961a53baf5"
           test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/config-builder-empty-args-2026-10-29.txt")" = "87523dd7a0632907d61799465827c3f08825fa47"
           {
@@ -132,6 +135,11 @@ jobs:
           git checkout --quiet "$CANDIDATE_SHA" -- src/cli/config-set-input.ts
           test "$(git hash-object src/cli/config-set-input.ts)" = "41425074c115f55d65b5d70997d1e1c5664e8043"
           corepack pnpm test src/cli/config-cli.integration.test.ts --maxWorkers=1 --reporter=verbose 2>&1 | tee "$PROOF_DIR/candidate-green.log"
+          node -e 'let s=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(s.replace(/\x1b\[[0-9;]*m/g, "")));' < "$PROOF_DIR/candidate-green.log" > "$PROOF_DIR/candidate-green.plain.log"
+          if ! grep -Eq 'Tests[[:space:]]+[0-9]+ passed([[:space:]]|$)' "$PROOF_DIR/candidate-green.plain.log"; then
+            echo 'Candidate output did not show a fully passing config CLI integration suite.' >&2
+            exit 1
+          fi
           corepack pnpm test src/cli/config-set-mode.test.ts src/cli/config-cli.test.ts --maxWorkers=1 --reporter=verbose 2>&1 | tee "$PROOF_DIR/candidate-builder-controls.log"
           if ! grep -Fq 'selects ref_builder' "$PROOF_DIR/candidate-builder-controls.log" || ! grep -Fq 'keeps a quoted numeric record key distinct from an array-indexed secret target' "$PROOF_DIR/candidate-builder-controls.log" || ! grep -Fq 'supports provider builder mode under secrets.providers.<alias>' "$PROOF_DIR/candidate-builder-controls.log"; then
             echo 'Candidate builder control tests did not show the valid ref/provider positive cases.' >&2
@@ -194,8 +202,8 @@ jobs:
             echo '# Config builder empty-argument proof'
             echo
             echo "- Evidence workflow commit: $GITHUB_SHA"
-            echo "- Baseline: $BASE_SHA (production file blob 93eb1b71a98aa540ccf2791cc56dd0d3690b9723)"
-            echo "- Candidate: $CANDIDATE_SHA (production file blob 41425074c115f55d65b5d70997d1e1c5664e8043; test file blob 7f9702496e9e2586f42bb5110bc7f5961a53baf5; test-line allocation blob 87523dd7a0632907d61799465827c3f08825fa47)"
+            echo "- Baseline: $BASE_SHA (production blob 93eb1b71a98aa540ccf2791cc56dd0d3690b9723; test blob 1617493ffa803d8123162e6d2ef57431b2b4769e; docs blob 6052a52170bf690792e879b503875b9cc45bca96)"
+            echo "- Candidate: $CANDIDATE_SHA (production blob 41425074c115f55d65b5d70997d1e1c5664e8043; test blob 7f9702496e9e2586f42bb5110bc7f5961a53baf5; docs blob 873f3953e5dcb15d0d7682ddb52557f7899f4073; test-line allocation blob 87523dd7a0632907d61799465827c3f08825fa47)"
             echo "- Runner: ubuntu-24.04 (GitHub-hosted standard public-repository runner)"
             echo '- Permissions: contents: read; no repository secrets, OIDC, environments, caches, or persisted checkout credentials.'
             echo '- Proof logs are retained with this Actions run; no separate artifact storage is requested.'
