@@ -1,0 +1,143 @@
+name: plugins-init-current-main-baseline
+
+on:
+  push:
+    branches:
+      - proof/plugins-init-current-main-baseline-2026-11-02
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-init-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      BASE_SHA: c17c6245ce35fae6c5d2a15228c63793c6b80530
+      REPO_DIR: ${{ github.workspace }}/.upstream-baseline
+      PROOF_DIR: ${{ github.workspace }}/.baseline-evidence
+    steps:
+      - name: Checkout workflow only without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+
+      - name: Fetch and verify exact upstream baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROOF_DIR" "$REPO_DIR"
+          git -C "$REPO_DIR" init --quiet
+          git -C "$REPO_DIR" remote add upstream https://github.com/openclaw/openclaw.git
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 upstream "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$BASE_SHA"
+          git -C "$REPO_DIR" checkout --quiet --detach "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse HEAD:src/cli/plugins-authoring-command.ts)" = "edffcae5d0598349c883b82eabaf250c164f0f3a"
+          test "$(git -C "$REPO_DIR" rev-parse HEAD:src/cli/plugins-authoring.process.test.ts)" = "aa168066ddb53ca05afa22e0db26e6732d7c8967"
+          test "$(git -C "$REPO_DIR" rev-parse HEAD:src/cli/expected-cli-error.ts)" = "b7703a79f74954e6a5b5871a5c0ac0765f1e2023"
+          test "$(git -C "$REPO_DIR" rev-parse HEAD:src/entry.ts)" = "8a5866d7351f19e99b79c88459b021880b495086"
+          test "$(git -C "$REPO_DIR" rev-parse HEAD:src/cli/failure-output.ts)" = "a9e388346c2ae9422648f8855e82ac504382f6ab"
+          test "$(git -C "$REPO_DIR" rev-parse HEAD:package.json)" = "2e4cab96168bfb1f080c4ebbd89b22192745f767"
+          test "$(git -C "$REPO_DIR" rev-parse HEAD:pnpm-lock.yaml)" = "44f4dd6c7bddad273248f66d3f4cb27651f7eef2"
+          {
+            printf 'Upstream baseline SHA: %s\n' "$BASE_SHA"
+            printf 'Source blob: %s\n' "$(git -C "$REPO_DIR" rev-parse HEAD:src/cli/plugins-authoring-command.ts)"
+            printf 'Entry blob: %s\n' "$(git -C "$REPO_DIR" rev-parse HEAD:src/entry.ts)"
+            printf 'Node: %s\n' "$(node --version)"
+          } | tee "$PROOF_DIR/manifest.txt"
+
+      - name: Install locked upstream dependencies without lifecycle scripts
+        shell: bash
+        working-directory: ${{ github.workspace }}/.upstream-baseline
+        run: |
+          set -euo pipefail
+          corepack enable
+          printf 'pnpm: %s\n' "$(corepack pnpm --version)" | tee -a "$PROOF_DIR/manifest.txt"
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Build baseline product CLI
+        shell: bash
+        working-directory: ${{ github.workspace }}/.upstream-baseline
+        run: |
+          set -euo pipefail
+          started_ms="$(date +%s%3N)"
+          corepack pnpm build
+          elapsed_ms=$(( $(date +%s%3N) - started_ms ))
+          printf 'Baseline build wall time: %s ms\n' "$elapsed_ms" | tee -a "$PROOF_DIR/manifest.txt"
+          test -f openclaw.mjs
+
+      - name: Reproduce user-visible init diagnostics through the built CLI
+        shell: bash
+        working-directory: ${{ github.workspace }}/.upstream-baseline
+        run: |
+          set -euo pipefail
+          run_case() {
+            local name="$1"
+            shift
+            CASE_DIR="$PROOF_DIR/cli/$name"
+            mkdir -p "$CASE_DIR/home" "$CASE_DIR/state" "$CASE_DIR/xdg-config" "$CASE_DIR/xdg-cache"
+            printf '{"agents":{"entries":{"main":{}}},"gateway":{"port":18789}}\n' > "$CASE_DIR/state/openclaw.json"
+            if env -u NODE_ENV -u NODE_OPTIONS -u VITEST -u VITEST_POOL_ID -u VITEST_WORKER_ID HOME="$CASE_DIR/home" OPENCLAW_HOME="$CASE_DIR/home" OPENCLAW_STATE_DIR="$CASE_DIR/state" OPENCLAW_CONFIG_PATH="$CASE_DIR/state/openclaw.json" XDG_CONFIG_HOME="$CASE_DIR/xdg-config" XDG_CACHE_HOME="$CASE_DIR/xdg-cache" OPENCLAW_NO_RESPAWN=1 OPENCLAW_HIDE_BANNER=1 NO_COLOR=1 node openclaw.mjs "$@" > "$CASE_DIR/stdout.log" 2> "$CASE_DIR/stderr.log"; then
+              CASE_EXIT=0
+            else
+              CASE_EXIT=$?
+            fi
+            printf '\n--- %s (exit %s) ---\n' "$name" "$CASE_EXIT"
+            cat "$CASE_DIR/stderr.log"
+          }
+          assert_generic_error() {
+            local reason="$1"
+            test "$CASE_EXIT" -eq 1
+            grep -Fq '[openclaw] The CLI command failed.' "$CASE_DIR/stderr.log"
+            grep -Fq 'openclaw doctor' "$CASE_DIR/stderr.log"
+            if grep -Fq "$reason" "$CASE_DIR/stderr.log"; then
+              echo "Expected cause to be hidden, but saw: $reason" >&2
+              exit 1
+            fi
+          }
+
+          run_case invalid-type plugins init plugin-init-proof --directory "$PROOF_DIR/cli/invalid-type/project" --type invalid
+          assert_generic_error 'Unsupported plugin scaffold type'
+          test ! -e "$PROOF_DIR/cli/invalid-type/project"
+
+          run_case blank-id plugins init ' ' --directory "$PROOF_DIR/cli/blank-id/project"
+          assert_generic_error 'Plugin id is required.'
+          test ! -e "$PROOF_DIR/cli/blank-id/project"
+
+          run_case blank-name plugins init plugin-init-proof --directory "$PROOF_DIR/cli/blank-name/project" --name ' '
+          assert_generic_error 'Plugin display name is required.'
+          test ! -e "$PROOF_DIR/cli/blank-name/project"
+
+          existing_dir="$PROOF_DIR/cli/existing-path/project"
+          mkdir -p "$existing_dir"
+          printf 'preserve me\n' > "$existing_dir/keep.txt"
+          run_case existing-path plugins init plugin-init-proof --directory "$existing_dir"
+          assert_generic_error 'Refusing to overwrite existing path:'
+          test "$(cat "$existing_dir/keep.txt")" = 'preserve me'
+
+          run_case valid-init plugins init plugin-init-proof --directory "$PROOF_DIR/cli/valid-init/project"
+          test "$CASE_EXIT" -eq 0
+          node -e 'const fs=require("node:fs");const path=require("node:path");const d=process.argv[1];const m=JSON.parse(fs.readFileSync(path.join(d,"openclaw.plugin.json"),"utf8"));const p=JSON.parse(fs.readFileSync(path.join(d,"package.json"),"utf8"));if(m.id!=="plugin-init-proof"||p.name!=="openclaw-plugin-plugin-init-proof")process.exit(1);' "$PROOF_DIR/cli/valid-init/project"
+          printf 'PASS: current-main built CLI hides each specific invalid-input cause behind the generic error/Doctor hint, preserves existing files, and valid init succeeds.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Record proof summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Current-main plugin init baseline proof'
+            echo
+            echo "- Evidence workflow commit: $GITHUB_SHA"
+            echo "- Upstream baseline: $BASE_SHA"
+            echo '- Runner: public GitHub-hosted ubuntu-24.04.'
+            echo '- Permissions: contents: read; pinned actions; no secrets, OIDC, environments, caches, or persisted checkout credentials.'
+            echo '- The workflow builds and exercises only the pinned upstream baseline. It does not check out or execute the candidate branch.'
+            echo
+            if [ -f "$PROOF_DIR/manifest.txt" ]; then cat "$PROOF_DIR/manifest.txt"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
