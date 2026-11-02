@@ -150,16 +150,6 @@ jobs:
           install -m 0644 proof/scripts/workboard-scratch-cli-proof.mjs subject/scripts/workboard-scratch-cli-proof.mjs
           test "$(git hash-object subject/scripts/workboard-scratch-cli-proof.mjs)" = "2abac6fcbdf727d6af5073ed5a0ceb5e5dbc2eeb"
 
-      - name: Build and prove the CLI-started Gateway behavior
-        working-directory: subject
-        shell: bash
-        env:
-          WORKBOARD_PROOF_EXPECTED: ${{ matrix.expected }}
-        run: |
-          set -euo pipefail
-          corepack pnpm build:docker
-          node --import ./scripts/tsx.mjs scripts/workboard-scratch-cli-proof.mjs 2>&1 | tee "$GITHUB_WORKSPACE/.proof-evidence/cli-$EXPECTED.log"
-
       - name: Run candidate formatting, lint, types, budget, and diff checks
         if: ${{ matrix.expected == 'candidate' }}
         working-directory: subject
@@ -178,6 +168,16 @@ jobs:
           corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
           git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
           printf 'PASS: candidate formatting, focused lint, extension typechecks, test-line ratchet, and diff hygiene.\n' | tee -a "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt"
+
+      - name: Build and prove the CLI-started Gateway behavior
+        working-directory: subject
+        shell: bash
+        env:
+          WORKBOARD_PROOF_EXPECTED: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          corepack pnpm build:docker
+          node --import ./scripts/tsx.mjs scripts/workboard-scratch-cli-proof.mjs 2>&1 | tee "$GITHUB_WORKSPACE/.proof-evidence/cli-$EXPECTED.log"
 
       - name: Record the proof scope and isolation
         if: always()
