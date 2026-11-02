@@ -69,12 +69,12 @@ jobs:
         run: |
           corepack enable
           if ($LASTEXITCODE -ne 0) { throw 'Corepack enable failed' }
-          corepack pnpm check:workflows
-          if ($LASTEXITCODE -ne 0) { throw 'Repository workflow policy check failed' }
           corepack pnpm --version
           if ($LASTEXITCODE -ne 0) { throw 'Pinned pnpm setup failed' }
           corepack pnpm install --frozen-lockfile --ignore-scripts
           if ($LASTEXITCODE -ne 0) { throw 'Frozen dependency install failed' }
+          corepack pnpm check:workflows
+          if ($LASTEXITCODE -ne 0) { throw 'Repository workflow policy check failed' }
       - name: Build baseline and prove expected-red regressions
         shell: pwsh
         run: |
