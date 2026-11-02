@@ -1,0 +1,158 @@
+name: Windows state-dir repair proof
+
+on:
+  push:
+    branches:
+      - proof/windows-state-dir-repair-2026-11-02
+
+permissions: {}
+
+jobs:
+  shipped-cli:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+          package-manager-cache: false
+      - name: Verify pinned source and workflow-only overlay
+        shell: pwsh
+        run: |
+          $base = '2777468d26e5f21455b67591a045a40c770aee13'
+          $candidate = '72b40dd31f8e801b4613f713e73c0c0337d5ba67'
+          $oldPrHead = 'cf4ba70074e1419b17a63f4d7e382f153ce99e82'
+          if ((git rev-parse HEAD~2).Trim() -ne $candidate) { throw 'Proof commits are not based on the exact candidate' }
+          if ((git rev-parse "${candidate}^1").Trim() -ne $base) { throw 'Candidate first parent is not the pinned base' }
+          if ((git rev-parse "${candidate}^2").Trim() -ne $oldPrHead) { throw 'Candidate does not preserve the original PR head as its second parent' }
+          if ((git rev-parse "${base}^{tree}").Trim() -ne 'f6f7ca00d0564189061a7b51591847ccc4686192') { throw 'Pinned baseline tree SHA changed' }
+          if ((git rev-parse "${candidate}^{tree}").Trim() -ne 'b372459fa6cd1816e392bec7a41d485fe5a70dda') { throw 'Candidate tree SHA changed' }
+          $evidenceFiles = @(git diff --name-only $candidate HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the evidence-only overlay' }
+          $expectedEvidenceFiles = @('.github/scripts/windows-state-dir-repair-proof.ps1', '.github/workflows/windows-state-dir-repair-proof.yml')
+          $actualEvidenceFiles = ($evidenceFiles | Sort-Object) -join "`n"
+          $expectedEvidenceFileList = ($expectedEvidenceFiles | Sort-Object) -join "`n"
+          if ($actualEvidenceFiles -ne $expectedEvidenceFileList) { throw "Unexpected files beyond the candidate: $($evidenceFiles -join ', ')" }
+          $candidateBlobs = @{
+            'config/test-lines-allocations/windows-state-dir-repair-2026-11-02.txt' = '95f9650f0151d7c0d3aecf40355d88effbd5b7a7'
+            'src/cli/program/preaction-state-store.test.ts' = '3cae2929ddd3b715f216d8b2861d8f594543beda'
+            'src/cli/program/preaction.ts' = '1ed3be06827470e2f38edeaf2db3e1bfd9dd1990'
+            'src/cli/state-dir-gateway-check.process.test.ts' = 'b39947f1053b8e74308dfcfb156b3b8263db5d1e'
+            'src/cli/state-dir-gateway-check.server.test.ts' = '4eca499c8548286d736f827f262c947a229d8eac'
+            'src/cli/state-dir-gateway-check.ts' = '539574320f4ef6741f9b70db990948c63b3aa62d'
+          }
+          foreach ($entry in $candidateBlobs.GetEnumerator()) {
+            $actual = (git rev-parse "${candidate}:$($entry.Key)").Trim()
+            if ($actual -ne $entry.Value) { throw "Candidate blob mismatch: $($entry.Key)" }
+          }
+          $baseBlobs = @{
+            'src/cli/program/preaction-state-store.test.ts' = '46c224816a70a3e3a3952bbc79e7ef15487ffcd0'
+            'src/cli/program/preaction.ts' = '80563872a306aaaa6707b57249296233c7116338'
+            'src/cli/state-dir-gateway-check.process.test.ts' = '044cc89c583b2dec764fdb0ea3bc21805298db78'
+            'src/cli/state-dir-gateway-check.server.test.ts' = '8145dba93161951d36e85f876ca8b8cbea23feed'
+            'src/cli/state-dir-gateway-check.ts' = '76baa146697a5046e899d9f19db557bf949bbf79'
+          }
+          foreach ($entry in $baseBlobs.GetEnumerator()) {
+            $actual = (git rev-parse "${base}:$($entry.Key)").Trim()
+            if ($actual -ne $entry.Value) { throw "Base blob mismatch: $($entry.Key)" }
+          }
+          Copy-Item .github/scripts/windows-state-dir-repair-proof.ps1 (Join-Path $env:RUNNER_TEMP 'windows-state-dir-repair-proof.ps1')
+          Write-Output "BASE=$base"
+          Write-Output "CANDIDATE=$candidate"
+          Write-Output 'SNAPSHOT_PINS=PASS'
+      - name: Check evidence workflow policy
+        shell: pwsh
+        run: |
+          corepack enable
+          if ($LASTEXITCODE -ne 0) { throw 'Corepack enable failed' }
+          corepack pnpm check:workflows
+          if ($LASTEXITCODE -ne 0) { throw 'Repository workflow policy check failed' }
+          corepack pnpm --version
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned pnpm setup failed' }
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen dependency install failed' }
+      - name: Build baseline and prove expected-red regressions
+        shell: pwsh
+        run: |
+          $base = '2777468d26e5f21455b67591a045a40c770aee13'
+          $candidate = '72b40dd31f8e801b4613f713e73c0c0337d5ba67'
+          git checkout --detach $base
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check out the pinned baseline' }
+          $testFiles = @(
+            'src/cli/program/preaction-state-store.test.ts',
+            'src/cli/state-dir-gateway-check.process.test.ts',
+            'src/cli/state-dir-gateway-check.server.test.ts'
+          )
+          git restore --source=$candidate --worktree -- $testFiles
+          if ($LASTEXITCODE -ne 0) { throw 'Could not overlay the exact candidate regressions onto baseline production' }
+          corepack pnpm build
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline build failed' }
+          if (-not (Test-Path dist/entry.js)) { throw 'Baseline CLI entry is missing' }
+          $baselineLog = Join-Path $env:RUNNER_TEMP 'windows-state-dir-baseline-tests.log'
+          corepack pnpm test @testFiles --maxWorkers=1 *> $baselineLog
+          $baselineTestExit = $LASTEXITCODE
+          $baselineText = [IO.File]::ReadAllText($baselineLog)
+          $baselineText = [regex]::Replace($baselineText, "`e\[[0-9;]*m", '')
+          Write-Output $baselineText
+          if ($baselineTestExit -eq 0) { throw 'Candidate regressions unexpectedly passed against baseline production' }
+          if ($baselineText -notmatch 'ExpectedCliError|expected executable repair command|For help, run `openclaw doctor`') { throw 'Baseline failure did not show the expected hidden-refusal or non-PowerShell-hint regression' }
+          if ($baselineText -notmatch 'runs the suggested PowerShell repair command for a real Gateway mismatch') { throw 'Windows Gateway regression did not execute on baseline' }
+          Write-Output 'BASELINE_REGRESSION=EXPECTED_RED'
+      - name: Prove baseline shipped CLI hides refusal details and PowerShell cannot run its POSIX hint
+        shell: pwsh
+        run: |
+          & (Join-Path $env:RUNNER_TEMP 'windows-state-dir-repair-proof.ps1') -Mode baseline
+      - name: Build candidate, pass focused regressions, and prove shipped CLI repair
+        shell: pwsh
+        run: |
+          $base = '2777468d26e5f21455b67591a045a40c770aee13'
+          $candidate = '72b40dd31f8e801b4613f713e73c0c0337d5ba67'
+          $testFiles = @(
+            'src/cli/program/preaction-state-store.test.ts',
+            'src/cli/state-dir-gateway-check.process.test.ts',
+            'src/cli/state-dir-gateway-check.server.test.ts'
+          )
+          git restore --source=$base --worktree -- $testFiles
+          if ($LASTEXITCODE -ne 0) { throw 'Could not remove the baseline-only regression overlay' }
+          git checkout --detach $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check out the exact candidate' }
+          corepack pnpm build
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed' }
+          if (-not (Test-Path dist/entry.js)) { throw 'Candidate CLI entry is missing' }
+          corepack pnpm test @testFiles --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { throw 'Focused candidate regressions failed' }
+          & (Join-Path $env:RUNNER_TEMP 'windows-state-dir-repair-proof.ps1') -Mode candidate
+      - name: Check final candidate formatting, lint, types, test budget, and diff
+        shell: pwsh
+        run: |
+          $base = '2777468d26e5f21455b67591a045a40c770aee13'
+          $sourceFiles = @(
+            'src/cli/program/preaction-state-store.test.ts',
+            'src/cli/program/preaction.ts',
+            'src/cli/state-dir-gateway-check.process.test.ts',
+            'src/cli/state-dir-gateway-check.server.test.ts',
+            'src/cli/state-dir-gateway-check.ts'
+          )
+          $testFiles = @(
+            'src/cli/program/preaction-state-store.test.ts',
+            'src/cli/state-dir-gateway-check.process.test.ts',
+            'src/cli/state-dir-gateway-check.server.test.ts'
+          )
+          corepack pnpm format:check @sourceFiles
+          if ($LASTEXITCODE -ne 0) { throw 'Changed-file format check failed' }
+          $sourceFilesJson = ConvertTo-Json -InputObject $sourceFiles -Compress
+          corepack pnpm lint --files-json $sourceFilesJson
+          if ($LASTEXITCODE -ne 0) { throw 'Changed-file lint failed' }
+          corepack pnpm tsgo:core
+          if ($LASTEXITCODE -ne 0) { throw 'Core production typecheck failed' }
+          $testFilesJson = ConvertTo-Json -InputObject $testFiles -Compress
+          corepack pnpm tsgo:core:test --changed-paths-json $testFilesJson
+          if ($LASTEXITCODE -ne 0) { throw 'Changed test-file typecheck failed' }
+          corepack pnpm check:test-lines-ratchet --base $base --no-merge-base
+          if ($LASTEXITCODE -ne 0) { throw 'Test-line allocation ratchet failed' }
+          git diff --check $base HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate diff hygiene failed' }
