@@ -1,4 +1,4 @@
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import "../test-utils/prepare-compiled-subprocesses.js";
@@ -7,6 +7,8 @@ const owners = vi.hoisted(() => ({
   prepareCopy: vi.fn(),
   createToken: vi.fn(),
   releaseSnapshot: vi.fn(),
+  registerSnapshot: vi.fn(),
+  cleanup: vi.fn(),
 }));
 // mock-isolation: The deferred copy owns synthetic paths; keep native SQLite backup and snapshot allocation outside the fake child.
 vi.mock("./sqlite-readonly-location.js", () => ({
@@ -16,6 +18,8 @@ vi.mock("./sqlite-readonly-location.js", () => ({
 // mock-isolation: Synthetic snapshot release must not join or mutate the process-wide snapshot custody singleton.
 vi.mock("./sqlite-readonly-location-cleanup.js", () => ({
   releaseSnapshotTempDirectory: owners.releaseSnapshot,
+  registerSnapshotTempDirectory: owners.registerSnapshot,
+  cleanupSnapshotOperations: owners.cleanup,
 }));
 // mock-isolation: The fixture owns in-memory staging tokens, not native SQLite locks or filesystem reclamation.
 vi.mock("./sqlite-snapshot-staging.js", () => ({
@@ -24,25 +28,22 @@ vi.mock("./sqlite-snapshot-staging.js", () => ({
 // mock-isolation: The fake child must not acquire or retire native staging tokens for its synthetic snapshot paths.
 vi.mock("./sqlite-snapshot-retirement.js", () => ({}));
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-});
+afterEach(() => vi.unstubAllGlobals());
 beforeEach(() => {
   vi.resetModules();
-  owners.prepareCopy.mockReset();
-  owners.createToken.mockReset();
-  owners.releaseSnapshot.mockReset();
+  for (const mock of Object.values(owners)) {
+    mock.mockReset();
+  }
 });
 
 async function openSession() {
   const events = new EventEmitter();
-  const disconnected = createDeferred();
-  const sent = createDeferred<{ id: number; result: unknown }>();
+  const disconnected = once(events, "disconnect");
+  const sent = once(events, "sent");
   const child = {
     ...process,
     argv: [process.execPath, "worker.mjs", "--openclaw-sqlite-readonly-child", "session"],
-    exitCode: process.exitCode,
+    exitCode: undefined,
     exit: vi.fn(() => {
       throw new Error("unexpected forced process exit");
     }),
@@ -51,25 +52,21 @@ async function openSession() {
     once: events.once.bind(events),
     stdin: { destroy: vi.fn() },
     stderr: { write: vi.fn() },
-    send: vi.fn(
-      (message: { id: number; result: unknown }, callback: (error: Error | null) => void) => {
-        queueMicrotask(() => {
-          sent.resolve(message);
-          callback(null);
-        });
-        return true;
-      },
-    ),
+    send: vi.fn((message: unknown, callback: (error: Error | null) => void) => {
+      queueMicrotask(() => {
+        events.emit("sent", message);
+        callback(null);
+      });
+      return true;
+    }),
     disconnect: vi.fn(() => {
       child.connected = false;
       events.emit("disconnect");
-      disconnected.resolve();
     }),
   };
-  child.exitCode = undefined;
   vi.stubGlobal("process", child);
   await import("./sqlite-readonly-location.worker.js");
-  return { child, events, disconnected: disconnected.promise, sent: sent.promise };
+  return { child, events, disconnected, sent };
 }
 
 it("settles an accepted copy before retiring on malformed input", async () => {
@@ -85,6 +82,8 @@ it("settles an accepted copy before retiring on malformed input", async () => {
   copy.resolve({ location: "/private/snapshot.sqlite", cleanupRoot: "/private" });
   await session.disconnected;
   expect(owners.releaseSnapshot).toHaveBeenCalledExactlyOnceWith("/private");
+  expect(owners.registerSnapshot).toHaveBeenCalledExactlyOnceWith("/private");
+  expect(owners.cleanup).toHaveBeenCalledOnce();
   expect(session.child.send).not.toHaveBeenCalled();
   expect(session.child.exitCode).toBe(1);
 });

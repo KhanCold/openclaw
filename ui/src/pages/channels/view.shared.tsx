@@ -2,13 +2,16 @@ import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import type { JSX } from "@solidjs/web";
 import { createMemo, For, Show } from "solid-js";
 import type { ChannelAccountSnapshot, ChannelStatus } from "../../api/types.ts";
-import { Icon } from "../../components/solid/icon.tsx";
+import { RefreshButton } from "../../components/solid/refresh-button.tsx";
 import { SettingsRow, SettingsStatus } from "../../components/solid/settings-ui.tsx";
+import { registerSettingsEnglish } from "../../i18n/locales/en-settings.ts";
 import { resolveChannelAccounts } from "../../lib/channels/index.ts";
 import { formatUiError, formatUiExternalText } from "../../lib/format-error.ts";
 import { formatRelativeTimestamp } from "../../lib/format.ts";
-import { t } from "../../lib/reactive/i18n.ts";
+import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
 import type { ChannelsProps } from "./view.types.ts";
+
+registerEnglishCatalog(registerSettingsEnglish);
 
 type ChannelStatusKind = "ok" | "warn" | "danger" | "accent" | "muted";
 
@@ -49,7 +52,6 @@ export function resolveChannelDisplayState(key: string, props: ChannelsProps) {
     configured,
     running,
     connected,
-    defaultAccount,
     status,
   };
 }
@@ -127,6 +129,7 @@ export function ChannelActions(params: { children: JSX.Element }) {
 
 export function ChannelRefresh(params: {
   updatedAt?: number | null;
+  busy: boolean;
   disabled: boolean;
   onRefresh: () => void;
 }) {
@@ -136,17 +139,14 @@ export function ChannelRefresh(params: {
       : t("common.na"),
   );
   return (
-    <openclaw-tooltip prop:content={updatedLabel()}>
-      <button
-        type="button"
-        class="btn btn--xs btn--icon"
-        aria-label={t("common.refresh")}
-        disabled={params.disabled}
-        onClick={() => params.onRefresh()}
-      >
-        <Icon name="refresh" />
-      </button>
-    </openclaw-tooltip>
+    <RefreshButton
+      class="channels-refresh"
+      label={t("common.refresh")}
+      tooltip={updatedLabel()}
+      busy={params.busy}
+      disabled={params.disabled}
+      onClick={() => params.onRefresh()}
+    />
   );
 }
 
@@ -158,7 +158,7 @@ export function ChannelAccount(params: {
   lastInboundAt?: number | null;
   lastError?: string | null;
 }) {
-  const factLine = createMemo(() => [params.accountId, ...(params.facts ?? [])].join(" · "));
+  const factLine = () => [params.accountId, ...(params.facts ?? [])].join(" · ");
   return (
     <div class="settings-row">
       <div class="settings-row__text">
