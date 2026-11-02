@@ -26,6 +26,8 @@ jobs:
           $base = '2777468d26e5f21455b67591a045a40c770aee13'
           $candidate = '72b40dd31f8e801b4613f713e73c0c0337d5ba67'
           $oldPrHead = 'cf4ba70074e1419b17a63f4d7e382f153ce99e82'
+          git fetch --no-tags --depth=1 origin $candidate $base $oldPrHead
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the exact pinned source commits' }
           git merge-base --is-ancestor $candidate HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Proof branch does not descend from the exact candidate' }
           if ((git rev-parse "${candidate}^1").Trim() -ne $base) { throw 'Candidate first parent is not the pinned base' }
