@@ -26,6 +26,7 @@ jobs:
     env:
       BASE_SHA: b0fdadd6b3448af5e23c45794465d48d97944fbe
       CANDIDATE_SHA: 9d34fe775fd2a3e6a607972d775be2099b285751
+      SUBJECT_SHA: ${{ matrix.subject_sha }}
       NODE_VERSION: 24.22.1
       PNPM_VERSION: 12.15.0
       EXPECTED: ${{ matrix.expected }}
@@ -66,7 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C subject rev-parse HEAD)" = "$EXPECTED"
+          test "$(git -C subject rev-parse HEAD)" = "$SUBJECT_SHA"
           test "$(node --version)" = "v$NODE_VERSION"
           corepack enable
           test "$(corepack pnpm --version)" = "$PNPM_VERSION"
