@@ -53,7 +53,7 @@ jobs:
             fi
           }
           assert_blob "$BASE_SHA" "src/cli/config-set-input.ts" "93eb1b71a98aa540ccf2791cc56dd0d3690b9723"
-          assert_blob "$CANDIDATE_SHA" "src/cli/config-set-input.ts" "41425074c115f55d65b5d70997e1c5664e8043"
+          assert_blob "$CANDIDATE_SHA" "src/cli/config-set-input.ts" "41425074c115f55d65b5d70997d1e1c5664e8043"
           assert_blob "$CANDIDATE_SHA" "src/cli/config-cli.integration.test.ts" "7f9702496e9e2586f42bb5110bc7f5961a53baf5"
           assert_blob "$CANDIDATE_SHA" "docs/cli/config.md" "873f3953e5dcb15d0d7682ddb52557f7899f4073"
           assert_blob "$CANDIDATE_SHA" "config/test-lines-allocations/config-builder-empty-args-2026-10-29.txt" "87523dd7a0632907d61799465827c3f08825fa47"
