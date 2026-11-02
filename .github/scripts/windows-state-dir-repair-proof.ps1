@@ -123,6 +123,7 @@ try {
     if ($powershellExit -eq 0 -or $powershellOutput -notmatch 'not recognized') {
       throw 'The POSIX assignment unexpectedly ran in Windows PowerShell'
     }
+    $global:LASTEXITCODE = 0
     if ([IO.File]::ReadAllText($gatewayConfig) -ne $gatewayBeforeRefusal) {
       throw 'Baseline refusal unexpectedly changed Gateway config'
     }
@@ -155,6 +156,7 @@ try {
     if ([IO.File]::ReadAllText($cliConfig) -ne $cliBeforeRefusal) {
       throw 'Refused candidate CLI changed CLI config'
     }
+    $global:LASTEXITCODE = 0
 
     $withArgs = $repair.Replace(
       '& openclaw channels add } finally',
@@ -165,6 +167,7 @@ try {
     if ($repairExit -ne 0) {
       throw "PowerShell repair command failed with exit ${repairExit}: $($repairOutput.Replace($repairToken, '[synthetic]'))"
     }
+    $global:LASTEXITCODE = 0
     if ($env:OPENCLAW_STATE_DIR -ne $priorState -or $env:OPENCLAW_CONFIG_PATH -ne $priorConfig) {
       throw 'PowerShell repair did not restore the caller environment'
     }

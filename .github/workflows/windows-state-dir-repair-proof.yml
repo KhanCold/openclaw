@@ -28,9 +28,16 @@ jobs:
           $oldPrHead = 'cf4ba70074e1419b17a63f4d7e382f153ce99e82'
           git fetch --no-tags --depth=1 origin $candidate $base $oldPrHead
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the exact pinned source commits' }
-          $candidateParents = (git show -s --format=%P $candidate).Trim()
-          if ($LASTEXITCODE -ne 0) { throw 'Could not read the candidate merge parents' }
-          if ($candidateParents -ne "$base $oldPrHead") { throw 'Candidate parents are not the pinned base and original PR head' }
+          $candidateCommitLines = @(git cat-file -p $candidate)
+          $candidateCommitExit = $LASTEXITCODE
+          if ($candidateCommitExit -ne 0) { throw 'Could not read the candidate commit object' }
+          $candidateParents = @($candidateCommitLines | Where-Object { $_ -match '^parent ' } | ForEach-Object { $_.Substring(7) })
+          Write-Output "CANDIDATE_PARENTS=$($candidateParents -join ' ')"
+          if ($candidateParents.Count -ne 2 -or
+              -not [string]::Equals([string]$candidateParents[0], $base, [StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals([string]$candidateParents[1], $oldPrHead, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Candidate parents are not the pinned base and original PR head'
+          }
           if ((git rev-parse "${base}^{tree}").Trim() -ne 'f6f7ca00d0564189061a7b51591847ccc4686192') { throw 'Pinned baseline tree SHA changed' }
           if ((git rev-parse "${candidate}^{tree}").Trim() -ne 'b372459fa6cd1816e392bec7a41d485fe5a70dda') { throw 'Candidate tree SHA changed' }
           $evidenceFiles = @(git diff --name-only $candidate HEAD)
@@ -94,16 +101,69 @@ jobs:
           corepack pnpm build
           if ($LASTEXITCODE -ne 0) { throw 'Baseline build failed' }
           if (-not (Test-Path dist/entry.js)) { throw 'Baseline CLI entry is missing' }
-          $baselineLog = Join-Path $env:RUNNER_TEMP 'windows-state-dir-baseline-tests.log'
-          corepack pnpm test @testFiles --maxWorkers=1 *> $baselineLog
-          $baselineTestExit = $LASTEXITCODE
-          $baselineText = [IO.File]::ReadAllText($baselineLog)
-          $baselineText = [regex]::Replace($baselineText, "`e\[[0-9;]*m", '')
-          Write-Output $baselineText
-          if ($baselineTestExit -eq 0) { throw 'Candidate regressions unexpectedly passed against baseline production' }
-          if ($baselineText -notmatch 'ExpectedCliError|expected executable repair command|For help, run `openclaw doctor`') { throw 'Baseline failure did not show the expected hidden-refusal or non-PowerShell-hint regression' }
-          if ($baselineText -notmatch 'runs the suggested PowerShell repair command for a real Gateway mismatch') { throw 'Windows Gateway regression did not execute on baseline' }
-          Write-Output 'BASELINE_REGRESSION=EXPECTED_RED'
+          $expectedBaselineCases = @(
+            @{
+              Path = 'src/cli/program/preaction-state-store.test.ts'
+              FullName = 'state-store preAction guard refuses before bootstrap and action'
+              TotalTests = 3
+            },
+            @{
+              Path = 'src/cli/state-dir-gateway-check.process.test.ts'
+              FullName = 'CLI Gateway state target guard refuses a model credential write when the live Gateway reports another state tree'
+              TotalTests = 1
+            },
+            @{
+              Path = 'src/cli/state-dir-gateway-check.server.test.ts'
+              FullName = 'state-dir guard with a real token Gateway runs the suggested PowerShell repair command for a real Gateway mismatch'
+              TotalTests = 4
+            }
+          )
+          $baselineFailureCount = 0
+          $baselinePassCount = 0
+          foreach ($case in $expectedBaselineCases) {
+            $testFile = [string]$case.Path
+            $caseName = [IO.Path]::GetFileNameWithoutExtension($testFile)
+            $reportPath = Join-Path $env:RUNNER_TEMP "$caseName-baseline-vitest.json"
+            $caseLog = Join-Path $env:RUNNER_TEMP "$caseName-baseline-vitest.log"
+            corepack pnpm test $testFile --maxWorkers=1 --reporter=json "--outputFile=$reportPath" *> $caseLog
+            $caseExit = $LASTEXITCODE
+            if ($caseExit -ne 1) { throw "Expected ordinary Vitest assertion exit 1 for $($case.FullName); got $caseExit" }
+            if (-not (Test-Path $reportPath)) { throw "Vitest JSON report missing for $testFile" }
+            $report = Get-Content -Raw $reportPath | ConvertFrom-Json
+            $suites = @($report.testResults)
+            if ($suites.Count -ne 1) { throw "Expected one test file report for $testFile; got $($suites.Count)" }
+            $suite = $suites[0]
+            if (-not [string]::IsNullOrEmpty([string]$suite.message)) { throw "Baseline suite error for ${testFile}: $($suite.message)" }
+            if ($suite.status -ne 'failed' -or $report.success -ne $false) { throw "Vitest did not report the expected failed test result for $testFile" }
+            $assertions = @($suite.assertionResults)
+            if ($assertions.Count -ne $case.TotalTests -or $report.numTotalTests -ne $case.TotalTests) {
+              throw "Unexpected test count for ${testFile}: file=$($assertions.Count), report=$($report.numTotalTests)"
+            }
+            $failed = @($assertions | Where-Object { $_.status -eq 'failed' })
+            $passed = @($assertions | Where-Object { $_.status -eq 'passed' })
+            $other = @($assertions | Where-Object { $_.status -notin @('failed', 'passed') })
+            if ($failed.Count -ne 1 -or $report.numFailedTests -ne 1 -or
+                $passed.Count -ne ($case.TotalTests - 1) -or $report.numPassedTests -ne ($case.TotalTests - 1) -or
+                $report.numPendingTests -ne 0 -or $report.numTodoTests -ne 0 -or $other.Count -ne 0) {
+              throw "Unexpected baseline result counts for ${testFile}: failed=$($report.numFailedTests), passed=$($report.numPassedTests), pending=$($report.numPendingTests), todo=$($report.numTodoTests)"
+            }
+            if (-not [string]::Equals([string]$failed[0].fullName, [string]$case.FullName, [StringComparison]::Ordinal)) {
+              throw "Wrong baseline test failed for ${testFile}: $($failed[0].fullName)"
+            }
+            $expectedPath = $testFile.Replace('\', '/').ToLowerInvariant()
+            $reportedPath = ([string]$suite.name).Replace('\', '/').ToLowerInvariant()
+            if (-not $reportedPath.EndsWith($expectedPath, [StringComparison]::Ordinal)) {
+              throw "Vitest reported an unexpected test file: $($suite.name)"
+            }
+            $baselineFailureCount += $failed.Count
+            $baselinePassCount += $passed.Count
+            Write-Output "EXPECTED_BASELINE_FAILURE=$($failed[0].fullName)"
+            $global:LASTEXITCODE = 0
+          }
+          if ($baselineFailureCount -ne 3 -or $baselinePassCount -ne 5) {
+            throw "Unexpected aggregate baseline regression counts: failed=$baselineFailureCount, passed=$baselinePassCount"
+          }
+          Write-Output 'BASELINE_REGRESSION=3_EXPECTED_FAILED_5_PASSED_NO_SUITE_ERRORS'
       - name: Prove baseline shipped CLI hides refusal details and PowerShell cannot run its POSIX hint
         shell: pwsh
         run: |
