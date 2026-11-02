@@ -1,0 +1,69 @@
+name: plugin-init-test-typecheck-655a
+
+on:
+  push:
+    branches:
+      - proof/plugin-init-test-typecheck-655a
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck-changed-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BASE_SHA: 6a82c555d2d433e02b3a95c76e7414b0698ff186
+      CANDIDATE_SHA: 655a88f2c69ae071286a5cc596327356a8fd7068
+      CANDIDATE_REF: task/2026-11-02-plugin-init-expected-errors-current-main-6a82
+      BASE_TEST_BLOB: aa168066ddb53ca05afa22e0db26e6732d7c8967
+      CANDIDATE_TEST_BLOB: 936cd5763339888cb8d88a64935afa67dcbf450f
+      EXPECTED_TREE: d1c5b0633c5ed5c2d29ce336ad64dbbf82d78cd9
+      REPO_DIR: ${{ github.workspace }}/.typecheck-repo
+    steps:
+      - name: Checkout evidence branch without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js without package-manager cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Fetch and pin the exact changed test source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$REPO_DIR"
+          git -C "$REPO_DIR" init --quiet
+          git -C "$REPO_DIR" remote add upstream https://github.com/openclaw/openclaw.git
+          git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 upstream "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$BASE_SHA"
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
+          test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA^{tree}")" = "$EXPECTED_TREE"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/plugins-authoring.process.test.ts")" = "$BASE_TEST_BLOB"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "$CANDIDATE_TEST_BLOB"
+          git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
+          printf 'Base: %s\nCandidate: %s\nTest blob: %s\nNode: %s\n' \
+            "$BASE_SHA" "$CANDIDATE_SHA" "$CANDIDATE_TEST_BLOB" "$(node --version)"
+
+      - name: Install locked dependencies without lifecycle scripts
+        working-directory: ${{ github.workspace }}/.typecheck-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          printf 'pnpm: %s\n' "$(corepack pnpm --version)"
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Typecheck the changed core test graph
+        working-directory: ${{ github.workspace }}/.typecheck-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm tsgo:core:test --changed-paths-json '["src/cli/plugins-authoring.process.test.ts"]'
