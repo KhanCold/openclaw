@@ -1,0 +1,201 @@
+name: Workboard scratch prompt proof (current main)
+
+on:
+  push:
+    branches:
+      - proof/workboard-scratch-merge-2026-11-02
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Current main regression red and CLI baseline
+            subject_sha: b0fdadd6b3448af5e23c45794465d48d97944fbe
+            expected: baseline
+          - label: Merged candidate regression green and CLI behavior
+            subject_sha: 9d34fe775fd2a3e6a607972d775be2099b285751
+            expected: candidate
+    env:
+      BASE_SHA: b0fdadd6b3448af5e23c45794465d48d97944fbe
+      CANDIDATE_SHA: 9d34fe775fd2a3e6a607972d775be2099b285751
+      NODE_VERSION: 24.22.1
+      PNPM_VERSION: 12.15.0
+      EXPECTED: ${{ matrix.expected }}
+
+    steps:
+      - name: Checkout the proof harness without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: proof
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout the exact baseline or candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.subject_sha }}
+          path: subject
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout candidate regression file for baseline reproduction
+        if: ${{ matrix.expected == 'baseline' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 9d34fe775fd2a3e6a607972d775be2099b285751
+          path: candidate-source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: false
+
+      - name: Verify exact source and install frozen dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C subject rev-parse HEAD)" = "$EXPECTED"
+          test "$(node --version)" = "v$NODE_VERSION"
+          corepack enable
+          test "$(corepack pnpm --version)" = "$PNPM_VERSION"
+          mkdir -p "$GITHUB_WORKSPACE/.proof-evidence"
+          if [ "$EXPECTED" = "baseline" ]; then
+            test "$(git -C subject rev-parse HEAD:extensions/workboard/src/store-card-helpers.ts)" = "164d15dc9d52f6b34efdd85f558776d2b1163c49"
+            test "$(git -C candidate-source rev-parse "$CANDIDATE_SHA:extensions/workboard/src/dispatcher.test.ts")" = "729cfe7d377661d534c5be1b78110b5b83d61218"
+          else
+            test "$(git -C subject rev-parse "$CANDIDATE_SHA:extensions/workboard/src/store-card-helpers.ts")" = "9e6f3546b86682ced07a4e006853b5b345b23e8e"
+            test "$(git -C subject rev-parse "$CANDIDATE_SHA:extensions/workboard/src/dispatcher.test.ts")" = "729cfe7d377661d534c5be1b78110b5b83d61218"
+            test "$(git -C subject rev-parse "$CANDIDATE_SHA:extensions/workboard/src/store.test.ts")" = "ca2a90643f875f82695161e3f0dbedce858d8ca8"
+            test "$(git -C subject rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/workboard-scratch-prompt-2026-11-02.txt")" = "81b5c5d06cc0b8290c264b408abb32cc0986e8f2"
+          fi
+          {
+            printf 'Proof branch workflow commit: %s\n' "$GITHUB_SHA"
+            printf 'Expected mode: %s\n' "$EXPECTED"
+            printf 'Baseline SHA: %s\n' "$BASE_SHA"
+            printf 'Candidate SHA: %s\n' "$CANDIDATE_SHA"
+            printf 'Source SHA: %s\n' "$(git -C subject rev-parse HEAD)"
+            printf 'Node: %s\n' "$(node --version)"
+            printf 'pnpm: %s\n' "$(corepack pnpm --version)"
+          } | tee "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt"
+          cd subject
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Prove the unchanged regression is red on current main
+        if: ${{ matrix.expected == 'baseline' }}
+        working-directory: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object "$GITHUB_WORKSPACE/candidate-source/extensions/workboard/src/dispatcher.test.ts")" = "729cfe7d377661d534c5be1b78110b5b83d61218"
+          cp "$GITHUB_WORKSPACE/candidate-source/extensions/workboard/src/dispatcher.test.ts" extensions/workboard/src/dispatcher.test.ts
+          test "$(git hash-object extensions/workboard/src/dispatcher.test.ts)" = "729cfe7d377661d534c5be1b78110b5b83d61218"
+          log="$GITHUB_WORKSPACE/.proof-evidence/base-red.log"
+          set +e
+          corepack pnpm test extensions/workboard/src/dispatcher.test.ts --maxWorkers=1 --reporter=verbose > "$log" 2>&1
+          status=$?
+          set -e
+          node -e 'let s=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(s.replace(/\x1b\[[0-9;]*m/g, "")));' < "$log" > "$GITHUB_WORKSPACE/.proof-evidence/base-red.plain.log"
+          cat "$GITHUB_WORKSPACE/.proof-evidence/base-red.plain.log"
+          if [ "$status" -eq 0 ]; then
+            echo 'Current main unexpectedly passed the candidate scratch-prompt regression.' >&2
+            exit 1
+          fi
+          grep -Fq 'keeps a retained path out of the actual scratch worker prompt' "$GITHUB_WORKSPACE/.proof-evidence/base-red.plain.log"
+          if ! grep -Eq 'Tests[[:space:]]+1 failed([[:space:]]|$)' "$GITHUB_WORKSPACE/.proof-evidence/base-red.plain.log"; then
+            echo 'Baseline output did not show exactly the intended regression failing.' >&2
+            exit 1
+          fi
+          printf 'PASS: unchanged candidate regression failed once on baseline production code (exit %s).\n' "$status" | tee -a "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt"
+
+      - name: Prove candidate owner tests and record test costs
+        if: ${{ matrix.expected == 'candidate' }}
+        working-directory: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test_file in \
+            extensions/workboard/src/dispatcher.test.ts \
+            extensions/workboard/src/store.test.ts; do
+            log="$GITHUB_WORKSPACE/.proof-evidence/$(basename "$test_file").log"
+            started_ms="$(date +%s%3N)"
+            set +e
+            corepack pnpm test "$test_file" --maxWorkers=1 --reporter=verbose > "$log" 2>&1
+            status=$?
+            set -e
+            elapsed_ms=$(( $(date +%s%3N) - started_ms ))
+            cat "$log"
+            printf 'Test wall time: %s ms; exit: %s; file: %s\n' "$elapsed_ms" "$status" "$test_file" | tee -a "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt"
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
+          done
+
+      - name: Stage the unchanged CLI behavior harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 0644 proof/scripts/workboard-scratch-cli-proof.mjs subject/scripts/workboard-scratch-cli-proof.mjs
+          test "$(git hash-object subject/scripts/workboard-scratch-cli-proof.mjs)" = "b5441dadbb31e23e55fc0de6a38214c533ce3d3c"
+
+      - name: Build and prove the CLI-started Gateway behavior
+        working-directory: subject
+        shell: bash
+        env:
+          WORKBOARD_PROOF_EXPECTED: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          corepack pnpm build:docker
+          node --import ./scripts/tsx.mjs scripts/workboard-scratch-cli-proof.mjs 2>&1 | tee "$GITHUB_WORKSPACE/.proof-evidence/cli-$EXPECTED.log"
+
+      - name: Run candidate formatting, lint, types, budget, and diff checks
+        if: ${{ matrix.expected == 'candidate' }}
+        working-directory: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm format:check \
+            extensions/workboard/src/dispatcher.test.ts \
+            extensions/workboard/src/store-card-helpers.ts \
+            extensions/workboard/src/store.test.ts
+          corepack pnpm lint --files-json '["extensions/workboard/src/dispatcher.test.ts","extensions/workboard/src/store-card-helpers.ts","extensions/workboard/src/store.test.ts"]'
+          corepack pnpm tsgo:extensions
+          corepack pnpm tsgo:extensions:test
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          test "$(git rev-parse "$BASE_SHA^{commit}")" = "$BASE_SHA"
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          printf 'PASS: candidate formatting, focused lint, extension typechecks, test-line ratchet, and diff hygiene.\n' | tee -a "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt"
+
+      - name: Record the proof scope and isolation
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Workboard scratch worker-context proof'
+            echo
+            echo "- Proof workflow commit: $GITHUB_SHA"
+            echo "- Baseline: $BASE_SHA"
+            echo "- Candidate: $CANDIDATE_SHA"
+            echo "- Source under test: $EXPECTED"
+            echo '- Runner: GitHub-hosted ubuntu-24.04.'
+            echo '- Permissions: contents: read only; no secrets, OIDC, environments, action cache, self-hosted runners, or persisted checkout credentials.'
+            echo '- CLI proof uses a loopback-only synthetic model server and records only the worker-context/path boolean, not prompts or credentials.'
+            echo '- Run logs and this summary are retained by GitHub Actions; no separate artifact upload is used.'
+            echo
+            if [ -f "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt" ]; then
+              cat "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
