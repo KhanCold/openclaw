@@ -1,9 +1,19 @@
 import path from "node:path";
-import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import type {
+  OpenAsyncKeyedStoreOptions,
+  OpenKeyedStoreOptions,
+  PluginStateActionAuthority,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
+import {
+  createPluginStateKeyedStoreForTests,
+  createPluginStateSyncKeyedStoreForTests,
+  resetPluginStateStoreForTests,
+} from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { patchSessionEntry, upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveSessionDeletionWorkerParticipant } from "../../../../src/config/sessions/session-deletion-worker-participant.js";
 import { createLazyCodexAppServerBindingStore } from "./session-binding-store.js";
 import {
   bindingStoreKey as storeKey,
@@ -18,7 +28,10 @@ import {
   type CodexAppServerBindingStore as BindingStore,
   type CodexAppServerThreadBinding as ThreadBinding,
 } from "./session-binding.js";
-import { createCodexSqliteTestBindingStateStore as createSqliteState } from "./session-binding.sqlite.test-helpers.js";
+import {
+  createCodexRuntimeTestBindingStateStore as createRuntimeSqliteState,
+  createCodexSqliteTestBindingStateStore as createSqliteState,
+} from "./session-binding.sqlite.test-helpers.js";
 import { createCodexTestBindingStateStore as createMemoryState } from "./session-binding.test-helpers.js";
 
 type Identity = Parameters<BindingStore["mutate"]>[0];
@@ -30,6 +43,26 @@ function createBindingFixture() {
   return { state, values, store: createBindingStore(state) };
 }
 
+type SessionDeletionMutation = Parameters<Parameters<BindingStore["withSessionDeletion"]>[2]>[1];
+
+async function settleSqliteDeletionMutation(
+  sessionKey: string,
+  mutation: SessionDeletionMutation,
+  outcome: "commit" | "rollback",
+) {
+  const participant = resolveSessionDeletionWorkerParticipant(mutation, sessionKey);
+  const settlement = participant.memoryMutation;
+  if (!settlement) {
+    throw new Error("Expected a worker-owned SQLite session-deletion participant");
+  }
+  const assertCurrent = () => participant.assertCurrent();
+  if (outcome === "commit") {
+    await settlement.commit(assertCurrent);
+  } else {
+    await settlement.rollback(assertCurrent);
+  }
+}
+
 const sessionFixtures: Awaited<ReturnType<typeof createOpenClawTestState>>[] = [];
 async function createSessionFixture(prefix: string) {
   const fixture = await createOpenClawTestState({ prefix, layout: "state-only", applyEnv: false });
@@ -38,7 +71,26 @@ async function createSessionFixture(prefix: string) {
 }
 async function createSqliteFixture(namespace: string, rejectNew = false) {
   const { root } = await createSessionFixture(`codex-${namespace}-`);
-  const state = sqliteState(namespace, root, rejectNew);
+  const stateEnv = { ...process.env, OPENCLAW_STATE_DIR: path.join(root, "plugin-state") };
+  const openSyncKeyedStore = <T>(options: OpenKeyedStoreOptions) =>
+    createPluginStateSyncKeyedStoreForTests<T>("codex", {
+      ...options,
+      env: stateEnv,
+    });
+  const openKeyedStoreV2 = <T>(
+    options: OpenAsyncKeyedStoreOptions,
+    authority?: PluginStateActionAuthority,
+  ) =>
+    createPluginStateKeyedStoreForTests<T>("codex", {
+      ...options,
+      env: stateEnv,
+    }).withCurrent(authority ?? { assertCurrent() {} });
+  const stateRuntime = { state: { openSyncKeyedStore, openKeyedStoreV2 } };
+  const state = createRuntimeSqliteState(stateRuntime, {
+    namespace,
+    maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+    ...(rejectNew ? { overflowPolicy: "reject-new" as const } : {}),
+  });
   return { state, store: createBindingStore(state) };
 }
 
@@ -79,7 +131,7 @@ function thread(threadId: string, fields: Partial<ThreadBinding> = {}): ThreadBi
   return { threadId, cwd: "/repo", ...fields };
 }
 
-const retiredRow = (sessionId: string) => ({
+const retiredRow = (sessionId: string): StoredBinding => ({
   version: 1,
   state: "cleared",
   retired: true,
@@ -657,6 +709,106 @@ describe("Codex app-server binding store", () => {
       await expect(store.mutate(previous, { kind: "clear" })).resolves.toBe(false);
     },
   );
+
+  it("restores a stale predecessor tombstone after a failed session deletion transaction", async () => {
+    const { state, store } = await createSqliteFixture(
+      "app-server-thread-bindings-delete-predecessor",
+    );
+    const predecessor = makeStableSessionIdentity("predecessor-uuid-1", "agent:main:cron:rotated");
+    const successor = { ...predecessor, sessionId: "successor-uuid-2" };
+    await setBinding(store, predecessor, thread("thread-predecessor"));
+    await store.retireSessionGeneration(predecessor);
+    expect(state.lookup(storeKey(predecessor))).toEqual(retiredRow(predecessor.sessionId));
+
+    const deletionFailure = new Error("injected session deletion transaction failure");
+    await expect(
+      store.withSessionDeletion(
+        successor,
+        () => {},
+        async (_binding, mutation) => {
+          await settleSqliteDeletionMutation(successor.sessionKey, mutation, "commit");
+          try {
+            throw deletionFailure;
+          } catch (error) {
+            await settleSqliteDeletionMutation(successor.sessionKey, mutation, "rollback");
+            throw error;
+          }
+        },
+      ),
+    ).rejects.toBe(deletionFailure);
+    expect(state.lookup(storeKey(successor))).toEqual(retiredRow(predecessor.sessionId));
+
+    await store.withSessionDeletion(
+      successor,
+      () => {},
+      async (binding, mutation) => {
+        expect(binding).toBeUndefined();
+        await settleSqliteDeletionMutation(successor.sessionKey, mutation, "commit");
+      },
+    );
+
+    expect(state.lookup(storeKey(successor))).toBeUndefined();
+  });
+
+  it("preserves SQLite session-deletion sibling controls", async () => {
+    const { state, store } = await createSqliteFixture(
+      "app-server-thread-bindings-delete-controls",
+    );
+
+    const sameGeneration = makeStableSessionIdentity(
+      "same-generation",
+      "agent:main:cron:same-generation",
+    );
+    const sameGenerationTombstone = retiredRow(sameGeneration.sessionId);
+    state.register(storeKey(sameGeneration), sameGenerationTombstone);
+    await store.withSessionDeletion(
+      sameGeneration,
+      () => {},
+      async (_binding, mutation) => {
+        await settleSqliteDeletionMutation(sameGeneration.sessionKey, mutation, "commit");
+        await settleSqliteDeletionMutation(sameGeneration.sessionKey, mutation, "rollback");
+      },
+    );
+    expect(state.lookup(storeKey(sameGeneration))).toEqual(sameGenerationTombstone);
+
+    const currentActive = makeStableSessionIdentity(
+      "current-active",
+      "agent:main:cron:current-active",
+    );
+    state.register(storeKey(currentActive), {
+      version: 1,
+      state: "active",
+      sessionId: currentActive.sessionId,
+      binding: thread("thread-current"),
+    });
+    await store.withSessionDeletion(
+      currentActive,
+      () => {},
+      async (_binding, mutation) => {
+        await settleSqliteDeletionMutation(currentActive.sessionKey, mutation, "commit");
+      },
+    );
+    expect(state.lookup(storeKey(currentActive))).toBeUndefined();
+
+    const staleActive = makeStableSessionIdentity("stale-active", "agent:main:cron:stale-active");
+    const activePredecessor = {
+      version: 1 as const,
+      state: "active" as const,
+      sessionId: "active-predecessor",
+      binding: thread("thread-active-predecessor"),
+    };
+    state.register(storeKey(staleActive), activePredecessor);
+    await expect(
+      store.withSessionDeletion(
+        staleActive,
+        () => {},
+        async (_binding, mutation) => {
+          mutation.commit();
+        },
+      ),
+    ).rejects.toThrow("Codex binding generation changed before session deletion");
+    expect(state.lookup(storeKey(staleActive))).toEqual(activePredecessor);
+  });
 
   it("preserves a stale private supervision binding instead of reclaiming it as empty", async () => {
     const { store } = createBindingFixture();
