@@ -28,10 +28,9 @@ jobs:
           $oldPrHead = 'cf4ba70074e1419b17a63f4d7e382f153ce99e82'
           git fetch --no-tags --depth=1 origin $candidate $base $oldPrHead
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the exact pinned source commits' }
-          git merge-base --is-ancestor $candidate HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'Proof branch does not descend from the exact candidate' }
-          if ((git rev-parse "${candidate}^1").Trim() -ne $base) { throw 'Candidate first parent is not the pinned base' }
-          if ((git rev-parse "${candidate}^2").Trim() -ne $oldPrHead) { throw 'Candidate does not preserve the original PR head as its second parent' }
+          $candidateParents = (git show -s --format=%P $candidate).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the candidate merge parents' }
+          if ($candidateParents -ne "$base $oldPrHead") { throw 'Candidate parents are not the pinned base and original PR head' }
           if ((git rev-parse "${base}^{tree}").Trim() -ne 'f6f7ca00d0564189061a7b51591847ccc4686192') { throw 'Pinned baseline tree SHA changed' }
           if ((git rev-parse "${candidate}^{tree}").Trim() -ne 'b372459fa6cd1816e392bec7a41d485fe5a70dda') { throw 'Candidate tree SHA changed' }
           $evidenceFiles = @(git diff --name-only $candidate HEAD)
