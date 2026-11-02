@@ -30,6 +30,7 @@ jobs:
         with:
           node-version: 24.22.1
           check-latest: false
+          package-manager-cache: false
 
       - name: Fetch exact public base and candidate snapshots
         shell: bash
