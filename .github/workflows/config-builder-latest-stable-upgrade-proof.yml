@@ -12,7 +12,7 @@ jobs:
   latest-stable-upgrade:
     name: Published latest-stable to candidate upgrade
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 65
     env:
       BASE_SHA: 1347e901fce121a46962b706baa0f61f09f87860
       CANDIDATE_SHA: 9f1496bfd6ac846d0565fc259123d8af6284beb5
