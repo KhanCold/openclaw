@@ -39,7 +39,7 @@ jobs:
           mkdir -p "$REPO_DIR"
           git -C "$REPO_DIR" init --quiet
           git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
-          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
+          git -C "$REPO_DIR" fetch --no-tags --depth=2 fork "refs/heads/$CANDIDATE_REF"
           test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
           git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
           git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
