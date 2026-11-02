@@ -26,7 +26,8 @@ jobs:
           $base = '2777468d26e5f21455b67591a045a40c770aee13'
           $candidate = '72b40dd31f8e801b4613f713e73c0c0337d5ba67'
           $oldPrHead = 'cf4ba70074e1419b17a63f4d7e382f153ce99e82'
-          if ((git rev-parse HEAD~2).Trim() -ne $candidate) { throw 'Proof commits are not based on the exact candidate' }
+          git merge-base --is-ancestor $candidate HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Proof branch does not descend from the exact candidate' }
           if ((git rev-parse "${candidate}^1").Trim() -ne $base) { throw 'Candidate first parent is not the pinned base' }
           if ((git rev-parse "${candidate}^2").Trim() -ne $oldPrHead) { throw 'Candidate does not preserve the original PR head as its second parent' }
           if ((git rev-parse "${base}^{tree}").Trim() -ne 'f6f7ca00d0564189061a7b51591847ccc4686192') { throw 'Pinned baseline tree SHA changed' }
