@@ -75,7 +75,7 @@ jobs:
           test "$(git rev-parse HEAD:extensions/workboard/src/tools-orchestration.ts)" = 22a0f4305cac4353ab5acb5829e23a53191d9b00
           test "$(git hash-object extensions/workboard/src/tools-board-appearance.test.ts)" = "$TEST_BLOB"
           set +e
-          pnpm test:extension extensions/workboard/src/tools-board-appearance.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-baseline-vitest.json >/tmp/workboard-baseline-vitest.log 2>&1
+          pnpm test:extension workboard extensions/workboard/src/tools-board-appearance.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-baseline-vitest.json >/tmp/workboard-baseline-vitest.log 2>&1
           test_status=$?
           set -e
           if [ ! -s /tmp/workboard-baseline-vitest.json ]; then
@@ -117,7 +117,7 @@ jobs:
       - name: Candidate regression green
         run: |
           set -euo pipefail
-          pnpm test:extension extensions/workboard/src/tools-board-appearance.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-candidate-vitest.json >/tmp/workboard-candidate-vitest.log 2>&1
+          pnpm test:extension workboard extensions/workboard/src/tools-board-appearance.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-candidate-vitest.json >/tmp/workboard-candidate-vitest.log 2>&1
           node /tmp/assert-workboard-vitest.mjs candidate /tmp/workboard-candidate-vitest.json
           tail -n 50 /tmp/workboard-candidate-vitest.log
 
