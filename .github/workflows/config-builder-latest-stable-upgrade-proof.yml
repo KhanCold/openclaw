@@ -39,16 +39,24 @@ jobs:
           mkdir -p "$REPO_DIR"
           git -C "$REPO_DIR" init --quiet
           git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
-          git -C "$REPO_DIR" fetch --no-tags --depth=2 fork "refs/heads/$CANDIDATE_REF"
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
           test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
           git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
           git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "$BASE_SHA"
-          test "$(git -C "$REPO_DIR" show -s --format=%P "$CANDIDATE_SHA")" = "$BASE_SHA"
-          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA:src/cli/config-set-input.ts")" = "93eb1b71a98aa540ccf2791cc56dd0d3690b9723"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-set-input.ts")" = "41425074c115f55d65b5d70997e1c5664e8043"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/config-cli.integration.test.ts")" = "7f9702496e9e2586f42bb5110bc7f5961a53baf5"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:docs/cli/config.md")" = "873f3953e5dcb15d0d7682ddb52557f7899f4073"
-          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/config-builder-empty-args-2026-10-29.txt")" = "87523dd7a0632907d61799465827c3f08825fa47"
+          assert_blob() {
+            local ref="$1" file_path="$2" expected="$3" actual
+            actual="$(git -C "$REPO_DIR" rev-parse "$ref:$file_path")"
+            printf "blob %s:%s %s\n" "$ref" "$file_path" "$actual"
+            if [ "$actual" != "$expected" ]; then
+              echo "Blob mismatch for $ref:$file_path (expected $expected, got $actual)." >&2
+              return 1
+            fi
+          }
+          assert_blob "$BASE_SHA" "src/cli/config-set-input.ts" "93eb1b71a98aa540ccf2791cc56dd0d3690b9723"
+          assert_blob "$CANDIDATE_SHA" "src/cli/config-set-input.ts" "41425074c115f55d65b5d70997e1c5664e8043"
+          assert_blob "$CANDIDATE_SHA" "src/cli/config-cli.integration.test.ts" "7f9702496e9e2586f42bb5110bc7f5961a53baf5"
+          assert_blob "$CANDIDATE_SHA" "docs/cli/config.md" "873f3953e5dcb15d0d7682ddb52557f7899f4073"
+          assert_blob "$CANDIDATE_SHA" "config/test-lines-allocations/config-builder-empty-args-2026-10-29.txt" "87523dd7a0632907d61799465827c3f08825fa47"
           printf 'base=%s\ncandidate=%s\nstable=%s\nnode=%s\n' "$BASE_SHA" "$CANDIDATE_SHA" "$STABLE_SPEC" "$(node --version)"
 
       - name: Install locked candidate dependencies without lifecycle scripts
