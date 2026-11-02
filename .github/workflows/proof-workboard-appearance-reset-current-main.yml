@@ -1,0 +1,133 @@
+name: Workboard appearance reset isolated proof
+
+on:
+  push:
+    branches: [proof/workboard-appearance-reset-current-main-2026-11-02]
+
+permissions:
+  contents: read
+
+jobs:
+  workboard-proof:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-workboard-appearance-corepack
+      BASE_SHA: 43884ea219f802ba198970185eb2d17cdd9824e5
+      BASE_TREE: a753fc614bf6678fbbad51837c228abb54b4ffac
+      CANDIDATE_TREE: 43b7a0c4f6151958d18c5a84d02305d9fe58f8dc
+      CANDIDATE_SHA_PIN: 996dcd54db663655a53afc0914227dc0521cbab0
+      OLD_PR_HEAD: b7d88c7da40ee8840cd5435b12b7fde542492bd3
+      SOURCE_BLOB: 30626572ff682b1d0fa44a513f751c9e794c0bea
+      TEST_BLOB: a877b57077f1836fe085dd4c41b2d9006620e1f3
+      ALLOCATION_BLOB: 5bc6609e3d8512746dffd4a783cc4b428dfe5dc7
+    steps:
+      - name: Anonymous checkout of exact upstream base
+        run: |
+          set -euo pipefail
+          git init .
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git "$BASE_SHA"
+          git checkout --detach "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$BASE_TREE"
+          test "$(git rev-parse HEAD:extensions/workboard/src/tools-orchestration.ts)" = 22a0f4305cac4353ab5acb5829e23a53191d9b00
+          git fetch --no-tags --depth=1 --filter=tree:0 https://github.com/KhanCold/openclaw.git "$OLD_PR_HEAD"
+          test "$(git rev-parse FETCH_HEAD)" = "$OLD_PR_HEAD"
+          test "$(git cat-file -t "$OLD_PR_HEAD")" = commit
+          test -z "$(git config --get-regexp 'http\..*extraheader|credential.helper' || true)"
+
+      - name: Pinned Node without dependency cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+          package-manager-cache: false
+
+      - name: Pinned package manager and frozen install
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          test "$(pnpm --version)" = "12.15.0"
+          pnpm install --frozen-lockfile
+
+      - name: Fetch and verify public proof inputs
+        run: |
+          set -euo pipefail
+          raw="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}"
+          curl --fail --location --silent --show-error --max-time 60 "$raw/proof/workboard-appearance-reset-current-main.patch" --output /tmp/workboard-reset.patch
+          curl --fail --location --silent --show-error --max-time 60 "$raw/proof/workboard-appearance-reset-running-agent.mjs" --output /tmp/workboard-running-agent.mjs
+          curl --fail --location --silent --show-error --max-time 60 "$raw/proof/workboard-appearance-reset-assert-vitest.mjs" --output /tmp/assert-workboard-vitest.mjs
+          curl --fail --location --silent --show-error --max-time 60 "$raw/.github/workflows/proof-workboard-appearance-reset-current-main.yml" --output /tmp/proof-workboard-reset.yml
+          echo "26c8f75c5d94c7258c3312248005558e2540266ccc9ca7ca8a4b6f04299f328e  /tmp/workboard-reset.patch" | shasum -a 256 --check
+          echo "d7107695876b66cfa51f5b0fa18d05620d61e56b1343d28440d9d1d9faeceb22  /tmp/workboard-running-agent.mjs" | shasum -a 256 --check
+          echo "81dc4c4a5c33a64f534f3f06ae0fe43f3a3b7e89beef222860a64b4cebee1a75  /tmp/assert-workboard-vitest.mjs" | shasum -a 256 --check
+          mkdir -p .github/workflows
+          cp /tmp/proof-workboard-reset.yml .github/workflows/proof-workboard-appearance-reset-current-main.yml
+          pnpm check:workflows
+
+      - name: Expected-red regression on unmodified upstream source
+        run: |
+          set -euo pipefail
+          git apply --check --include=extensions/workboard/src/tools-board-appearance.test.ts /tmp/workboard-reset.patch
+          git apply --include=extensions/workboard/src/tools-board-appearance.test.ts /tmp/workboard-reset.patch
+          test "$(git rev-parse HEAD:extensions/workboard/src/tools-orchestration.ts)" = 22a0f4305cac4353ab5acb5829e23a53191d9b00
+          test "$(git hash-object extensions/workboard/src/tools-board-appearance.test.ts)" = "$TEST_BLOB"
+          set +e
+          pnpm test:extension extensions/workboard/src/tools-board-appearance.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-baseline-vitest.json >/tmp/workboard-baseline-vitest.log 2>&1
+          test_status=$?
+          set -e
+          test "$test_status" -eq 1
+          node /tmp/assert-workboard-vitest.mjs baseline /tmp/workboard-baseline-vitest.json
+          tail -n 50 /tmp/workboard-baseline-vitest.log
+
+      - name: Apply exact candidate and record immutable identity
+        run: |
+          set -euo pipefail
+          rm -f extensions/workboard/src/tools-board-appearance.test.ts
+          git reset --hard "$BASE_SHA"
+          git apply --check /tmp/workboard-reset.patch
+          git apply --index /tmp/workboard-reset.patch
+          test "$(git rev-parse :extensions/workboard/src/tools-orchestration.ts)" = "$SOURCE_BLOB"
+          test "$(git rev-parse :extensions/workboard/src/tools-board-appearance.test.ts)" = "$TEST_BLOB"
+          test "$(git rev-parse :config/test-lines-allocations/workboard-board-appearance-reset.txt)" = "$ALLOCATION_BLOB"
+          test "$(git write-tree)" = "$CANDIDATE_TREE"
+          test "$(git diff --cached --name-only | LC_ALL=C sort)" = "$(printf '%s\n' config/test-lines-allocations/workboard-board-appearance-reset.txt extensions/workboard/src/tools-board-appearance.test.ts extensions/workboard/src/tools-orchestration.ts | LC_ALL=C sort)"
+          CANDIDATE_SHA="$(printf '%s\n' 'fix(workboard): expose explicit board appearance reset' | GIT_AUTHOR_NAME=KhanCold GIT_AUTHOR_EMAIL=119404710+KhanCold@users.noreply.github.com GIT_AUTHOR_DATE='@1793637290 +0800' GIT_COMMITTER_NAME=KhanCold GIT_COMMITTER_EMAIL=119404710+KhanCold@users.noreply.github.com GIT_COMMITTER_DATE='@1793637290 +0800' git commit-tree "$CANDIDATE_TREE" -p "$OLD_PR_HEAD" -p "$BASE_SHA")"
+          test "$CANDIDATE_SHA" = "$CANDIDATE_SHA_PIN"
+          git reset --hard "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^1)" = "$OLD_PR_HEAD"
+          test "$(git rev-parse HEAD^2)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          echo "EXPECTED_CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"
+          echo "EXPECTED_CANDIDATE_TREE=$CANDIDATE_TREE" >> "$GITHUB_ENV"
+          echo "PROOF_BASE=$BASE_SHA"
+          echo "PROOF_CANDIDATE=$CANDIDATE_SHA"
+          echo "PROOF_CANDIDATE_TREE=$CANDIDATE_TREE"
+          git diff --stat "$BASE_SHA" HEAD
+          git diff --name-status "$BASE_SHA" HEAD
+          git diff --check "$BASE_SHA" HEAD
+
+      - name: Candidate regression green
+        run: |
+          set -euo pipefail
+          pnpm test:extension extensions/workboard/src/tools-board-appearance.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-candidate-vitest.json >/tmp/workboard-candidate-vitest.log 2>&1
+          node /tmp/assert-workboard-vitest.mjs candidate /tmp/workboard-candidate-vitest.json
+          tail -n 50 /tmp/workboard-candidate-vitest.log
+
+      - name: Built CLI discovery dispatch reset and persistent readback
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v pnpm build:runtime
+          /usr/bin/time -v node /tmp/workboard-running-agent.mjs
+
+      - name: Scoped format lint extension types and line ratchet
+        run: |
+          set -euo pipefail
+          pnpm format:check -- extensions/workboard/src/tools-orchestration.ts extensions/workboard/src/tools-board-appearance.test.ts config/test-lines-allocations/workboard-board-appearance-reset.txt
+          pnpm lint -- --files-json '["extensions/workboard/src/tools-orchestration.ts","extensions/workboard/src/tools-board-appearance.test.ts"]'
+          pnpm tsgo:extensions
+          pnpm tsgo:extensions:test
+          pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" HEAD
