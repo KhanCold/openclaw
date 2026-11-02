@@ -69,8 +69,6 @@ jobs:
           set -euo pipefail
           test "$(git -C subject rev-parse HEAD)" = "$SUBJECT_SHA"
           test "$(node --version)" = "v$NODE_VERSION"
-          corepack enable
-          test "$(corepack pnpm --version)" = "$PNPM_VERSION"
           mkdir -p "$GITHUB_WORKSPACE/.proof-evidence"
           if [ "$EXPECTED" = "baseline" ]; then
             test "$(git -C subject rev-parse HEAD:extensions/workboard/src/store-card-helpers.ts)" = "164d15dc9d52f6b34efdd85f558776d2b1163c49"
@@ -88,9 +86,11 @@ jobs:
             printf 'Candidate SHA: %s\n' "$CANDIDATE_SHA"
             printf 'Source SHA: %s\n' "$(git -C subject rev-parse HEAD)"
             printf 'Node: %s\n' "$(node --version)"
-            printf 'pnpm: %s\n' "$(corepack pnpm --version)"
           } | tee "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt"
           cd subject
+          corepack enable
+          test "$(corepack pnpm --version)" = "$PNPM_VERSION"
+          printf 'pnpm: %s\n' "$(corepack pnpm --version)" | tee -a "$GITHUB_WORKSPACE/.proof-evidence/manifest.txt"
           corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
 
       - name: Prove the unchanged regression is red on current main
