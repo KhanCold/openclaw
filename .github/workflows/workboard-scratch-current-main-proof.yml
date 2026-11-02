@@ -148,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           install -m 0644 proof/scripts/workboard-scratch-cli-proof.mjs subject/scripts/workboard-scratch-cli-proof.mjs
-          test "$(git hash-object subject/scripts/workboard-scratch-cli-proof.mjs)" = "b5441dadbb31e23e55fc0de6a38214c533ce3d3c"
+          test "$(git hash-object subject/scripts/workboard-scratch-cli-proof.mjs)" = "2abac6fcbdf727d6af5073ed5a0ceb5e5dbc2eeb"
 
       - name: Build and prove the CLI-started Gateway behavior
         working-directory: subject

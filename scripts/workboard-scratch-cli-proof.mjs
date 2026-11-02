@@ -114,7 +114,10 @@ try {
     mode: GATEWAY_CLIENT_MODES.CLI,
     role: "operator",
     scopes: ["operator.admin", "operator.write", "operator.read"],
-    deviceIdentity: loadOrCreateDeviceIdentity({ path: path.join(state, "proof-device-identity.sqlite") }),
+    deviceIdentity: loadOrCreateDeviceIdentity({
+      path: path.join(state, "client", "credentials.sqlite"),
+      identityKey: "workboard-scratch-proof",
+    }),
     onHelloOk: () => helloResolve(),
     onConnectError: () => helloReject(new Error("fixture Gateway client connection failed")),
   });
