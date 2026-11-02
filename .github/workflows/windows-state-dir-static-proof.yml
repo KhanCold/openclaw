@@ -1,0 +1,93 @@
+name: Windows state-dir static proof
+
+on:
+  push:
+    branches:
+      - proof/windows-state-dir-static-2026-11-02
+
+permissions:
+  contents: read
+
+jobs:
+  exact-candidate-static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 12
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+
+      - name: Verify exact source and evidence-only overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          OPENCLAW_PROOF_BASE_SHA="2777468d26e5f21455b67591a045a40c770aee13"
+          OPENCLAW_PROOF_CANDIDATE_SHA="72b40dd31f8e801b4613f713e73c0c0337d5ba67"
+          OPENCLAW_PROOF_OLD_PR_HEAD="cf4ba70074e1419b17a63f4d7e382f153ce99e82"
+          git fetch --no-tags --depth=1 origin "$OPENCLAW_PROOF_CANDIDATE_SHA" "$OPENCLAW_PROOF_BASE_SHA" "$OPENCLAW_PROOF_OLD_PR_HEAD"
+          test "$(git rev-parse "$OPENCLAW_PROOF_BASE_SHA^{tree}")" = "f6f7ca00d0564189061a7b51591847ccc4686192"
+          test "$(git rev-parse "$OPENCLAW_PROOF_CANDIDATE_SHA^{tree}")" = "b372459fa6cd1816e392bec7a41d485fe5a70dda"
+          expected_parents="$(printf '%s\n%s' "$OPENCLAW_PROOF_BASE_SHA" "$OPENCLAW_PROOF_OLD_PR_HEAD")"
+          actual_parents="$(git cat-file -p "$OPENCLAW_PROOF_CANDIDATE_SHA" | sed -n 's/^parent //p')"
+          if [[ "$actual_parents" != "$expected_parents" ]]; then
+            printf 'Unexpected candidate parents:\n%s\n' "$actual_parents"
+            exit 1
+          fi
+          expected_changed_files="$(printf '%s\n' \
+            'config/test-lines-allocations/windows-state-dir-repair-2026-11-02.txt' \
+            'src/cli/program/preaction-state-store.test.ts' \
+            'src/cli/program/preaction.ts' \
+            'src/cli/state-dir-gateway-check.process.test.ts' \
+            'src/cli/state-dir-gateway-check.server.test.ts' \
+            'src/cli/state-dir-gateway-check.ts')"
+          actual_changed_files="$(git diff --name-only "$OPENCLAW_PROOF_BASE_SHA" "$OPENCLAW_PROOF_CANDIDATE_SHA" | LC_ALL=C sort)"
+          if [[ "$actual_changed_files" != "$expected_changed_files" ]]; then
+            printf 'Unexpected candidate files:\n%s\n' "$actual_changed_files"
+            exit 1
+          fi
+          expected_evidence_files="$(printf '%s\n' \
+            '.github/scripts/windows-state-dir-repair-proof.ps1' \
+            '.github/workflows/windows-state-dir-repair-proof.yml' \
+            '.github/workflows/windows-state-dir-static-proof.yml')"
+          actual_evidence_files="$(git diff --name-only "$OPENCLAW_PROOF_CANDIDATE_SHA" "$GITHUB_SHA" | LC_ALL=C sort)"
+          if [[ "$actual_evidence_files" != "$expected_evidence_files" ]]; then
+            printf 'Unexpected evidence overlay:\n%s\n' "$actual_evidence_files"
+            exit 1
+          fi
+          test "$(git rev-parse "$GITHUB_SHA:.github/scripts/windows-state-dir-repair-proof.ps1")" = "b0a923bc1c9c5817103005ff5665047ae3e31996"
+          test "$(git rev-parse "$GITHUB_SHA:.github/workflows/windows-state-dir-repair-proof.yml")" = "400d60784a092c2781bfbff1d839b8782084104b"
+          echo "EXACT_BASE_CANDIDATE_AND_EVIDENCE_PINS=PASS"
+
+      - name: Install pinned dependencies and check workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+          corepack pnpm check:workflows
+
+      - name: Check exact candidate formatting, lint, types, budget, and diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          OPENCLAW_PROOF_BASE_SHA="2777468d26e5f21455b67591a045a40c770aee13"
+          OPENCLAW_PROOF_CANDIDATE_SHA="72b40dd31f8e801b4613f713e73c0c0337d5ba67"
+          git checkout --detach "$OPENCLAW_PROOF_CANDIDATE_SHA"
+          test "$(git rev-parse HEAD)" = "$OPENCLAW_PROOF_CANDIDATE_SHA"
+          corepack pnpm format:check \
+            src/cli/program/preaction-state-store.test.ts \
+            src/cli/program/preaction.ts \
+            src/cli/state-dir-gateway-check.process.test.ts \
+            src/cli/state-dir-gateway-check.server.test.ts \
+            src/cli/state-dir-gateway-check.ts
+          corepack pnpm lint --files-json '["src/cli/program/preaction-state-store.test.ts","src/cli/program/preaction.ts","src/cli/state-dir-gateway-check.process.test.ts","src/cli/state-dir-gateway-check.server.test.ts","src/cli/state-dir-gateway-check.ts"]'
+          corepack pnpm tsgo:core
+          corepack pnpm tsgo:core:test --changed-paths-json '["src/cli/program/preaction-state-store.test.ts","src/cli/state-dir-gateway-check.process.test.ts","src/cli/state-dir-gateway-check.server.test.ts"]'
+          corepack pnpm check:test-lines-ratchet --base "$OPENCLAW_PROOF_BASE_SHA" --no-merge-base
+          git diff --check "$OPENCLAW_PROOF_BASE_SHA" "$OPENCLAW_PROOF_CANDIDATE_SHA"
+          echo "EXACT_CANDIDATE_STATIC_CHECKS=PASS"
