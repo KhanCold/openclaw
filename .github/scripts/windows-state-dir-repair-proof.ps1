@@ -22,6 +22,8 @@ $controlToken = 'synthetic-windows-proof-control-token'
 $repairToken = 'synthetic-windows-proof-repair-token'
 $gatewayConfig = Join-Path $gatewayState 'openclaw.json'
 $cliConfig = Join-Path $cliState 'openclaw.json'
+$storeProbePath = Join-Path $repo '.windows-state-dir-repair-secret-store-probe.mts'
+$storeProbeCreated = $false
 $config = @{
   gateway = @{
     mode = 'local'
@@ -42,6 +44,165 @@ $env:PATH = "$bin;$env:PATH"
 if ((Get-Command openclaw).Source -ne $launcher) {
   throw 'Proof launcher did not resolve to the built CLI'
 }
+
+function Get-TelegramStoreRefId {
+  param([string]$configPath)
+
+  $document = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json -AsHashtable
+  $ref = $document.channels.telegram.botToken
+  if ($ref -isnot [System.Collections.IDictionary] -or
+      $ref.source -ne 'store' -or
+      [string]::IsNullOrWhiteSpace([string]$ref.provider) -or
+      [string]$ref.id -notmatch '^CHANNEL_SETUP_[0-9A-F]{32}$') {
+    throw 'Gateway channel config did not contain the expected channel-setup SecretRef'
+  }
+  return [string]$ref.id
+}
+
+function Invoke-SecretStoreProbe {
+  param(
+    [ValidateSet('match', 'absent')][string]$expectation,
+    [string]$stateDir,
+    [string]$name,
+    [string]$expectedValue = ''
+  )
+
+  if ($expectation -eq 'match') {
+    $probeOutput = (
+      $expectedValue |
+        & node --import ./scripts/tsx.mjs $storeProbePath match $stateDir $name 2>&1 |
+        Out-String
+    )
+    $probeExit = $LASTEXITCODE
+    if (
+      $probeExit -ne 0 -or
+      $probeOutput -notmatch '(?m)^SECRET_STORE_VALUE_MATCH=true\s*$'
+    ) {
+      throw 'Synthetic secret-store value did not match in the selected state directory'
+    }
+    return
+  }
+
+  $probeOutput = (
+    & node --import ./scripts/tsx.mjs $storeProbePath absent $stateDir $name 2>&1 |
+      Out-String
+  )
+  $probeExit = $LASTEXITCODE
+  if (
+    $probeExit -ne 0 -or
+    $probeOutput -notmatch '(?m)^SECRET_STORE_ENTRY_ABSENT=true\s*$'
+  ) {
+    throw 'Unexpected secret-store entry in the selected state directory'
+  }
+}
+
+function Get-SecretStoreSnapshot {
+  param([string]$stateDir)
+
+  $snapshotOutput = (
+    & node --import ./scripts/tsx.mjs $storeProbePath snapshot $stateDir 2>&1 |
+      Out-String
+  )
+  $snapshotExit = $LASTEXITCODE
+  if (
+    $snapshotExit -ne 0 -or
+    $snapshotOutput -notmatch '(?m)^SECRET_STORE_SNAPSHOT=[a-f0-9]{64}\s*$'
+  ) {
+    throw 'Could not read the active secret-store metadata snapshot'
+  }
+  return [regex]::Match(
+    $snapshotOutput,
+    '(?m)^SECRET_STORE_SNAPSHOT=[a-f0-9]{64}'
+  ).Value
+}
+
+$storeProbeSource = @'
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import {
+  listSecretStoreEntries,
+  readSecretStoreValue,
+} from "./src/secrets/store/secret-store.ts";
+import { closeOpenClawStateDatabaseAsync } from "./src/state/openclaw-state-db.ts";
+
+function report(label: string, passed: boolean) {
+  process.stdout.write(`${label}=${passed}\n`);
+  if (!passed) {
+    process.exitCode = 1;
+  }
+}
+
+async function readStdinValue(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks)
+    .toString("utf8")
+    .replace(/^\uFEFF/, "")
+    .replace(/\r?\n$/, "");
+}
+
+async function main() {
+  const [mode, stateDir, name] = process.argv.slice(2);
+  if (!mode || !stateDir || (mode !== "snapshot" && !name)) {
+    throw new Error("invalid probe arguments");
+  }
+  if (
+    (mode === "absent" || mode === "snapshot") &&
+    !existsSync(path.join(stateDir, "state", "openclaw.sqlite"))
+  ) {
+    if (mode === "absent") {
+      report("SECRET_STORE_ENTRY_ABSENT", true);
+    } else {
+      process.stdout.write(`SECRET_STORE_SNAPSHOT=${createHash("sha256").update("[]").digest("hex")}\n`);
+    }
+    return;
+  }
+  try {
+    const database = { env: { OPENCLAW_STATE_DIR: stateDir } };
+    const entries = await listSecretStoreEntries({
+      scope: { kind: "team" },
+      database,
+    });
+    if (mode === "snapshot") {
+      const stableEntries = entries
+        .map((entry) => [entry.name, entry.kind, entry.createdAtMs, entry.updatedAtMs])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+      const digest = createHash("sha256").update(JSON.stringify(stableEntries)).digest("hex");
+      process.stdout.write(`SECRET_STORE_SNAPSHOT=${digest}\n`);
+      return;
+    }
+    const metadata = entries.find((entry) => entry.name === name);
+    if (mode === "absent") {
+      report("SECRET_STORE_ENTRY_ABSENT", metadata === undefined);
+      return;
+    }
+    if (mode !== "match") {
+      throw new Error("invalid probe mode");
+    }
+    const result = await readSecretStoreValue({
+      scope: { kind: "team" },
+      name,
+      database,
+    });
+    const expectedValue = await readStdinValue();
+    report(
+      "SECRET_STORE_VALUE_MATCH",
+      metadata?.kind === "secret" && result.ok && result.value === expectedValue,
+    );
+  } finally {
+    await closeOpenClawStateDatabaseAsync();
+  }
+}
+
+void main().catch((error: unknown) => {
+  const label = error instanceof Error ? error.name : "unknown";
+  process.stdout.write(`SECRET_STORE_PROBE_ERROR=${label}\n`);
+  process.exitCode = 2;
+});
+'@
 
 $env:NO_COLOR = '1'
 $env:OPENCLAW_HOME = $root
@@ -81,6 +242,11 @@ try {
   if (-not $ready) {
     throw 'Isolated local Gateway did not become ready'
   }
+  if (Test-Path -LiteralPath $storeProbePath) {
+    throw 'Unexpected pre-existing secret-store proof helper'
+  }
+  $storeProbeCreated = $true
+  [IO.File]::WriteAllText($storeProbePath, $storeProbeSource, $utf8)
 
   $env:OPENCLAW_SKIP_CHANNELS = '0'
   $env:OPENCLAW_DISABLE_BUNDLED_PLUGINS = '0'
@@ -93,7 +259,10 @@ try {
   if ($matchingExit -ne 0 -or $matching -match 'different state directories|Fix: in PowerShell') {
     throw "Matching Gateway state control failed: $($matching.Replace($gatewayAuthToken, '[synthetic]').Replace($controlToken, '[synthetic]'))"
   }
+  $matchingRefId = Get-TelegramStoreRefId $gatewayConfig
+  Invoke-SecretStoreProbe 'match' $gatewayState $matchingRefId $controlToken
   Write-Output 'MATCHING_GUARDED_ACTION_CONTROL=PASS'
+  Write-Output 'MATCHING_CONTROL_SECRETREF_AND_GATEWAY_STORE=PASS'
 
   $env:OPENCLAW_STATE_DIR = $cliState
   $env:OPENCLAW_CONFIG_PATH = $cliConfig
@@ -101,6 +270,8 @@ try {
   $priorConfig = $env:OPENCLAW_CONFIG_PATH
   $gatewayBeforeRefusal = [IO.File]::ReadAllText($gatewayConfig)
   $cliBeforeRefusal = [IO.File]::ReadAllText($cliConfig)
+  $gatewayStoreBeforeRefusal = Get-SecretStoreSnapshot $gatewayState
+  $cliStoreBeforeRefusal = Get-SecretStoreSnapshot $cliState
   $refusal = (& openclaw channels add --channel telegram --token $repairToken 2>&1 | Out-String)
   $refusalExit = $LASTEXITCODE
   if ($refusalExit -eq 0) {
@@ -109,6 +280,13 @@ try {
   if ($refusal.Contains($gatewayAuthToken) -or $refusal.Contains($controlToken) -or $refusal.Contains($repairToken)) {
     throw 'CLI refusal exposed a synthetic token'
   }
+  if ((Get-SecretStoreSnapshot $gatewayState) -ne $gatewayStoreBeforeRefusal) {
+    throw 'CLI refusal changed the Gateway secret-store metadata snapshot'
+  }
+  if ((Get-SecretStoreSnapshot $cliState) -ne $cliStoreBeforeRefusal) {
+    throw 'CLI refusal changed the CLI secret-store metadata snapshot'
+  }
+  Write-Output 'CLI_REFUSAL_SECRET_STORE_METADATA_SNAPSHOTS_UNCHANGED=PASS'
 
   if ($Mode -eq 'baseline') {
     if ($refusal -notmatch 'The CLI command failed\.' -or $refusal -notmatch 'For help, run `openclaw doctor`') {
@@ -172,23 +350,40 @@ try {
       throw 'PowerShell repair did not restore the caller environment'
     }
     $gatewayAfterRepair = [IO.File]::ReadAllText($gatewayConfig)
-    if ($gatewayAfterRepair -notmatch 'channels' -or $gatewayAfterRepair -notmatch [regex]::Escape($repairToken)) {
-      throw 'Repair did not write the requested synthetic channel to Gateway config'
-    }
-    if ($gatewayAfterRepair.Contains($controlToken)) {
-      throw 'Repair left the positive-control token instead of applying the requested value'
-    }
     if ([IO.File]::ReadAllText($cliConfig) -ne $cliBeforeRefusal) {
       throw 'Repair wrote to the CLI config instead of Gateway config'
     }
+    if ((Get-SecretStoreSnapshot $cliState) -ne $cliStoreBeforeRefusal) {
+      throw 'Repair changed the CLI secret-store metadata snapshot'
+    }
+    $repairRefId = Get-TelegramStoreRefId $gatewayConfig
+    if ($repairRefId -eq $matchingRefId) {
+      throw 'Repair reused the matching-state control SecretRef instead of writing the requested value'
+    }
+    if ($gatewayAfterRepair -eq $gatewayBeforeRefusal) {
+      throw 'Repair did not update the Gateway config with the repair SecretRef'
+    }
+    if ($gatewayAfterRepair.Contains($controlToken) -or $gatewayAfterRepair.Contains($repairToken)) {
+      throw 'Gateway config exposed a synthetic channel token instead of a SecretRef'
+    }
+    Invoke-SecretStoreProbe 'match' $gatewayState $matchingRefId $controlToken
+    Invoke-SecretStoreProbe 'match' $gatewayState $repairRefId $repairToken
+    Invoke-SecretStoreProbe 'absent' $cliState $matchingRefId
+    Invoke-SecretStoreProbe 'absent' $cliState $repairRefId
     Write-Output 'CANDIDATE_CLI_REFUSAL_AND_SECRET_OMISSION=PASS'
-    Write-Output 'BUILT_CLI_REPAIR_WRITES_GATEWAY_ONLY=PASS'
+    Write-Output 'BUILT_CLI_REPAIR_WRITES_GATEWAY_CONFIG_AND_STORE_ONLY=PASS'
     Write-Output 'POWERSHELL_CALLER_ENV_RESTORED=PASS'
   }
   Write-Output "MODE=$Mode"
   Write-Output 'WINDOWS_SHIPPED_CLI_PROOF=PASS'
 } finally {
-  if (-not $gateway.HasExited) {
-    Stop-Process -Id $gateway.Id -Force
+  try {
+    if ($storeProbeCreated -and (Test-Path -LiteralPath $storeProbePath)) {
+      Remove-Item -LiteralPath $storeProbePath -Force
+    }
+  } finally {
+    if (-not $gateway.HasExited) {
+      Stop-Process -Id $gateway.Id -Force
+    }
   }
 }
