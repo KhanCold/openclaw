@@ -1,0 +1,265 @@
+name: memory-search-format-upgrade-proof
+
+on:
+  push:
+    branches:
+      - proof/memory-search-format-upgrade-243816
+
+permissions:
+  contents: read
+
+jobs:
+  memory-search-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BASE_SHA: 243816307db11a1973865a79fe46cc3e20f02737
+      BASE_TREE: 7e5bb1035556584a6821fae03ef49ab34ccb81a8
+      CANDIDATE_SHA: 0c9b07aea1de5580a4818774bb329397f98964da
+      CANDIDATE_TREE: bea21e0c2d18094723842a91d99ae118ea8d8f16
+      CANDIDATE_REF: task/memory-search-format-upgrade-243816
+      CANDIDATE_PARENT: 3f498ac29c0b109fe212937cf116ffba0d03c21b
+      PREVIOUS_PARENT: 08e975d8abc5551c1f1837e1ee78fd1b39fce3c3
+      BASE_SOURCE_BLOB: edf6ad37d3f07b6b24d0c1f476a4de5c05ef1606
+      CANDIDATE_SOURCE_BLOB: 02e015b3ee22139c0b630f14a641ed85911065fc
+      BASE_TEST_BLOB: 2b8f40685ad76268ce8f61c6192fd6da67f391ba
+      CANDIDATE_TEST_BLOB: 6ab08902a5b1e08008df1913e9bd5d0153d7e5ce
+      ALLOCATION_BLOB: 257e563266b43281b3fbb3632ab67ab0d3f314e9
+      STABLE_VERSION: 2026.10.10
+      PROOF_DIR: ${{ github.workspace }}/.proof-evidence
+
+    steps:
+      - name: Checkout isolated proof branch without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Fetch and verify exact source snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROOF_DIR"
+          git remote add upstream https://github.com/openclaw/openclaw.git
+          git remote add fork https://github.com/KhanCold/openclaw.git
+          git fetch --no-tags --depth=1 upstream "$BASE_SHA"
+          git fetch --no-tags --depth=4 fork "refs/heads/$CANDIDATE_REF"
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse "$BASE_SHA^{tree}")" = "$BASE_TREE"
+          test "$(git rev-parse "$CANDIDATE_SHA^{tree}")" = "$CANDIDATE_TREE"
+          candidate_headers="$(git cat-file -p "$CANDIDATE_SHA" | sed -n '1,/^$/p')"
+          printf '%s\n' "$candidate_headers" | grep -Fxq "parent $CANDIDATE_PARENT"
+          parent_headers="$(git cat-file -p "$CANDIDATE_PARENT" | sed -n '1,/^$/p')"
+          printf '%s\n' "$parent_headers" | grep -Fxq "parent $PREVIOUS_PARENT"
+          previous_headers="$(git cat-file -p "$PREVIOUS_PARENT" | sed -n '1,/^$/p')"
+          printf '%s\n' "$previous_headers" | grep -Fxq "parent $BASE_SHA"
+          test "$(git rev-parse "$BASE_SHA:extensions/memory-core/src/memory/manager-search-orchestration.ts")" = "$BASE_SOURCE_BLOB"
+          test "$(git rev-parse "$CANDIDATE_SHA:extensions/memory-core/src/memory/manager-search-orchestration.ts")" = "$CANDIDATE_SOURCE_BLOB"
+          test "$(git rev-parse "$BASE_SHA:extensions/memory-core/src/chunking-upgrade-real-transport.test.ts")" = "$BASE_TEST_BLOB"
+          test "$(git rev-parse "$CANDIDATE_SHA:extensions/memory-core/src/chunking-upgrade-real-transport.test.ts")" = "$CANDIDATE_TEST_BLOB"
+          test "$(git rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/memory-search-format-upgrade-2026-11-03.txt")" = "$ALLOCATION_BLOB"
+          for path in package.json pnpm-lock.yaml; do
+            test "$(git rev-parse "$BASE_SHA:$path")" = "$(git rev-parse "$CANDIDATE_SHA:$path")"
+          done
+          expected_paths="$(printf '%s\n' \
+            config/test-lines-allocations/memory-search-format-upgrade-2026-11-03.txt \
+            extensions/memory-core/src/chunking-upgrade-real-transport.test.ts \
+            extensions/memory-core/src/memory/manager-search-orchestration.ts | LC_ALL=C sort)"
+          actual_paths="$(git diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | LC_ALL=C sort)"
+          test "$actual_paths" = "$expected_paths"
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          {
+            printf 'Base SHA: %s\n' "$BASE_SHA"
+            printf 'Candidate SHA: %s\n' "$CANDIDATE_SHA"
+            printf 'Candidate branch: %s\n' "$CANDIDATE_REF"
+            printf 'Candidate tree: %s\n' "$CANDIDATE_TREE"
+            printf 'Changed paths:\n%s\n' "$actual_paths"
+            printf 'Node: %s\n' "$(node --version)"
+          } | tee "$PROOF_DIR/manifest.txt"
+
+      - name: Install pinned workspace dependencies without lifecycle scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          printf 'pnpm: %s\n' "$(corepack pnpm --version)" | tee -a "$PROOF_DIR/manifest.txt"
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Stage the repository-pinned Bun formatter
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/stage-openclaw-bun.sh "$PROOF_DIR/bun" linux x64
+          echo "$PROOF_DIR/bun/bin" >> "$GITHUB_PATH"
+          "$PROOF_DIR/bun/bin/bun" --version | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Verify the isolated workflow policy and test-line budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm check:workflows
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          corepack pnpm check:line-cap-ratchet --base "$BASE_SHA" --no-merge-base
+
+      - name: Prove the held-rebuild regression fails on baseline production code
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show "$BASE_SHA:extensions/memory-core/src/memory/manager-search-orchestration.ts" > extensions/memory-core/src/memory/manager-search-orchestration.ts
+          test "$(git hash-object extensions/memory-core/src/memory/manager-search-orchestration.ts)" = "$BASE_SOURCE_BLOB"
+          started="$(date +%s)"
+          set +e
+          OPENCLAW_VITEST_RUNTIME=node corepack pnpm test extensions/memory-core/src/chunking-upgrade-real-transport.test.ts --maxWorkers=1 --reporter=json --outputFile="$PROOF_DIR/base-red.json" > "$PROOF_DIR/base-red.log" 2>&1
+          status=$?
+          set -e
+          elapsed=$(( $(date +%s) - started ))
+          printf 'Baseline file wall seconds: %s (Vitest exit %s)\n' "$elapsed" "$status" | tee -a "$PROOF_DIR/manifest.txt"
+          cat "$PROOF_DIR/base-red.log"
+          test "$status" -ne 0
+          node - "$PROOF_DIR/base-red.json" <<'NODE'
+          const fs = require('node:fs');
+          const report = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const assertions = (report.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
+          const failed = assertions.filter((test) => test.status === 'failed');
+          const passed = assertions.filter((test) => test.status === 'passed');
+          const target = 'serves the published keyword generation while a real format rebuild is held';
+          if (report.numTotalTests !== 6 || report.numFailedTests !== 1 || report.numPassedTests !== 5 || failed.length !== 1 || passed.length !== 5 || !failed[0].fullName.includes(target)) {
+            throw new Error(`Unexpected baseline test results: ${JSON.stringify({ total: report.numTotalTests, failed: failed.map((t) => t.fullName), passed: passed.length })}`);
+          }
+          const failure = failed[0].failureMessages.join('\n');
+          if (!failure.includes('memory_search timed out after 30s')) {
+            throw new Error('The held-rebuild regression failed without the expected memory_search deadline result.');
+          }
+          console.log('PASS: exact baseline has one named held-rebuild deadline failure and five passing sibling cases.');
+          NODE
+
+      - name: Prove the candidate serves old results and publishes the completed rebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --quiet "$CANDIDATE_SHA" -- extensions/memory-core/src/memory/manager-search-orchestration.ts
+          test "$(git hash-object extensions/memory-core/src/memory/manager-search-orchestration.ts)" = "$CANDIDATE_SOURCE_BLOB"
+          started="$(date +%s)"
+          OPENCLAW_VITEST_RUNTIME=node corepack pnpm test extensions/memory-core/src/chunking-upgrade-real-transport.test.ts --maxWorkers=1 --reporter=json --outputFile="$PROOF_DIR/candidate-green.json" > "$PROOF_DIR/candidate-green.log" 2>&1
+          elapsed=$(( $(date +%s) - started ))
+          printf 'Candidate file wall seconds: %s\n' "$elapsed" | tee -a "$PROOF_DIR/manifest.txt"
+          cat "$PROOF_DIR/candidate-green.log"
+          node - "$PROOF_DIR/candidate-green.json" <<'NODE'
+          const fs = require('node:fs');
+          const report = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const assertions = (report.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
+          const target = 'serves the published keyword generation while a real format rebuild is held';
+          const passed = assertions.filter((test) => test.status === 'passed');
+          if (report.numTotalTests !== 6 || report.numFailedTests !== 0 || report.numPassedTests !== 6 || passed.length !== 6 || !passed.some((test) => test.fullName.includes(target))) {
+            throw new Error(`Unexpected candidate test results: ${JSON.stringify({ total: report.numTotalTests, failed: report.numFailedTests, passed: passed.map((t) => t.fullName) })}`);
+          }
+          console.log('PASS: all six real-transport/SQLite regression and sibling-control cases passed.');
+          NODE
+
+      - name: Build the candidate and verify the latest stable memory state upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm build
+          stable_prefix="$PROOF_DIR/stable-package"
+          npm install --prefix "$stable_prefix" --no-audit --no-fund "openclaw@$STABLE_VERSION"
+          stable_cli="$stable_prefix/node_modules/.bin/openclaw"
+          stable_version="$("$stable_cli" --version)"
+          printf 'Stable CLI: %s\n' "$stable_version" | tee -a "$PROOF_DIR/manifest.txt"
+          case "$stable_version" in *"$STABLE_VERSION"*) ;; *) echo 'Installed stable package version did not match the pinned latest stable.' >&2; exit 1 ;; esac
+          upgrade_dir="$PROOF_DIR/stable-upgrade"
+          home="$upgrade_dir/home"
+          state="$upgrade_dir/state"
+          workspace="$upgrade_dir/workspace"
+          mkdir -p "$home" "$state" "$workspace/memory" "$upgrade_dir/xdg-config" "$upgrade_dir/xdg-cache"
+          config="$state/openclaw.json"
+          printf '{"agents":{"defaults":{"workspace":"%s"},"entries":{"main":{}}},"memory":{"search":{"provider":"none","store":{"vector":{"enabled":false}}}}}\n' "$workspace" > "$config"
+          printf 'Stable release legacy note: orchid cobalt migration marker.\n' > "$workspace/memory/stable-upgrade.md"
+          export HOME="$home" OPENCLAW_HOME="$home" OPENCLAW_STATE_DIR="$state" OPENCLAW_CONFIG_PATH="$config" XDG_CONFIG_HOME="$upgrade_dir/xdg-config" XDG_CACHE_HOME="$upgrade_dir/xdg-cache" OPENCLAW_HIDE_BANNER=1 NO_COLOR=1 OPENCLAW_NO_RESPAWN=1
+          "$stable_cli" memory index --agent main --force
+          "$stable_cli" memory search --agent main --json --query 'orchid cobalt' --min-score 0 > "$upgrade_dir/stable-search.json"
+          grep -Fq 'orchid cobalt migration marker' "$upgrade_dir/stable-search.json"
+          node - "$state" "$PROOF_DIR/stable-before.json" <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { DatabaseSync } = require('node:sqlite');
+          function walk(dir) { return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => { const full = path.join(dir, entry.name); return entry.isDirectory() ? walk(full) : [full]; }); }
+          const found = [];
+          for (const file of walk(process.argv[2])) {
+            let db;
+            try {
+              db = new DatabaseSync(file, { readOnly: true });
+              if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_index_meta'").get()) continue;
+              const row = db.prepare("SELECT value FROM memory_index_meta WHERE key='memory_index_meta_v1'").get();
+              if (typeof row?.value === 'string') found.push({ file, meta: JSON.parse(row.value) });
+            } catch {} finally { db?.close(); }
+          }
+          if (found.length !== 1 || found[0].meta.chunkingVersion !== 6) throw new Error(`Stable index metadata mismatch: ${JSON.stringify(found.map((x) => x.meta.chunkingVersion))}`);
+          fs.writeFileSync(process.argv[3], JSON.stringify({ chunkingVersion: found[0].meta.chunkingVersion }) + '\n');
+          console.log(`Stable-created SQLite index format: ${found[0].meta.chunkingVersion}`);
+          NODE
+          node openclaw.mjs memory search --agent main --json --query 'orchid cobalt' --min-score 0 > "$upgrade_dir/candidate-search.json"
+          grep -Fq 'orchid cobalt migration marker' "$upgrade_dir/candidate-search.json"
+          node - "$state" "$PROOF_DIR/stable-after.json" <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { DatabaseSync } = require('node:sqlite');
+          function walk(dir) { return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => { const full = path.join(dir, entry.name); return entry.isDirectory() ? walk(full) : [full]; }); }
+          const found = [];
+          for (const file of walk(process.argv[2])) {
+            let db;
+            try {
+              db = new DatabaseSync(file, { readOnly: true });
+              if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_index_meta'").get()) continue;
+              const row = db.prepare("SELECT value FROM memory_index_meta WHERE key='memory_index_meta_v1'").get();
+              if (typeof row?.value === 'string') found.push({ meta: JSON.parse(row.value) });
+            } catch {} finally { db?.close(); }
+          }
+          if (found.length !== 1 || found[0].meta.chunkingVersion !== 6) throw new Error(`Candidate changed stable index format unexpectedly: ${JSON.stringify(found.map((x) => x.meta.chunkingVersion))}`);
+          fs.writeFileSync(process.argv[3], JSON.stringify({ chunkingVersion: found[0].meta.chunkingVersion }) + '\n');
+          console.log(`Candidate read stable-created SQLite index format: ${found[0].meta.chunkingVersion}`);
+          NODE
+          printf 'PASS: latest stable %s created a real provider-free SQLite memory index; candidate built CLI searched the same state and left its chunking format intact.\n' "$STABLE_VERSION" | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Run scoped formatter, lint, extension source/test types, and diff checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack pnpm format:check extensions/memory-core/src/memory/manager-search-orchestration.ts extensions/memory-core/src/chunking-upgrade-real-transport.test.ts
+          corepack pnpm lint --files-json '["extensions/memory-core/src/memory/manager-search-orchestration.ts","extensions/memory-core/src/chunking-upgrade-real-transport.test.ts"]'
+          corepack pnpm tsgo:extensions
+          corepack pnpm tsgo:extensions:test
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          printf 'PASS: scoped format/lint, extension source/test typechecks, and exact candidate diff hygiene.\n' | tee -a "$PROOF_DIR/manifest.txt"
+
+      - name: Record the proof scope and limits
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Memory search format-upgrade proof'
+            echo
+            echo "- Evidence workflow commit: $GITHUB_SHA"
+            echo "- Baseline: $BASE_SHA"
+            echo "- Candidate: $CANDIDATE_SHA"
+            echo "- Candidate branch: $CANDIDATE_REF"
+            echo '- Runner: GitHub-hosted ubuntu-24.04; Node 24.22.1; repository-pinned Bun.'
+            echo '- Permissions: contents: read; checkout credentials not persisted; no repository secrets, OIDC, environments, self-hosted runners, or dependency cache.'
+            echo '- Behavior proof: production memory_search tool with real manager/SQLite and real HTTP embeddings; base timed out while the rebuild was held; candidate returned the old published keyword result before release and then indexed the new version.'
+            echo '- Sibling controls: existing changed-scope and missing-FTS fail-closed cases, existing provider 401/429 cases, and post-release current-result/stale-result assertions in the same file.'
+            echo "- Stable upgrade: published openclaw@$STABLE_VERSION created an SQLite index; the candidate CLI searched the same state. This does not simulate the old-version mismatch, which is separately covered by the held-rebuild regression."
+            echo '- Gap: no external live LLM or full Gateway agent turn was run; this workflow uses the focused production tool boundary and a loopback embedding HTTP fixture.'
+            echo '- Detailed command logs are retained with this Actions run; no artifact upload or secret-bearing data is used.'
+            echo
+            if [ -f "$PROOF_DIR/manifest.txt" ]; then
+              echo '```text'
+              cat "$PROOF_DIR/manifest.txt"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
