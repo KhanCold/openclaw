@@ -15,18 +15,20 @@ jobs:
     env:
       BASE_SHA: 243816307db11a1973865a79fe46cc3e20f02737
       BASE_TREE: 7e5bb1035556584a6821fae03ef49ab34ccb81a8
-      CANDIDATE_SHA: b8364c32dacdc688f8a9c078523a469d74ba92fa
-      CANDIDATE_TREE: 92ca8a5716f3dbd58f61a5f8fe4b23386802f1e5
+      CANDIDATE_SHA: a71200f291f0ee06c40415679a06bc0fe1dc2afd
+      CANDIDATE_TREE: 47dd0ca78cd15f204fde5b982006459a911ce7ec
       CANDIDATE_REF: task/memory-search-format-upgrade-243816
-      CANDIDATE_PARENT: ae1b4f2134b3f5648e7dd5418e5ea17228774440
-      PREVIOUS_PARENT: 0c9b07aea1de5580a4818774bb329397f98964da
-      ORIGINAL_PATCH_PARENT: 3f498ac29c0b109fe212937cf116ffba0d03c21b
-      INITIAL_PATCH: 08e975d8abc5551c1f1837e1ee78fd1b39fce3c3
+      CANDIDATE_PARENT: ec55db01aa3322d5348af0c4971c63226a57309b
+      PREVIOUS_PARENT: b8364c32dacdc688f8a9c078523a469d74ba92fa
+      ORIGINAL_PATCH_PARENT: ae1b4f2134b3f5648e7dd5418e5ea17228774440
+      INITIAL_PATCH: 0c9b07aea1de5580a4818774bb329397f98964da
+      BUDGET_PARENT: 3f498ac29c0b109fe212937cf116ffba0d03c21b
+      FIRST_PATCH: 08e975d8abc5551c1f1837e1ee78fd1b39fce3c3
       BASE_SOURCE_BLOB: edf6ad37d3f07b6b24d0c1f476a4de5c05ef1606
       CANDIDATE_SOURCE_BLOB: 02e015b3ee22139c0b630f14a641ed85911065fc
       BASE_TEST_BLOB: 2b8f40685ad76268ce8f61c6192fd6da67f391ba
-      CANDIDATE_TEST_BLOB: ee1787fb12b91b59d70c3bc4bbb6136467c6cdfc
-      ALLOCATION_BLOB: 4699eb3cc96c4eea1beac608039022c3ec7acfe6
+      CANDIDATE_TEST_BLOB: f41400049f848c976f4127315b90ee1bb5d8faf5
+      ALLOCATION_BLOB: 0a3e7b0422507efb9694c02c3266b4220b3c37ff
       STABLE_VERSION: 2026.10.10
       PROOF_DIR: ${{ github.workspace }}/.proof-evidence
 
@@ -51,7 +53,7 @@ jobs:
           git remote add upstream https://github.com/openclaw/openclaw.git
           git remote add fork https://github.com/KhanCold/openclaw.git
           git fetch --no-tags --depth=1 upstream "$BASE_SHA"
-          git fetch --no-tags --depth=7 fork "refs/heads/$CANDIDATE_REF"
+          git fetch --no-tags --depth=9 fork "refs/heads/$CANDIDATE_REF"
           test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
           test "$(git rev-parse "$BASE_SHA^{tree}")" = "$BASE_TREE"
           test "$(git rev-parse "$CANDIDATE_SHA^{tree}")" = "$CANDIDATE_TREE"
@@ -64,7 +66,9 @@ jobs:
           assert_parent "$CANDIDATE_PARENT" "$PREVIOUS_PARENT"
           assert_parent "$PREVIOUS_PARENT" "$ORIGINAL_PATCH_PARENT"
           assert_parent "$ORIGINAL_PATCH_PARENT" "$INITIAL_PATCH"
-          assert_parent "$INITIAL_PATCH" "$BASE_SHA"
+          assert_parent "$INITIAL_PATCH" "$BUDGET_PARENT"
+          assert_parent "$BUDGET_PARENT" "$FIRST_PATCH"
+          assert_parent "$FIRST_PATCH" "$BASE_SHA"
           test "$(git merge-base "$BASE_SHA" "$CANDIDATE_SHA")" = "$BASE_SHA"
           test "$(git rev-parse "$BASE_SHA:extensions/memory-core/src/memory/manager-search-orchestration.ts")" = "$BASE_SOURCE_BLOB"
           test "$(git rev-parse "$CANDIDATE_SHA:extensions/memory-core/src/memory/manager-search-orchestration.ts")" = "$CANDIDATE_SOURCE_BLOB"
