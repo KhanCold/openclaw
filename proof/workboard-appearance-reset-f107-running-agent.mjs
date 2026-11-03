@@ -1,0 +1,116 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { spawn, spawnSync } from 'node:child_process';
+
+const head = process.env.EXPECTED_CANDIDATE_SHA;
+const expectedTree = process.env.EXPECTED_CANDIDATE_TREE;
+assert.ok(head && expectedTree, 'candidate identity must be pinned by the workflow');
+const root = process.cwd();
+const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'workboard-running-agent-'));
+const state = path.join(fixture, 'state');
+const workspace = path.join(fixture, 'workspace');
+fs.mkdirSync(state); fs.mkdirSync(workspace);
+const configPath = path.join(state, 'openclaw.json');
+const requestLog = path.join(fixture, 'requests.jsonl');
+const control = path.join(fixture, 'responses.json');
+const mockLog = path.join(fixture, 'mock.log');
+const redact = value => String(value).replaceAll('workboard-proof-dummy-key', '[fixture-key]').replaceAll('workboard-proof-dummy-token', '[fixture-token]').replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[ip]');
+const env = { ...process.env, OPENCLAW_STATE_DIR: state, OPENCLAW_CONFIG_PATH: configPath, OPENAI_API_KEY: 'workboard-proof-dummy-key', OPENCLAW_GATEWAY_TOKEN: 'workboard-proof-dummy-token' };
+function command(label, args, timeout = 240000) {
+  const started = performance.now();
+  const r = spawnSync(process.execPath, ['openclaw.mjs', ...args], { cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 16*1024*1024 });
+  fs.writeFileSync(path.join(fixture, `${label}.stdout`), r.stdout ?? '');
+  fs.writeFileSync(path.join(fixture, `${label}.stderr`), r.stderr ?? '');
+  console.log('AGENT_COMMAND', JSON.stringify({ label, executable: 'node openclaw.mjs', args, status:r.status, signal:r.signal, seconds:(performance.now()-started)/1000 }));
+  if (r.status !== 0 || r.error) {
+    console.log(redact((r.stdout ?? '').slice(-16000)));
+    console.log(redact((r.stderr ?? '').slice(-16000)));
+  }
+  assert.equal(r.error, undefined, `${label}: ${r.error?.message}`);
+  assert.equal(r.status, 0, `${label} failed`);
+  return r;
+}
+function functionEvents(stage, name, args) {
+  const item = { type:'function_call', id:`fc_${stage}`, call_id:`call_${stage}`, name, arguments:JSON.stringify(args) };
+  return [
+    { type:'response.output_item.added', item:{ ...item, arguments:'' } },
+    { type:'response.function_call_arguments.delta', delta:item.arguments },
+    { type:'response.output_item.done', item },
+    { type:'response.completed', response:{ id:`resp_${stage}`, status:'completed', output:[item], usage:{input_tokens:64,output_tokens:16,total_tokens:80,input_tokens_details:{cached_tokens:0}} } },
+  ];
+}
+function decodeToolOutput(output) {
+  if (typeof output === 'string') return JSON.parse(output);
+  if (Array.isArray(output)) return JSON.parse(output.filter(x=>typeof x.text==='string').map(x=>x.text).join('\n'));
+  throw new Error('Unexpected actual function_call_output shape');
+}
+function stage(name, tool, args, verify) {
+  const offset = fs.existsSync(requestLog) ? fs.readFileSync(requestLog, 'utf8').split('\n').filter(Boolean).length : 0;
+  fs.writeFileSync(control, JSON.stringify({ scriptVersion:name, responses:[{events:functionEvents(`${name}_search`,'tool_search',{query:tool,limit:1})},{events:functionEvents(`${name}_describe`,'tool_describe',{id:tool})},{events:functionEvents(`${name}_dispatch`,'dispatch_action',{id:tool,args})},{text:`WORKBOARD_${name}_DONE`}]}));
+  const result = command(name, ['agent','--local','--agent','main','--session-id',`workboard-proof-${name}`,'--message',`Perform this Workboard operation using ${tool}: ${JSON.stringify(args)}. Then report completion.`,'--thinking','off','--timeout','180','--json']);
+  const response = JSON.parse(result.stdout);
+  const requests = fs.readFileSync(requestLog,'utf8').split('\n').filter(Boolean).slice(offset).map(line=>JSON.parse(line));
+  const bodies = requests.filter(x=>x.path==='/v1/responses').map(x=>{ assert.equal(typeof x.body, 'string', 'official request record must contain complete JSON text'); return JSON.parse(x.body); });
+  assert.ok(bodies.length >= 4, 'real agent must discover, describe, dispatch, and return tool output');
+  const declared = bodies.flatMap(x=>x.tools ?? []);
+  for (const control of ['tool_search','tool_describe','dispatch_action']) assert.ok(declared.some(x=>x.name===control), `${control} must be declared by actual agent`);
+  function output(suffix) {
+    const values=bodies.flatMap(x=>x.input ?? []).filter(x=>x.type==='function_call_output' && x.call_id===`call_${name}_${suffix}`);
+    assert.ok(values.length, `actual ${suffix} output must reach provider`);
+    const result=decodeToolOutput(values.at(-1).output);
+    console.log('ACTUAL_CONTROL_RESULT',JSON.stringify({stage:name,control:suffix,result}));
+    return result;
+  }
+  const search=output('search');
+  assert.ok(Array.isArray(search) && search.some(x=>x.name===tool), 'actual search must discover target');
+  const description=output('describe');
+  assert.equal(description.name,tool);
+  if (tool==='workboard_board_create') assert.ok(description.parameters?.properties?.clearAppearance, 'actual described schema must expose clearAppearance');
+  const dispatched=output('dispatch');
+  assert.equal(dispatched.tool?.name,tool);
+  assert.notEqual(dispatched.result?.isError,true);
+  const actual=decodeToolOutput(dispatched.result.content);
+  verify(actual);
+  console.log('ACTUAL_TOOL_RESULT', JSON.stringify({ stage:name, tool, arguments:args, result:actual }));
+  console.log('ACTUAL_AGENT_REPLY', redact(JSON.stringify({stage:name, payloads:response.payloads,toolSummary:response.meta?.toolSummary})));
+}
+
+assert.equal(spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim(), head);
+assert.equal(spawnSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8'}).stdout.trim(), expectedTree);
+const mockFd = fs.openSync(mockLog, 'w');
+fs.writeFileSync(control, JSON.stringify({text:'NOT_A_TOOL_RESULT'}));
+const mock = spawn(process.execPath, ['scripts/e2e/mock-openai-server.mjs'], {cwd:root, env:{...env,MOCK_PORT:'0',MOCK_BIND_HOST:'127.0.0.1',MOCK_REQUEST_LOG:requestLog,MOCK_RESPONSE_CONTROL:control}, stdio:['ignore',mockFd,mockFd]});
+fs.closeSync(mockFd);
+try {
+  let port;
+  for (let i=0;i<100;i++) {
+    const match = fs.readFileSync(mockLog,'utf8').match(/mock-openai listening on (\d+)/);
+    if (match) { port=Number(match[1]); break; }
+    if (mock.exitCode !== null) throw new Error(`mock failed: ${redact(fs.readFileSync(mockLog,'utf8'))}`);
+    await new Promise(r=>setTimeout(r,100));
+  }
+  assert.ok(port, 'local provider listener ready');
+  const { applyMockOpenAiModelConfig } = await import(pathToFileURL(path.join(root,'scripts/e2e/lib/fixtures/mock-openai-config.mjs')));
+  const config = { gateway:{mode:'local',bind:'loopback',auth:{mode:'token'}}, tools:{allow:['workboard_board_create','workboard_boards']}, plugins:{allow:['openai','workboard'],entries:{openai:{enabled:true},workboard:{enabled:true}}}, agents:{defaults:{workspace,skipBootstrap:true,timeoutSeconds:180}} };
+  applyMockOpenAiModelConfig(config,{mockPort:port});
+  fs.writeFileSync(configPath, JSON.stringify(config,null,2)+'\n');
+  console.log('PROOF_IDENTITY', JSON.stringify({head, workflow:process.env.GITHUB_SHA, runtime:'built product CLI agent --local', provider:'official deterministic loopback fixture; no external inference', store:'product-owned persistent store; no injected runtime authority'}));
+  command('version',['--version']);
+  command('config-validate',['config','validate','--json']);
+  stage('create','workboard_board_create',{id:'planning',name:'Planning',icon:'rocket',color:'blue'}, x=>assert.deepEqual({id:x.board.id,name:x.board.name,icon:x.board.icon,color:x.board.color},{id:'planning',name:'Planning',icon:'rocket',color:'blue'}));
+  stage('preserve-empty','workboard_board_create',{id:'planning',icon:'',color:''}, x=>assert.deepEqual({id:x.board.id,name:x.board.name,icon:x.board.icon,color:x.board.color},{id:'planning',name:'Planning',icon:'rocket',color:'blue'}));
+  stage('clear-icon','workboard_board_create',{id:'planning',clearAppearance:['icon']}, x=>{assert.equal(x.board.name,'Planning');assert.equal(x.board.color,'blue');assert.equal(x.board.icon,undefined);});
+  stage('read-new-process','workboard_boards',{}, x=>{const board=x.boards.find(b=>b.id==='planning');assert.ok(board);assert.equal(board.name,'Planning');assert.equal(board.color,'blue');assert.equal(board.icon,undefined);});
+  console.log('RUNNING_AGENT_PROOF_COMPLETE', JSON.stringify({head,stages:['create','preserve-empty','clear-icon','read-new-process'], externalModel:false, authorityMocks:false}));
+} catch (error) {
+  for (const file of fs.readdirSync(fixture).filter(x=>/\.(stdout|stderr)$/.test(x))) console.log('PROOF_DIAGNOSTIC', file, redact(fs.readFileSync(path.join(fixture,file),'utf8').slice(-20000)));
+  throw error;
+} finally {
+  mock.kill('SIGTERM');
+  await Promise.race([new Promise(r=>mock.once('exit',r)),new Promise(r=>setTimeout(r,5000))]);
+  if (mock.exitCode === null && mock.signalCode === null) { mock.kill('SIGKILL'); await new Promise(r=>mock.once('exit',r)); }
+}
+
