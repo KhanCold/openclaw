@@ -160,18 +160,30 @@ jobs:
           test "$(git hash-object extensions/memory-core/src/memory/manager-search-orchestration.ts)" = "$CANDIDATE_SOURCE_BLOB"
           test "$(git hash-object extensions/memory-core/src/chunking-upgrade-real-transport.test.ts)" = "$CANDIDATE_TEST_BLOB"
           started="$(date +%s)"
+          set +e
           OPENCLAW_VITEST_RUNTIME=node corepack pnpm test extensions/memory-core/src/chunking-upgrade-real-transport.test.ts --maxWorkers=1 --reporter=json --outputFile="$PROOF_DIR/candidate-green.json" > "$PROOF_DIR/candidate-green.log" 2>&1
+          status=$?
+          set -e
           elapsed=$(( $(date +%s) - started ))
-          printf 'Candidate file wall seconds: %s\n' "$elapsed" | tee -a "$PROOF_DIR/manifest.txt"
+          printf 'Candidate file wall seconds: %s (Vitest exit %s)\n' "$elapsed" "$status" | tee -a "$PROOF_DIR/manifest.txt"
           cat "$PROOF_DIR/candidate-green.log"
-          node - "$PROOF_DIR/candidate-green.json" <<'NODE'
+          test -f "$PROOF_DIR/candidate-green.json"
+          node - "$PROOF_DIR/candidate-green.json" "$status" <<'NODE'
           const fs = require('node:fs');
           const report = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const runnerStatus = Number(process.argv[3]);
           const assertions = (report.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
           const target = 'serves the published keyword generation while a real format rebuild is held';
+          const failed = assertions.filter((test) => test.status === 'failed');
           const passed = assertions.filter((test) => test.status === 'passed');
-          if (report.numTotalTests !== 6 || report.numFailedTests !== 0 || report.numPassedTests !== 6 || passed.length !== 6 || !passed.some((test) => test.fullName.includes(target))) {
-            throw new Error(`Unexpected candidate test results: ${JSON.stringify({ total: report.numTotalTests, failed: report.numFailedTests, passed: passed.map((t) => t.fullName) })}`);
+          console.log(JSON.stringify({
+            runnerStatus,
+            total: report.numTotalTests,
+            failed: failed.map((test) => ({ name: test.fullName, failureMessages: test.failureMessages.map((message) => message.slice(0, 4000)) })),
+            passed: passed.map((test) => test.fullName),
+          }, null, 2));
+          if (runnerStatus !== 0 || report.numTotalTests !== 6 || report.numFailedTests !== 0 || report.numPassedTests !== 6 || passed.length !== 6 || !passed.some((test) => test.fullName.includes(target))) {
+            throw new Error('Candidate real-transport/SQLite regression and sibling controls did not all pass.');
           }
           console.log('PASS: all six real-transport/SQLite regression and sibling-control cases passed.');
           NODE
