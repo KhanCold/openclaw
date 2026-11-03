@@ -120,6 +120,8 @@ jobs:
           set -euo pipefail
           git show "$BASE_SHA:extensions/memory-core/src/memory/manager-search-orchestration.ts" > extensions/memory-core/src/memory/manager-search-orchestration.ts
           test "$(git hash-object extensions/memory-core/src/memory/manager-search-orchestration.ts)" = "$BASE_SOURCE_BLOB"
+          git checkout --quiet "$CANDIDATE_SHA" -- extensions/memory-core/src/chunking-upgrade-real-transport.test.ts
+          test "$(git hash-object extensions/memory-core/src/chunking-upgrade-real-transport.test.ts)" = "$CANDIDATE_TEST_BLOB"
           started="$(date +%s)"
           set +e
           OPENCLAW_VITEST_RUNTIME=node corepack pnpm test extensions/memory-core/src/chunking-upgrade-real-transport.test.ts --maxWorkers=1 --reporter=json --outputFile="$PROOF_DIR/base-red.json" > "$PROOF_DIR/base-red.log" 2>&1
@@ -156,6 +158,7 @@ jobs:
           set -euo pipefail
           git checkout --quiet "$CANDIDATE_SHA" -- extensions/memory-core/src/memory/manager-search-orchestration.ts
           test "$(git hash-object extensions/memory-core/src/memory/manager-search-orchestration.ts)" = "$CANDIDATE_SOURCE_BLOB"
+          test "$(git hash-object extensions/memory-core/src/chunking-upgrade-real-transport.test.ts)" = "$CANDIDATE_TEST_BLOB"
           started="$(date +%s)"
           OPENCLAW_VITEST_RUNTIME=node corepack pnpm test extensions/memory-core/src/chunking-upgrade-real-transport.test.ts --maxWorkers=1 --reporter=json --outputFile="$PROOF_DIR/candidate-green.json" > "$PROOF_DIR/candidate-green.log" 2>&1
           elapsed=$(( $(date +%s) - started ))
