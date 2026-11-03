@@ -2,7 +2,7 @@ name: Workboard appearance reset isolated proof
 
 on:
   push:
-    branches: [proof/workboard-appearance-reset-current-main-2026-11-03]
+    branches: [proof/workboard-appearance-reset-current-main-2026-11-02]
 
 permissions:
   contents: read
@@ -98,7 +98,7 @@ jobs:
           set -euo pipefail
           git reset --hard "$CANDIDATE_SHA_PIN"
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA_PIN"
-          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(git cat-file -p HEAD | sed -n 's/^parent //p')" = "$BASE_SHA"
           test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
           test "$(git rev-parse HEAD:extensions/workboard/src/tools-orchestration.ts)" = "$SOURCE_BLOB"
           test "$(git rev-parse HEAD:extensions/workboard/src/tools-board-appearance.test.ts)" = "$TEST_BLOB"
