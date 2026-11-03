@@ -297,8 +297,20 @@ export abstract class MemorySearchOrchestration extends MemorySearchRetrieval {
         }
       }
       const indexIdentity = refreshSearchIdentity();
+      // A compatible published keyword generation remains readable while the
+      // lifecycle-owned maintenance manager rebuilds the newer format in the
+      // background. The identity owner withholds this classification when the
+      // configured corpus or FTS index cannot safely use those keyword rows.
+      const formatUpgradePendingKeywordOnly = (state: MemoryIndexIdentityState): boolean =>
+        state.status === "mismatched" &&
+        state.owner === "openclaw" &&
+        state.versionOrder === "older" &&
+        (state.chunkingVersionOnly === true || state.lexicalCompatible === true) &&
+        this.fts.enabled &&
+        this.fts.available;
       const shouldRepairIdentity =
         hasIndexedContent &&
+        !hasPendingKeywordFormatUpgrade &&
         (indexIdentity.status === "missing" ||
           (searchSyncEnabled &&
             indexIdentity.status === "mismatched" &&
@@ -341,15 +353,6 @@ export abstract class MemorySearchOrchestration extends MemorySearchRetrieval {
       ) {
         repairedIndexIdentity = refreshSearchIdentity();
       }
-      // Format upgrades retain keyword rows only when the identity owner confirms
-      // that every corpus constraint still matches; source/scope changes fail closed.
-      const formatUpgradePendingKeywordOnly = (state: MemoryIndexIdentityState): boolean =>
-        state.status === "mismatched" &&
-        state.owner === "openclaw" &&
-        state.versionOrder === "older" &&
-        (state.chunkingVersionOnly === true || state.lexicalCompatible === true) &&
-        this.fts.enabled &&
-        this.fts.available;
       if (repairedIndexIdentity.status !== "valid") {
         if (!formatUpgradePendingKeywordOnly(repairedIndexIdentity)) {
           return [];
@@ -367,11 +370,19 @@ export abstract class MemorySearchOrchestration extends MemorySearchRetrieval {
       const capacitySyncInFlight =
         (this.memoryWatchCapacityDegraded || this.memoryWatchUnavailable) &&
         this.activeBackgroundSearchSyncs.size > 0;
+      const startFormatUpgradeMaintenance =
+        searchSyncEnabled &&
+        formatUpgradePendingKeywordOnly(repairedIndexIdentity) &&
+        !capacitySyncInFlight &&
+        this.activeBackgroundSearchSyncs.size === 0;
+      if (startFormatUpgradeMaintenance) {
+        this.markConfiguredSourcesForFullReindex();
+      }
       if (
         searchSyncEnabled &&
         !capacitySyncInFlight &&
-        !formatUpgradePendingKeywordOnly(repairedIndexIdentity) &&
-        this.dirty
+        (startFormatUpgradeMaintenance ||
+          (!formatUpgradePendingKeywordOnly(repairedIndexIdentity) && this.dirty))
       ) {
         const trackedSearchSync = this.syncPublishedIndexInBackground({ reason: "search" })
           .catch((err: unknown) => {

@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { json } from "node:stream/consumers";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { MEMORY_CHUNKING_VERSION } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import {
@@ -41,6 +42,14 @@ function errorBody(mode: Exclude<ServerMode, "ok">): Record<string, unknown> {
 async function startEmbeddingServer() {
   const requests: Array<{ status: number; body: Record<string, unknown> }> = [];
   let mode: ServerMode = "ok";
+  let heldEmbedding:
+    | {
+        marker: string;
+        started: ReturnType<typeof createDeferred<void>>;
+        release: ReturnType<typeof createDeferred<void>>;
+      }
+    | undefined;
+  const heldReleases = new Set<ReturnType<typeof createDeferred<void>>>();
   const respond = (res: ServerResponse, status: number, body: Record<string, unknown>) => {
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
@@ -58,6 +67,16 @@ async function startEmbeddingServer() {
         requests.push({ status: 200, body });
         const input = body.input;
         const texts = Array.isArray(input) ? input : [input];
+        const held = heldEmbedding;
+        if (held && texts.some((text) => typeof text === "string" && text.includes(held.marker))) {
+          heldEmbedding = undefined;
+          held.started.resolve();
+          await held.release.promise;
+          heldReleases.delete(held.release);
+        }
+        if (res.destroyed) {
+          return;
+        }
         respond(res, 200, {
           object: "list",
           data: texts.map((text, index) => ({
@@ -69,7 +88,9 @@ async function startEmbeddingServer() {
         });
       } catch (error) {
         requests.push({ status: 500, body: {} });
-        respond(res, 500, { error: { message: String(error) } });
+        if (!res.destroyed) {
+          respond(res, 500, { error: { message: String(error) } });
+        }
       }
     })();
   });
@@ -80,10 +101,21 @@ async function startEmbeddingServer() {
     setMode: (next: ServerMode) => {
       mode = next;
     },
-    close: () =>
-      new Promise<void>((resolve, reject) => {
+    holdEmbeddingContaining: (marker: string) => {
+      const started = createDeferred<void>();
+      const release = createDeferred<void>();
+      heldEmbedding = { marker, started, release };
+      heldReleases.add(release);
+      return { started: started.promise, release: () => release.resolve() };
+    },
+    close: () => {
+      for (const release of heldReleases) {
+        release.resolve();
+      }
+      return new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
-      }),
+      });
+    },
   };
   closeServers.push(fixture.close);
   return fixture;
@@ -187,6 +219,18 @@ async function searchTool(cfg: OpenClawConfig, query: string) {
   }
 }
 
+function persistentSearchTool(cfg: OpenClawConfig) {
+  const tool = createMemorySearchTool({
+    config: cfg,
+    agentId: "main",
+    runInBackgroundContext: runInMemoryTestBackgroundContext,
+  });
+  if (!tool) {
+    throw new Error("memory_search tool missing");
+  }
+  return tool;
+}
+
 function expectPaused(details: unknown) {
   expect(details).toMatchObject({
     results: [],
@@ -286,4 +330,62 @@ it("keeps keyword results readable when a real quota-exhausted server rate-limit
   }
   // Backoff races search fallback; the policy unit tests own the exact retry budget.
   expect(server.requests.some((request) => request.status === 429)).toBe(true);
+});
+
+it("serves the published keyword generation while a real format rebuild is held", async () => {
+  const server = await startEmbeddingServer();
+  const cfg = createConfig({ baseUrl: server.baseUrl });
+  const filePath = path.join(memory, "HeldFormatUpgrade.md");
+  await fs.writeFile(filePath, "Legacy orchid cobalt marker.");
+  const dbPath = await seedPriorFormatIndex(cfg);
+  const updatedText = "Current jade quartz marker.";
+  await fs.writeFile(filePath, updatedText);
+  const held = server.holdEmbeddingContaining(updatedText);
+  const manager = await acquireManager(cfg);
+  const tool = persistentSearchTool(cfg);
+  vi.useFakeTimers();
+  const search = tool.execute("legacy-format-query", {
+    query: "orchid cobalt",
+    corpus: "memory",
+  });
+  try {
+    await held.started;
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await search;
+    expect(result.details).toMatchObject({
+      results: [expect.objectContaining({ path: "memory/HeldFormatUpgrade.md" })],
+    });
+    expect(result.details).toMatchObject({
+      results: expect.arrayContaining([
+        expect.objectContaining({ snippet: expect.stringContaining("Legacy orchid cobalt marker") }),
+      ]),
+    });
+  } finally {
+    held.release();
+    vi.useRealTimers();
+    await search.catch(() => undefined);
+  }
+  await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
+  {
+    using db = new DatabaseSync(dbPath);
+    const row = db
+      .prepare("SELECT value FROM memory_index_meta WHERE key = 'memory_index_meta_v1'")
+      .get();
+    const meta = JSON.parse(String(row?.value)) as Record<string, unknown>;
+    expect(meta.chunkingVersion).toBe(MEMORY_CHUNKING_VERSION);
+  }
+  const current = await tool.execute("current-format-query", {
+    query: "jade quartz",
+    corpus: "memory",
+  });
+  expect(current.details).toMatchObject({
+    results: [expect.objectContaining({ path: "memory/HeldFormatUpgrade.md" })],
+  });
+  const stale = await tool.execute("stale-format-query", {
+    query: "orchid cobalt",
+    corpus: "memory",
+  });
+  expect(stale.details).not.toMatchObject({
+    results: [expect.objectContaining({ path: "memory/HeldFormatUpgrade.md" })],
+  });
 });
