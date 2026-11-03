@@ -1,5 +1,6 @@
 name: Workboard appearance reset isolated proof
 
+# Scope this secretless run to its dedicated evidence branch.
 on:
   push:
     branches: [proof/workboard-appearance-reset-current-main-2026-11-03]
