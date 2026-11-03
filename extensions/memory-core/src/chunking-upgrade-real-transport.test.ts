@@ -399,7 +399,17 @@ it("serves the published keyword generation while a real format rebuild is held"
     query: "orchid cobalt",
     corpus: "memory",
   });
-  expect(stale.details).not.toMatchObject({
-    results: [expect.objectContaining({ path: "memory/HeldFormatUpgrade.md" })],
-  });
+  const staleDetails = stale.details as {
+    results?: Array<{ path?: string; snippet?: string }>;
+  };
+  const staleTextResults = (staleDetails.results ?? []).filter(
+    (hit) =>
+      hit.path === "memory/HeldFormatUpgrade.md" &&
+      hit.snippet?.includes("Legacy orchid cobalt marker"),
+  );
+  if (staleTextResults.length > 0) {
+    throw new Error(
+      `Old indexed text remained after the rebuild: ${JSON.stringify(staleTextResults)}`,
+    );
+  }
 });
