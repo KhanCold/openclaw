@@ -1,0 +1,116 @@
+name: Workboard appearance reset isolated proof (main 19fc)
+
+on:
+  push:
+    branches: [proof/workboard-appearance-reset-main-19fc-2026-11-03]
+
+permissions:
+  contents: read
+
+jobs:
+  workboard-proof:
+    if: github.repository == 'KhanCold/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CI: "true"
+      COREPACK_HOME: /tmp/openclaw-workboard-appearance-corepack
+      BASE_SHA: 19fc93a4f2ac85acd6e5f0986e1f461816a912ce
+      BASE_TREE: 77c49e71df66c532f8a8213d5db3ff05ca918224
+      CANDIDATE_BRANCH: task/2026-11-03-workboard-appearance-reset-main-19fc
+      CANDIDATE_SHA_PIN: 5ee01df80b19957b590633b3ed411b18f3b0f1f2
+      CANDIDATE_TREE: 50a0a1aa1cb91ac0234f1d9f1e3aa84778585a42
+      EXPECTED_CANDIDATE_SHA: 5ee01df80b19957b590633b3ed411b18f3b0f1f2
+      EXPECTED_CANDIDATE_TREE: 50a0a1aa1cb91ac0234f1d9f1e3aa84778585a42
+      BASE_SOURCE_BLOB: 22a0f4305cac4353ab5acb5829e23a53191d9b00
+      SOURCE_BLOB: 30626572ff682b1d0fa44a513f751c9e794c0bea
+      BASE_TEST_BLOB: 8b87cdb1eda8c4df0be2365a9facb770dc3f2cea
+      TEST_BLOB: c4b26dea4cf014d815bf588846f65a1a5d95a575
+    steps:
+      - name: Checkout evidence snapshot without retaining credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Capture proof inputs and verify exact commit identities
+        run: |
+          set -euo pipefail
+          git show "$GITHUB_SHA:proof/workboard-appearance-reset-19fc-running-agent.mjs" > /tmp/workboard-running-agent.mjs
+          git show "$GITHUB_SHA:proof/workboard-appearance-reset-19fc-assert-vitest.mjs" > /tmp/assert-workboard-vitest.mjs
+          git show "$GITHUB_SHA:.github/workflows/proof-workboard-appearance-reset-19fc.yml" > /tmp/proof-workboard-reset.yml
+          git fetch --no-tags --depth=1 https://github.com/openclaw/openclaw.git "$BASE_SHA"
+          git fetch --no-tags --depth=1 https://github.com/KhanCold/openclaw.git "refs/heads/$CANDIDATE_BRANCH:refs/remotes/proof/candidate"
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA_PIN"
+          test "$(git rev-parse "$BASE_SHA^{tree}")" = "$BASE_TREE"
+          test "$(git rev-parse "$CANDIDATE_SHA_PIN^{tree}")" = "$CANDIDATE_TREE"
+          test "$(git rev-parse "$BASE_SHA:extensions/workboard/src/tools-orchestration.ts")" = "$BASE_SOURCE_BLOB"
+          test "$(git rev-parse "$BASE_SHA:extensions/workboard/src/tools.test.ts")" = "$BASE_TEST_BLOB"
+          test "$(git rev-parse "$CANDIDATE_SHA_PIN:extensions/workboard/src/tools-orchestration.ts")" = "$SOURCE_BLOB"
+          test "$(git rev-parse "$CANDIDATE_SHA_PIN:extensions/workboard/src/tools.test.ts")" = "$TEST_BLOB"
+          raw_commit="$(git cat-file -p "$CANDIDATE_SHA_PIN")"
+          test "$(printf '%s\n' "$raw_commit" | sed -n 's/^parent //p')" = "$BASE_SHA"
+          test "$(printf '%s\n' "$raw_commit" | sed -n 's/^tree //p')" = "$CANDIDATE_TREE"
+          test "$(git diff --name-only "$BASE_SHA" "$CANDIDATE_SHA_PIN" | LC_ALL=C sort)" = "$(printf '%s\n' extensions/workboard/src/tools-orchestration.ts extensions/workboard/src/tools.test.ts | LC_ALL=C sort)"
+          git diff --numstat "$BASE_SHA" "$CANDIDATE_SHA_PIN"
+
+      - name: Pinned Node without dependency cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+          package-manager-cache: false
+
+      - name: Pinned package manager and frozen install
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts corepack@0.34.6
+          corepack enable
+          test "$(pnpm --version)" = "12.15.0"
+          pnpm install --frozen-lockfile
+
+      - name: Expected-red focused regression on unchanged base source
+        run: |
+          set -euo pipefail
+          git checkout --detach "$BASE_SHA"
+          git show "$CANDIDATE_SHA_PIN:extensions/workboard/src/tools.test.ts" > extensions/workboard/src/tools.test.ts
+          test "$(git rev-parse HEAD:extensions/workboard/src/tools-orchestration.ts)" = "$BASE_SOURCE_BLOB"
+          test "$(git hash-object extensions/workboard/src/tools.test.ts)" = "$TEST_BLOB"
+          set +e
+          pnpm test:extension workboard extensions/workboard/src/tools.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-baseline-vitest.json --testNamePattern="validates board appearance resets and exposes lifecycle tools" >/tmp/workboard-baseline-vitest.log 2>&1
+          test_status=$?
+          set -e
+          test "$test_status" -eq 1
+          test -s /tmp/workboard-baseline-vitest.json
+          node /tmp/assert-workboard-vitest.mjs baseline /tmp/workboard-baseline-vitest.json
+          tail -n 40 /tmp/workboard-baseline-vitest.log
+
+      - name: Candidate focused regression green
+        run: |
+          set -euo pipefail
+          git restore extensions/workboard/src/tools.test.ts
+          git checkout --detach "$CANDIDATE_SHA_PIN"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git rev-parse HEAD:extensions/workboard/src/tools-orchestration.ts)" = "$SOURCE_BLOB"
+          test "$(git rev-parse HEAD:extensions/workboard/src/tools.test.ts)" = "$TEST_BLOB"
+          pnpm test:extension workboard extensions/workboard/src/tools.test.ts --maxWorkers=1 --reporter=json --outputFile=/tmp/workboard-candidate-vitest.json --testNamePattern="validates board appearance resets and exposes lifecycle tools" >/tmp/workboard-candidate-vitest.log 2>&1
+          node /tmp/assert-workboard-vitest.mjs candidate /tmp/workboard-candidate-vitest.json
+          tail -n 40 /tmp/workboard-candidate-vitest.log
+
+      - name: Built CLI discovery dispatch keep clear and persistent readback
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v pnpm build:runtime
+          /usr/bin/time -v node /tmp/workboard-running-agent.mjs
+
+      - name: Scoped formatter lint types ratchet and workflow checks
+        run: |
+          set -euo pipefail
+          mkdir -p .github/workflows
+          cp /tmp/proof-workboard-reset.yml .github/workflows/proof-workboard-appearance-reset-19fc.yml
+          pnpm check:workflows
+          pnpm format:check -- extensions/workboard/src/tools-orchestration.ts extensions/workboard/src/tools.test.ts
+          pnpm lint -- --files-json '["extensions/workboard/src/tools-orchestration.ts","extensions/workboard/src/tools.test.ts"]'
+          pnpm tsgo:extensions
+          pnpm tsgo:extensions:test
+          pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA_PIN"
