@@ -352,14 +352,28 @@ it("serves the published keyword generation while a real format rebuild is held"
     await held.started;
     await vi.advanceTimersByTimeAsync(30_000);
     const result = await search;
-    expect(result.details).toMatchObject({
-      results: [expect.objectContaining({ path: "memory/HeldFormatUpgrade.md" })],
-    });
-    expect(result.details).toMatchObject({
-      results: expect.arrayContaining([
-        expect.objectContaining({ snippet: expect.stringContaining("Legacy orchid cobalt marker") }),
-      ]),
-    });
+    const heldDetails = result.details as {
+      results?: Array<{ path?: string; snippet?: string }>;
+      disabled?: boolean;
+      unavailable?: boolean;
+      timedOut?: boolean;
+      error?: unknown;
+    };
+    const hasPublishedLegacyResult = heldDetails.results?.some(
+      (hit) =>
+        hit.path === "memory/HeldFormatUpgrade.md" &&
+        hit.snippet?.includes("Legacy orchid cobalt marker"),
+    );
+    if (!hasPublishedLegacyResult) {
+      throw new Error(
+        `Expected the published keyword result while the rebuild was held; received ${JSON.stringify({
+          disabled: heldDetails.disabled,
+          unavailable: heldDetails.unavailable,
+          timedOut: heldDetails.timedOut,
+          error: heldDetails.error,
+        })}`,
+      );
+    }
   } finally {
     held.release();
     vi.useRealTimers();
