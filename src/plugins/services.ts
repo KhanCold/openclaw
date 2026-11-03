@@ -6,6 +6,7 @@ import { waitForDiagnosticEventsDrained } from "../infra/diagnostic-events.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { readOnlyWorkerScope } from "../infra/sqlite-readonly-worker-context.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { runOutsideGatewayRootWorkAdmission } from "../process/gateway-work-admission.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { createPluginRuntimeCapabilityLease } from "./capability-lease.js";
@@ -646,18 +647,21 @@ async function startPreparedPluginServices({
               withPluginServiceScheduler(scheduling.scheduler, () => service.start(serviceContext)),
             );
           // Reload may originate in an RPC or tool; background work captures
-          // service-owned Gateway/worker context, never that caller's authority or generation.
+          // service-owned Gateway/worker context, never the caller's authority,
+          // generation, or root admission.
           await runOutsideOperatorToolGatewayAuthority(() =>
             runOutsidePluginRuntimeGenerationScope(() =>
               pluginInstanceInvocation.exit(() =>
                 runServiceStart(async () =>
-                  withPluginHttpRouteRegistry(
-                    registry,
-                    () =>
-                      ownedService.startupConsumer
-                        ? ownedService.startupConsumer.run(start)
-                        : start(),
-                    lease,
+                  runOutsideGatewayRootWorkAdmission(() =>
+                    withPluginHttpRouteRegistry(
+                      registry,
+                      () =>
+                        ownedService.startupConsumer
+                          ? ownedService.startupConsumer.run(start)
+                          : start(),
+                      lease,
+                    ),
                   ),
                 ),
               ),

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { AsyncResource } from "node:async_hooks";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { queryObjects } from "node:v8";
 import { expect, it } from "vitest";
@@ -16,6 +16,11 @@ import {
   readOnlyWorkerScope,
 } from "../infra/sqlite-readonly-worker-context.js";
 import { createAuthRateLimiter } from "../plugin-sdk/webhook-ingress.js";
+import { enqueueCommandInLane as enqueue } from "../process/command-queue.js";
+import {
+  runWithGatewayRootWorkAdmissionForTest,
+} from "../process/gateway-work-admission.test-helpers.js";
+import { CommandLane } from "../process/lanes.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
@@ -178,7 +183,7 @@ it.each([undefined, false])(
   },
 );
 
-it("owns service callbacks after startup and reload callers finish", async () => {
+it("does not retain the startup request root in service callbacks", async () => {
   class CallerFacts {
     readonly owner = "service-start-caller";
   }
@@ -188,11 +193,11 @@ it("owns service callbacks after startup and reload callers finish", async () =>
   const { registry, record, instance, clock, scheduler } = fixture("scheduled-context");
   bindPluginRegistryRuntime(registry, runtime);
   const scopes: PluginServiceSchedulerV1[] = [];
-  const resources: AsyncResource[] = [];
+  const serviceContexts: Array<ReturnType<typeof AsyncLocalStorage.snapshot>> = [];
   const firstConfig = { browser: { enabled: false } };
   const nextConfig = { browser: { enabled: true } };
   const configs: unknown[] = [];
-  let observations = 0;
+  const observations: boolean[] = [];
   const registerRoute = (path: string) =>
     registerPluginHttpRoute({
       path,
@@ -201,16 +206,18 @@ it("owns service callbacks after startup and reload callers finish", async () =>
       pluginId: record.id,
       throwOnFailure: true,
     });
-  const observe = async () => {
-    await Promise.resolve();
+  const observe = () => serviceContexts.at(-1)!(async () => {
+    observations.push(await enqueue(CommandLane.Subagent, async () => true).catch(() => false));
     expect(readOnlyWorkerScope.getStore()?.active).toBe(true);
     expect(pluginInstanceInvocation.getStore()?.instance).toBe(instance);
     expect(instance.hasActiveCall).toBe(true);
     expect(getInProcessGatewayRequestContext()).toBe(context);
     expect(getPluginRuntimeGatewayRequestScope()?.client).toBeUndefined();
+    expect(getPluginRuntimeGatewayRequestScope()?.pluginRegistry).toBe(registry);
+    expect(resolvePluginServiceScheduler()).toBe(scopes.at(-1));
     expect(readOperatorToolGatewayAuthority()).toBeUndefined();
-    registerRoute(`/scheduled-context/${++observations}`);
-  };
+    registerRoute(`/scheduled-context/${observations.length}`);
+  });
   registry.services.push({
     id: "scheduled-context",
     pluginId: record.id,
@@ -222,7 +229,7 @@ it("owns service callbacks after startup and reload callers finish", async () =>
       start({ scheduler: serviceScheduler, config }) {
         scopes.push(serviceScheduler);
         configs.push(config);
-        resources.push(new AsyncResource("service-start", { requireManualDestroy: true }));
+        serviceContexts.push(AsyncLocalStorage.snapshot());
         expect(isPluginRegistryPreparing(registry)).toBe(true);
         registerRoute(`/scheduled-start/${scopes.length}`);
         resolvePluginServiceScheduler().schedule({ id: "startup", delayMs: 1, run: observe });
@@ -272,11 +279,11 @@ it("owns service callbacks after startup and reload callers finish", async () =>
       await readers.close();
     }
   };
-  const services = await runFromRequest(() =>
+  const services = await runFromRequest(() => runWithGatewayRootWorkAdmissionForTest(() =>
     withPluginRegistryPreparationScope(registry, () =>
       startPluginServices({ registry, config: firstConfig, scheduler }),
     ),
-  );
+  ));
   try {
     await clock.advanceBy(1);
     await runFromRequest(() =>
@@ -297,14 +304,7 @@ it("owns service callbacks after startup and reload callers finish", async () =>
     await nextTurn();
     expect(queryObjects(CallerFacts)).toBe(0);
     expect(configs).toEqual([firstConfig, nextConfig]);
-    resources[1]!.runInAsyncScope(() => {
-      expect(getInProcessGatewayRequestContext()).toBe(context);
-      expect(getPluginRuntimeGatewayRequestScope()?.client).toBeUndefined();
-      expect(getPluginRuntimeGatewayRequestScope()?.pluginRegistry).toBe(registry);
-      expect(resolvePluginServiceScheduler()).toBe(scopes[1]);
-      expect(readOperatorToolGatewayAuthority()).toBeUndefined();
-    });
-    expect(observations).toBe(3);
+    expect(observations).toEqual([true, true, true]);
     expect(scopes[0]!.signal.aborted).toBe(true);
     expect(scopes[1]!.signal.aborted).toBe(false);
     expect(() => scopes[0]!.schedule({ id: "retired", delayMs: 0, run: observe })).toThrow(
@@ -317,9 +317,6 @@ it("owns service callbacks after startup and reload callers finish", async () =>
     await services.stop();
     expect(registry.httpRoutes).toHaveLength(0);
   } finally {
-    for (const resource of resources) {
-      resource.emitDestroy();
-    }
     await services.stop();
     await scheduler.stop();
     await instance.dispose();
