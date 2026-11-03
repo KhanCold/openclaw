@@ -8,6 +8,7 @@ import {
   readOperatorToolGatewayAuthority,
   runWithOperatorToolGatewayAuthority,
 } from "../gateway/operator-tool-gateway-authority.js";
+import { createGatewaySubagentRuntime } from "../gateway/server-plugin-subagent-runtime.js";
 import { createSyntheticPluginRuntimeClient } from "../gateway/server-plugin-runtime-client.js";
 import { createGatewayRequestContext } from "../gateway/server-request-context.js";
 import { makeContextParams } from "../gateway/server-request-context.test-support.js";
@@ -16,11 +17,9 @@ import {
   readOnlyWorkerScope,
 } from "../infra/sqlite-readonly-worker-context.js";
 import { createAuthRateLimiter } from "../plugin-sdk/webhook-ingress.js";
-import { enqueueCommandInLane as enqueue } from "../process/command-queue.js";
 import {
   runWithGatewayRootWorkAdmissionForTest,
 } from "../process/gateway-work-admission.test-helpers.js";
-import { CommandLane } from "../process/lanes.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
@@ -188,6 +187,7 @@ it("does not retain the startup request root in service callbacks", async () => 
     readonly owner = "service-start-caller";
   }
   const context = createGatewayRequestContext(makeContextParams());
+  const subagentRuntime = createGatewaySubagentRuntime(() => context);
   const runtime = createPluginRuntime();
   bindGatewayContextResolver(runtime, () => context);
   const { registry, record, instance, clock, scheduler } = fixture("scheduled-context");
@@ -207,7 +207,10 @@ it("does not retain the startup request root in service callbacks", async () => 
       throwOnFailure: true,
     });
   const observe = () => serviceContexts.at(-1)!(async () => {
-    observations.push(await enqueue(CommandLane.Subagent, async () => true).catch(() => false));
+    await expect(
+      subagentRuntime.complete({ agentId: "main", message: "Summarize the finished call." }),
+    ).rejects.toThrow("No model configured for agent main.");
+    observations.push(true);
     expect(readOnlyWorkerScope.getStore()?.active).toBe(true);
     expect(pluginInstanceInvocation.getStore()?.instance).toBe(instance);
     expect(instance.hasActiveCall).toBe(true);
