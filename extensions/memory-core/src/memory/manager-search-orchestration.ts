@@ -310,7 +310,7 @@ export abstract class MemorySearchOrchestration extends MemorySearchRetrieval {
         this.fts.available;
       const shouldRepairIdentity =
         hasIndexedContent &&
-        !hasPendingKeywordFormatUpgrade &&
+        !formatUpgradePendingKeywordOnly(indexIdentity) &&
         (indexIdentity.status === "missing" ||
           (searchSyncEnabled &&
             indexIdentity.status === "mismatched" &&
