@@ -133,6 +133,10 @@ jobs:
             throw new Error(`Unexpected baseline test results: ${JSON.stringify({ total: report.numTotalTests, failed: failed.map((t) => t.fullName), passed: passed.length })}`);
           }
           const failure = failed[0].failureMessages.join('\n');
+          console.log(JSON.stringify({
+            baselineFailure: failed[0].fullName,
+            failureMessages: failed[0].failureMessages.map((message) => message.slice(0, 4000)),
+          }, null, 2));
           if (!failure.includes('memory_search timed out after 30s')) {
             throw new Error('The held-rebuild regression failed without the expected memory_search deadline result.');
           }
