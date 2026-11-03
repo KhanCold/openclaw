@@ -1,0 +1,100 @@
+name: plugin-init-current-main-ratchet-0ad251
+
+on:
+  push:
+    branches:
+      - proof/plugin-init-ratchet-0ad251
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-init-ratchet:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BASE_SHA: 0ad25113167c7c645429fa9db11b5cb3ad69a9ec
+      CANDIDATE_SHA: 63d28373cc371f5e13076bc8d0bdd38c07cfa6d8
+      CANDIDATE_REF: task/2026-11-03-plugin-init-current-main-0ad251
+      BASE_TREE: 9336ceaebf45ce6536e83f2720f042b90fc1c4ad
+      CANDIDATE_TREE: d4d16c989812be51eb29dedeae87e9a71c5372fa
+      SOURCE_BLOB: ec46aecc9a48d1d2ecf921549684504cd996ad80
+      TEST_BLOB: 936cd5763339888cb8d88a64935afa67dcbf450f
+      ALLOCATION_BLOB: 8f92bfdd49766b1907d4aec8d3b0f9ed6129d0e6
+      REPO_DIR: ${{ github.workspace }}/.proof-checkout
+    steps:
+      - name: Checkout proof branch without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Node.js without package cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Fetch exact upstream base and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$REPO_DIR"
+          git -C "$REPO_DIR" init --quiet
+          git -C "$REPO_DIR" remote add upstream https://github.com/openclaw/openclaw.git
+          git -C "$REPO_DIR" remote add fork https://github.com/KhanCold/openclaw.git
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 upstream "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$BASE_SHA"
+          git -C "$REPO_DIR" fetch --no-tags --depth=1 fork "refs/heads/$CANDIDATE_REF"
+          test "$(git -C "$REPO_DIR" rev-parse FETCH_HEAD)" = "$CANDIDATE_SHA"
+          headers="$(git -C "$REPO_DIR" cat-file -p "$CANDIDATE_SHA" | sed -n '1,/^$/p')"
+          printf '%s\n' "$headers" | grep -Fxq "tree $CANDIDATE_TREE"
+          parents="$(printf '%s\n' "$headers" | sed -n 's/^parent //p')"
+          test "$parents" = "$BASE_SHA"
+          test "$(git -C "$REPO_DIR" rev-parse "$BASE_SHA^{tree}")" = "$BASE_TREE"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring-command.ts")" = "$SOURCE_BLOB"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:src/cli/plugins-authoring.process.test.ts")" = "$TEST_BLOB"
+          test "$(git -C "$REPO_DIR" rev-parse "$CANDIDATE_SHA:config/test-lines-allocations/plugins-init-expected-errors-2026-10-29.txt")" = "$ALLOCATION_BLOB"
+          expected_paths="$(printf '%s\n' \
+            config/test-lines-allocations/plugins-init-expected-errors-2026-10-29.txt \
+            src/cli/plugins-authoring-command.ts \
+            src/cli/plugins-authoring.process.test.ts | LC_ALL=C sort)"
+          actual_paths="$(git -C "$REPO_DIR" diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | LC_ALL=C sort)"
+          test "$actual_paths" = "$expected_paths"
+          git -C "$REPO_DIR" checkout --quiet --detach "$CANDIDATE_SHA"
+          git -C "$REPO_DIR" diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          printf 'Base: %s\nCandidate: %s\nTree: %s\nParent: %s\nPaths:\n%s\n' "$BASE_SHA" "$CANDIDATE_SHA" "$CANDIDATE_TREE" "$parents" "$actual_paths"
+
+      - name: Install locked dependencies without lifecycle scripts
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack enable
+          printf 'Node: %s\nPnpm: %s\n' "$(node --version)" "$(corepack pnpm --version)"
+          corepack pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      - name: Check current-main test-line and line-cap ratchets
+        shell: bash
+        working-directory: ${{ github.workspace }}/.proof-checkout
+        run: |
+          set -euo pipefail
+          corepack pnpm check:test-lines-ratchet --base "$BASE_SHA" --no-merge-base
+          corepack pnpm check:line-cap-ratchet --base "$BASE_SHA" --no-merge-base
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+
+      - name: Record exact evidence
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Plugin-init current-main ratchet proof'
+            echo
+            echo "- Workflow commit: $GITHUB_SHA"
+            echo "- Base: $BASE_SHA ($BASE_TREE)"
+            echo "- Candidate: $CANDIDATE_SHA ($CANDIDATE_TREE)"
+            echo "- Candidate ref: KhanCold/openclaw:$CANDIDATE_REF"
+            echo '- Runner: GitHub-hosted public ubuntu-24.04; actions pinned; Node 24.22.1.'
+            echo '- Permissions: contents: read; checkout credentials not persisted; package-manager cache disabled; no secrets, OIDC, environment, self-hosted runner or artifact upload.'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
