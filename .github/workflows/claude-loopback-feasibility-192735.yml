@@ -1,4 +1,4 @@
-name: Claude loopback feasibility 192735
+name: Claude CLI local-model feasibility 192735
 on:
   push:
     branches: [proof/192735-claude-loopback-20261104]
@@ -6,46 +6,61 @@ permissions: {}
 jobs:
   probe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 20
     steps:
-      - name: Install pinned public Claude Code
+      - name: Build pinned llama.cpp server
+        shell: bash
         run: |
-          node --version
+          git init "$RUNNER_TEMP/llama"
+          git -C "$RUNNER_TEMP/llama" fetch --depth=1 https://github.com/ggml-org/llama.cpp.git 8642541b255bfb5dc39cd351a178be09013a55d6
+          git -C "$RUNNER_TEMP/llama" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/llama" rev-parse HEAD)" = 8642541b255bfb5dc39cd351a178be09013a55d6
+          cmake -S "$RUNNER_TEMP/llama" -B "$RUNNER_TEMP/llama-build" -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/llama-build" --target llama-server --parallel 2
+      - name: Fetch checksum-pinned public model and CLI
+        shell: bash
+        run: |
+          curl --fail --location --max-time 300 -o "$RUNNER_TEMP/model.gguf" https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/df5bf01389a39c743ab467d734bf501681e041c5/qwen2.5-0.5b-instruct-q4_k_m.gguf
+          echo "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db  $RUNNER_TEMP/model.gguf" | sha256sum --check
           npm install --prefix "$RUNNER_TEMP/claude-proof" --no-audit --no-fund @anthropic-ai/claude-code@2.1.222
-      - name: Exercise real CLI against a synthetic local endpoint
+      - name: Exercise real CLI and local model
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/probe.py" <<'PY'
-          import http.server, threading, subprocess, tempfile, os, json
-          class Handler(http.server.BaseHTTPRequestHandler):
-              calls=[]
-              payloads=[]
-              def log_message(self, *args): pass
-              def do_POST(self):
-                  n=int(self.headers.get('Content-Length','0')); body=self.rfile.read(n)
-                  self.calls.append(self.path); self.payloads.append(body)
-                  events=[{'type':'message_start','message':{'id':'msg_synthetic','type':'message','role':'assistant','model':'claude-sonnet-4-5','content':[],'stop_reason':None,'stop_sequence':None,'usage':{'input_tokens':10,'output_tokens':1}}},{'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}},{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'SYNTHETIC_OK'}},{'type':'content_block_stop','index':0},{'type':'message_delta','delta':{'stop_reason':'end_turn','stop_sequence':None},'usage':{'output_tokens':3}},{'type':'message_stop'}]
-                  data=''.join('event: '+e['type']+'\n'+'data: '+json.dumps(e)+'\n\n' for e in events).encode()
-                  self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
-          with tempfile.TemporaryDirectory(prefix='oc-claude-proof-') as t:
-              server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
-              threading.Thread(target=server.serve_forever,daemon=True).start()
-              env={'PATH':os.environ['PATH'],'HOME':t,'CLAUDE_CONFIG_DIR':t,'ANTHROPIC_API_KEY':'synthetic-test-key','ANTHROPIC_BASE_URL':'http://127.0.0.1:'+str(server.server_port),'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','DISABLE_TELEMETRY':'1'}
+          import json, os, subprocess, tempfile, time, urllib.request
+          with tempfile.TemporaryDirectory(prefix='oc-local-model-') as t:
+              server_path=os.path.join(os.environ['RUNNER_TEMP'],'llama-build','bin','llama-server')
+              model=os.path.join(os.environ['RUNNER_TEMP'],'model.gguf')
+              server_log=open(os.path.join(t,'server.log'),'w')
+              server=subprocess.Popen([server_path,'-m',model,'--alias','claude-sonnet-4-5','--host','127.0.0.1','--port','18333','--ctx-size','8192','--threads','2','--n-predict','64','--jinja','-ngl','0'],cwd=t,stdout=server_log,stderr=subprocess.STDOUT)
               try:
+                  deadline=time.monotonic()+120
+                  while True:
+                      if server.poll() is not None: raise RuntimeError('local model server exited before readiness')
+                      try:
+                          with urllib.request.urlopen('http://127.0.0.1:18333/health',timeout=2) as response:
+                              if response.status==200: break
+                      except Exception: pass
+                      if time.monotonic()>deadline: raise TimeoutError('local model server not ready')
+                      time.sleep(1)
+                  env={'PATH':os.environ['PATH'],'HOME':t,'CLAUDE_CONFIG_DIR':t,'ANTHROPIC_API_KEY':'synthetic-test-key','ANTHROPIC_BASE_URL':'http://127.0.0.1:18333','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','DISABLE_TELEMETRY':'1'}
                   exe=os.path.join(os.environ['RUNNER_TEMP'],'claude-proof','node_modules','.bin','claude')
-                  base=[exe,'--bare','--print','--model','claude-sonnet-4-5','--tools','','--output-format','json']
-                  marker='LOCAL_TEST_MARKER_C79A42'
-                  first=subprocess.run(base+[marker],cwd=t,env=env,text=True,capture_output=True,timeout=90)
+                  base=[exe,'--bare','--print','--model','claude-sonnet-4-5','--tools','','--max-turns','1','--system-prompt','Reply concisely.','--output-format','json']
+                  first=subprocess.run(base+['Remember the word LANTERN. Reply OK.'],cwd=t,env=env,text=True,capture_output=True,timeout=120)
                   first_result=json.loads(first.stdout)
                   session_id=first_result.get('session_id')
-                  if first.returncode != 0 or not session_id: raise RuntimeError('first CLI turn did not return a session id')
-                  second=subprocess.run(base+['--resume',session_id,'Continue'],cwd=t,env=env,text=True,capture_output=True,timeout=90)
+                  if first.returncode!=0 or not session_id: raise RuntimeError('first CLI call failed')
+                  second=subprocess.run(base+['--resume',session_id,'What word did I ask you to remember? Reply only the word.'],cwd=t,env=env,text=True,capture_output=True,timeout=120)
                   second_result=json.loads(second.stdout)
-                  resumed_context=any(marker.encode() in body for body in Handler.payloads[1:])
-                  summary={'first_exit':first.returncode,'second_exit':second.returncode,'requests':len(Handler.calls),'same_session':session_id==second_result.get('session_id'),'resumed_context':resumed_context,'synthetic_reply':'SYNTHETIC_OK' in second.stdout}
+                  result=str(second_result.get('result',''))
+                  summary={'first_exit':first.returncode,'second_exit':second.returncode,'same_session':session_id==second_result.get('session_id'),'model_recalled_marker':'LANTERN' in result.upper(),'server_still_running':server.poll() is None}
                   print(json.dumps(summary))
-                  if second.returncode != 0 or not summary['same_session'] or not resumed_context or not summary['synthetic_reply']: raise SystemExit(1)
+                  if second.returncode!=0 or not summary['same_session'] or not summary['model_recalled_marker']: raise SystemExit(1)
               finally:
-                  server.shutdown(); server.server_close()
+                  server.terminate()
+                  try: server.wait(timeout=10)
+                  except subprocess.TimeoutExpired:
+                      server.kill(); server.wait()
+                  server_log.close()
           PY
           python3 "$RUNNER_TEMP/probe.py"
