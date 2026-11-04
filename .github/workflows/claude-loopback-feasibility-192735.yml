@@ -47,15 +47,23 @@ jobs:
                   exe=os.path.join(os.environ['RUNNER_TEMP'],'claude-proof','node_modules','.bin','claude')
                   base=[exe,'--bare','--print','--model','claude-sonnet-4-5','--tools','','--max-turns','1','--system-prompt','Reply concisely.','--output-format','json']
                   first=subprocess.run(base+['Remember the word LANTERN. Reply OK.'],cwd=t,env=env,text=True,capture_output=True,timeout=120)
-                  first_result=json.loads(first.stdout)
+                  def decode(label, process):
+                      try:
+                          value=json.loads(process.stdout)
+                      except Exception:
+                          print(json.dumps({'stage':label,'exit':process.returncode,'stdout_tail':process.stdout[-800:],'stderr_tail':process.stderr[-800:]}))
+                          raise
+                      print(json.dumps({'stage':label,'exit':process.returncode,'is_error':value.get('is_error'),'subtype':value.get('subtype'),'result':str(value.get('result',''))[:800],'stderr_tail':process.stderr[-500:]}))
+                      return value
+                  first_result=decode('first',first)
                   session_id=first_result.get('session_id')
-                  if first.returncode!=0 or not session_id: raise RuntimeError('first CLI call failed')
+                  if first.returncode!=0 or first_result.get('is_error') or not session_id: raise RuntimeError('first CLI call failed')
                   second=subprocess.run(base+['--resume',session_id,'What word did I ask you to remember? Reply only the word.'],cwd=t,env=env,text=True,capture_output=True,timeout=120)
-                  second_result=json.loads(second.stdout)
+                  second_result=decode('second',second)
                   result=str(second_result.get('result',''))
                   summary={'first_exit':first.returncode,'second_exit':second.returncode,'same_session':session_id==second_result.get('session_id'),'model_recalled_marker':'LANTERN' in result.upper(),'server_still_running':server.poll() is None}
                   print(json.dumps(summary))
-                  if second.returncode!=0 or not summary['same_session'] or not summary['model_recalled_marker']: raise SystemExit(1)
+                  if second.returncode!=0 or second_result.get('is_error') or not summary['same_session'] or not summary['model_recalled_marker']: raise SystemExit(1)
               finally:
                   server.terminate()
                   try: server.wait(timeout=10)
