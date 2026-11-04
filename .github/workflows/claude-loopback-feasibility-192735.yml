@@ -8,31 +8,32 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Build pinned llama.cpp server
+      - name: Fetch checksum-pinned public llama.cpp CPU binary
         shell: bash
         run: |
-          git init "$RUNNER_TEMP/llama"
-          git -C "$RUNNER_TEMP/llama" fetch --depth=1 https://github.com/ggml-org/llama.cpp.git 8642541b255bfb5dc39cd351a178be09013a55d6
-          git -C "$RUNNER_TEMP/llama" checkout --detach FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/llama" rev-parse HEAD)" = 8642541b255bfb5dc39cd351a178be09013a55d6
-          cmake -S "$RUNNER_TEMP/llama" -B "$RUNNER_TEMP/llama-build" -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/llama-build" --target llama-server --parallel 2
+          curl --fail --location --max-time 120 -o "$RUNNER_TEMP/llama.tar.gz" https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-x64.tar.gz
+          echo "368227edcc229be5f9bed16a2223d79b5e41d0ac2e19bcf5825e82291c060e55  $RUNNER_TEMP/llama.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/llama-bin"
+          tar -xzf "$RUNNER_TEMP/llama.tar.gz" -C "$RUNNER_TEMP/llama-bin"
       - name: Fetch checksum-pinned public model and CLI
         shell: bash
         run: |
-          curl --fail --location --max-time 300 -o "$RUNNER_TEMP/model.gguf" https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/df5bf01389a39c743ab467d734bf501681e041c5/qwen2.5-0.5b-instruct-q4_k_m.gguf
-          echo "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db  $RUNNER_TEMP/model.gguf" | sha256sum --check
+          curl --fail --location --max-time 300 -o "$RUNNER_TEMP/model.gguf" https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/62a8d092b0a1047016f3edbd0fde387598727aa5/qwen2.5-1.5b-instruct-q4_k_m.gguf
+          echo "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e  $RUNNER_TEMP/model.gguf" | sha256sum --check
           npm install --prefix "$RUNNER_TEMP/claude-proof" --no-audit --no-fund @anthropic-ai/claude-code@2.1.222
       - name: Exercise real CLI and local model
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/probe.py" <<'PY'
-          import json, os, subprocess, tempfile, time, urllib.request
+          import json, os, pathlib, subprocess, tempfile, time, urllib.request
           with tempfile.TemporaryDirectory(prefix='oc-local-model-') as t:
-              server_path=os.path.join(os.environ['RUNNER_TEMP'],'llama-build','bin','llama-server')
+              candidates=list(pathlib.Path(os.environ['RUNNER_TEMP'],'llama-bin').rglob('llama-server'))
+              if len(candidates)!=1: raise RuntimeError('expected one llama-server executable')
+              server_path=str(candidates[0])
               model=os.path.join(os.environ['RUNNER_TEMP'],'model.gguf')
               server_log=open(os.path.join(t,'server.log'),'w')
-              server=subprocess.Popen([server_path,'-m',model,'--alias','claude-sonnet-4-5','--host','127.0.0.1','--port','18333','--ctx-size','8192','--threads','2','--n-predict','64','--jinja','-ngl','0'],cwd=t,stdout=server_log,stderr=subprocess.STDOUT)
+              server_env={'PATH':os.environ['PATH'],'LD_LIBRARY_PATH':str(candidates[0].parent)}
+              server=subprocess.Popen([server_path,'-m',model,'--alias','claude-sonnet-4-5','--host','127.0.0.1','--port','18333','--ctx-size','8192','--threads','2','--n-predict','64','--jinja','-ngl','0'],cwd=t,env=server_env,stdout=server_log,stderr=subprocess.STDOUT)
               try:
                   deadline=time.monotonic()+120
                   while True:
