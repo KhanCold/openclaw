@@ -254,26 +254,34 @@ describe("Template project packages", () => {
     } satisfies Partial<TemplateProjectError>);
   });
 
-  it("builds byte-identical artifacts containing only declared project inputs", async () => {
-    const firstPath = output;
-    const secondPath = join(dirname(output), "second.tgz");
+  it.each([64, 1_680_008, 2 * 1024 * 1024])(
+    "builds byte-identical artifacts with a %i-byte package BOOTSTRAP.md",
+    async (bootstrapBytes) => {
+      const bootstrap = Buffer.alloc(bootstrapBytes, 0x61);
+      await writeFile(join(project, "BOOTSTRAP.md"), bootstrap);
+      const firstPath = output;
+      const secondPath = join(dirname(output), "second.tgz");
 
-    const first = await buildTemplateProject(project, firstPath);
-    const second = await buildTemplateProject(project, secondPath);
-    const validation = await validateTemplateProject(join(project, "workspace", "reference.md"));
-    const entries = await archiveEntries(firstPath);
+      const first = await buildTemplateProject(project, firstPath);
+      const second = await buildTemplateProject(project, secondPath);
+      const validation = await validateTemplateProject(join(project, "workspace", "reference.md"));
+      const entries = await archiveEntries(firstPath);
 
-    expect(await readFile(firstPath)).toEqual(await readFile(secondPath));
-    expect(first.integrity).toBe(second.integrity);
-    expect(first.excludedPaths).toEqual(["not-packed.txt"]);
-    expect(validation).toMatchObject({ ok: true, excludedPaths: ["not-packed.txt"] });
-    expect(entries).toEqual([
-      "package/BOOTSTRAP.md",
-      "package/CLAW.md",
-      "package/package.json",
-      "package/workspace/reference.md",
-    ]);
-  });
+      expect(await readFile(firstPath)).toEqual(await readFile(secondPath));
+      expect(first.integrity).toBe(second.integrity);
+      const unpacked = tempDirs.make("openclaw-template-bootstrap-unpacked-");
+      await tar.x({ cwd: unpacked, file: firstPath, strict: true });
+      expect(await readFile(join(unpacked, "package", "BOOTSTRAP.md"))).toEqual(bootstrap);
+      expect(first.excludedPaths).toEqual(["not-packed.txt"]);
+      expect(validation).toMatchObject({ ok: true, excludedPaths: ["not-packed.txt"] });
+      expect(entries).toEqual([
+        "package/BOOTSTRAP.md",
+        "package/CLAW.md",
+        "package/package.json",
+        "package/workspace/reference.md",
+      ]);
+    },
+  );
 
   it("preserves license metadata and a package-root LICENSE in the artifact", async () => {
     const unpacked = tempDirs.make("openclaw-template-license-unpacked-");
