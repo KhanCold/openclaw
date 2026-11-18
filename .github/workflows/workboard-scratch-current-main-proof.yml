@@ -1,6 +1,7 @@
 name: Workboard scratch prompt conflict repair proof
 
 on:
+  workflow_dispatch:
   push:
     branches: [proof/workboard-scratch-merge-2026-11-02]
 
